@@ -1,0 +1,5 @@
+<com.example.aiassistant.CustomFloatingBallView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/iv_ball"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:contentDescription="静默搜题" />

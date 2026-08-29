@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+
+    <!-- App 核心品牌色 — 禅意静心茶绿 (Sage & Matcha Green) -->
+    <color name="primary">#5C8271</color>
+    <color name="primary_dark">#3C5A4E</color>
+    <color name="primary_light">#88A798</color>
+    <color name="primary_bg">#F4EFEB</color>
+
+    <!-- 温馨暖沙原木背景体系 (Warm Linen & Sand Beige) -->
+    <color name="background">#FAF7F2</color>
+    <color name="background_card">#FFFFFF</color>
+    <color name="background_card_glass">#FCFAF7</color>
+
+    <!-- 禅风极极简文字颜色系统 (Warm Deep Stone & Charcoal) -->
+    <color name="text_primary">#3C3935</color>
+    <color name="text_secondary">#7A7065</color>
+    <color name="text_tertiary">#AFA599</color>
+
+    <!-- 柔和纸张边缘描边与阴影 (Soft Sandstone Borders) -->
+    <color name="border_light">#EAE1D4</color>
+    <color name="border_glass">#DFD5C6</color>
+    <color name="shadow_color">#0A3C3935</color>
+
+    <!-- 悬浮卡片专用体系 (Warm Soft Paper) -->
+    <color name="card_bg">#FCFAF7</color>
+    <color name="card_header_bg">#FAF7F2</color>
+    <color name="card_divider">#EAE1D4</color>
+    <color name="card_loading_text">#7A7065</color>
+    <color name="card_result_text">#3C3935</color>
+    <color name="card_close_btn">#AFA599</color>
+    <color name="card_title_text">#3C3935</color>
+
+    <!-- 温馨柿红专注系统色彩 (Soft Persimmon & Peach) -->
+    <color name="pomodoro_red">#D97A68</color>
+    <color name="pomodoro_red_light">#ECA294</color>
+    <color name="pomodoro_orange">#E08E79</color>
+
+    <!-- 答题正确/错误高阶状态色彩 (Soft Matcha & Terracotta) -->
+    <color name="correct_green">#6E8B75</color>
+    <color name="correct_green_bg">#1A6E8B75</color>
+    <color name="correct_green_border">#2A6E8B75</color>
+    <color name="incorrect_red">#D97A68</color>
+    <color name="incorrect_red_bg">#1AD97A68</color>
+    <color name="incorrect_red_border">#2AD97A68</color>
+
+    <!-- 标签专用配色 -->
+    <color name="tag_blue_bg">#F2ECE4</color>
+    <color name="tag_blue_text">#5C8271</color>
+    <color name="tag_blue_border">#D5C4B1</color>
+
+    <!-- 解析卡片暖色 (Warm Amber for analysis hints) -->
+    <color name="analysis_text">#A0705A</color>
+    <color name="analysis_text_title">#8B5E45</color>
+
+    <!-- 主色超浅底 -->
+    <color name="primary_surface">#0D5C8271</color>
+</resources>

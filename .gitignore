@@ -1,0 +1,29 @@
+*.iml
+.gradle
+/local.properties
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+*.apk
+
+# IDE
+.idea/
+.claude/
+.gstack/
+.kotlin/
+
+# 无关文件和目录
+__MACOSX/
+tiku/
+test_aar/
+test_aar_classes/
+com/
+docs/
+归档/
+高频800词/
+高频800词记忆版.md
+一般/
+CLAUDE.md

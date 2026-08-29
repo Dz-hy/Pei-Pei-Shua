@@ -1,0 +1,28 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- Base application theme. -->
+    <style name="Base.Theme.AIAssistant" parent="Theme.Material3.DayNight.NoActionBar">
+        <!-- 沉浸式状态栏与导航栏适配 -->
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@color/background</item>
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+        <!-- 核心配色体系 -->
+        <item name="colorPrimary">@color/primary</item>
+        <item name="colorSecondary">@color/primary_light</item>
+        <item name="android:windowBackground">@color/background</item>
+    </style>
+
+    <style name="Theme.AIAssistant" parent="Base.Theme.AIAssistant" />
+
+    <style name="TransparentDialog" parent="ThemeOverlay.Material3.MaterialAlertDialog">
+        <item name="android:backgroundDimEnabled">false</item>
+        <item name="android:windowIsFloating">true</item>
+    </style>
+
+    <style name="Theme.Transparent" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:backgroundDimEnabled">false</item>
+    </style>
+</resources>
