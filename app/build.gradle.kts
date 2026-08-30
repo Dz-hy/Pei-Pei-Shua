@@ -3,6 +3,9 @@ plugins {
     alias(libs.plugins.kotlin.android)
 }
 
+import java.text.SimpleDateFormat
+import java.util.Date
+
 buildDir = file("build-zen")
 
 android {
@@ -14,7 +17,8 @@ android {
         minSdk = 26
         targetSdk = 36
         versionCode = 1
-        versionName = "1.0"
+        // 每次构建自动变化的版号（如 1.0.08292145），用于确认真机安装的是哪个构建
+        versionName = "1.0." + SimpleDateFormat("MMddHHmm").format(Date())
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -66,5 +70,6 @@ dependencies {
     androidTestImplementation(libs.androidx.espresso.core)
     implementation(libs.paddleocr4android)
     implementation(libs.flexbox)
+    implementation(libs.jsoup)
     implementation(libs.wcdb)
 }

@@ -52,6 +52,7 @@
 
     <!-- ===== 内容区域 ===== -->
     <ScrollView
+        android:id="@+id/sv_content"
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1"
@@ -501,17 +502,37 @@
                 android:background="@drawable/bg_pomodoro_button" />
         </LinearLayout>
 
-        <!-- 第二行：导出长图 -->
-        <TextView
-            android:id="@+id/btn_export"
+        <!-- 第二行：手写批注 + 导出长图 -->
+        <LinearLayout
             android:layout_width="match_parent"
-            android:layout_height="44dp"
-            android:gravity="center"
-            android:text="导出长图"
-            android:textSize="14sp"
-            android:textStyle="bold"
-            android:textColor="@color/primary"
-            android:background="@drawable/bg_outline_button" />
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <TextView
+                android:id="@+id/btn_handwriting"
+                android:layout_width="0dp"
+                android:layout_height="44dp"
+                android:layout_weight="1"
+                android:layout_marginEnd="10dp"
+                android:gravity="center"
+                android:text="手写批注"
+                android:textSize="14sp"
+                android:textStyle="bold"
+                android:textColor="@color/primary"
+                android:background="@drawable/bg_outline_button" />
+
+            <TextView
+                android:id="@+id/btn_export"
+                android:layout_width="0dp"
+                android:layout_height="44dp"
+                android:layout_weight="1"
+                android:gravity="center"
+                android:text="导出长图"
+                android:textSize="14sp"
+                android:textStyle="bold"
+                android:textColor="@color/primary"
+                android:background="@drawable/bg_outline_button" />
+        </LinearLayout>
     </LinearLayout>
 
 </LinearLayout>

@@ -3,27 +3,32 @@
 /local.properties
 .DS_Store
 /build
+/build-zen
+/app/build-zen
 /captures
 .externalNativeBuild
 .cxx
 local.properties
 *.apk
 
-# IDE
+# IDE 与工具运行时状态（不提交）
 .idea/
 .claude/
 .gstack/
 .kotlin/
+.mimosa/
+.zcode/
+preview/
 
-# 无关文件和目录
+# 无关文件和目录（锚定仓库根目录，避免误伤 app/src/main/java/com/ 源码树）
 __MACOSX/
-tiku/
-test_aar/
-test_aar_classes/
-com/
-docs/
-归档/
-高频800词/
-高频800词记忆版.md
-一般/
-CLAUDE.md
+/tiku/
+/test_aar/
+/test_aar_classes/
+/com/
+/docs/
+/归档/
+/高频800词/
+/高频800词记忆版.md
+/一般/
+/CLAUDE.md

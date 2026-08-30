@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 手机端列表列数（平板/大屏在 values-sw600dp / values-sw840dp 中覆盖） -->
+<resources>
+    <!-- 错题本列表 -->
+    <integer name="wrong_questions_grid_columns">1</integer>
+    <!-- 词典查询结果 -->
+    <integer name="dictionary_grid_columns">1</integer>
+    <!-- 知识卡片分类入口 -->
+    <integer name="knowledge_category_columns">2</integer>
+    <!-- 知识卡片网格 -->
+    <integer name="knowledge_card_grid_columns">2</integer>
+</resources>

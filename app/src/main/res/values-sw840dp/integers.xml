@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 大屏平板 / 桌面模式（最小宽度 ≥ 840dp）列表列数 -->
+<resources>
+    <integer name="wrong_questions_grid_columns">3</integer>
+    <integer name="dictionary_grid_columns">2</integer>
+    <integer name="knowledge_category_columns">4</integer>
+    <integer name="knowledge_card_grid_columns">4</integer>
+</resources>

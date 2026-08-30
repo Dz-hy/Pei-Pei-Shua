@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TextView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/tv_ball_num"
+    android:layout_width="match_parent"
+    android:layout_height="40dp"
+    android:layout_margin="3dp"
+    android:gravity="center"
+    android:text="1"
+    android:textSize="14sp"
+    android:textStyle="bold"
+    android:textColor="#FFFFFF"
+    android:background="@drawable/bg_ball_unanswered" />

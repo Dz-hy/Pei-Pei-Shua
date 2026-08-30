@@ -100,6 +100,44 @@
         android:drawableTint="@color/primary"
         android:layout_marginBottom="2dp" />
 
+    <TextView
+        android:id="@+id/menu_timer"
+        android:layout_width="wrap_content"
+        android:layout_height="36dp"
+        android:gravity="center_vertical"
+        android:paddingStart="8dp"
+        android:paddingEnd="8dp"
+        android:text="开始计时"
+        android:textSize="12.5sp"
+        android:textColor="@color/text_primary"
+        android:background="@drawable/bg_menu_item_selector"
+        android:drawableStart="@drawable/ic_pomodoro"
+        android:drawablePadding="5dp"
+        android:drawableTint="@color/primary"
+        android:layout_marginBottom="2dp" />
+
+    <View
+        android:id="@+id/menu_divider_timer"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:visibility="gone" />
+
+    <TextView
+        android:id="@+id/menu_timer_history"
+        android:layout_width="wrap_content"
+        android:layout_height="36dp"
+        android:gravity="center_vertical"
+        android:paddingStart="8dp"
+        android:paddingEnd="8dp"
+        android:text="计时记录"
+        android:textSize="12.5sp"
+        android:textColor="@color/text_primary"
+        android:background="@drawable/bg_menu_item_selector"
+        android:drawableStart="@drawable/ic_question_bank"
+        android:drawablePadding="5dp"
+        android:drawableTint="@color/primary"
+        android:layout_marginBottom="2dp" />
+
     <View
         android:id="@+id/menu_divider_4"
         android:layout_width="match_parent"

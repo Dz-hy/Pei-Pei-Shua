@@ -1,0 +1,1281 @@
+package com.example.aiassistant
+
+import android.graphics.Bitmap
+import android.graphics.PixelFormat
+import android.graphics.Typeface
+import android.view.Gravity
+import android.view.LayoutInflater
+import android.view.MotionEvent
+import android.view.View
+import android.view.WindowManager
+import android.widget.LinearLayout
+import android.widget.TextView
+import android.widget.Toast
+import org.json.JSONObject
+
+/**
+ * 结果卡片管理 + JSON 渲染 + HTML 文本格式化（扩展函数）
+ */
+
+// ── 卡片生命周期 ──────────────────────────────────────────────────────
+
+internal fun ScreenCaptureService.showResultCard() {
+    removeResultCard()
+
+    val displayMode = AppPreferences.getCardDisplayMode(this)
+    val isDefaultFullscreen = AppPreferences.isDefaultFullscreen(this)
+
+    var initialW: Int
+    var initialH: Int
+    var initialX: Int
+    var initialY: Int
+    var gravity = Gravity.TOP or Gravity.START
+    var animate = false
+
+    when {
+        isDefaultFullscreen -> {
+            initialW = screenWidth; initialH = screenHeight
+            initialX = 0; initialY = 0
+        }
+        displayMode == AppPreferences.CARD_MODE_BOTTOM -> {
+            // 底部弹出模式：全宽，屏幕75%高度，从底部弹出
+            initialW = screenWidth
+            initialH = (screenHeight * 0.75).toInt()
+            initialX = 0
+            gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+            initialY = 0
+            animate = true
+        }
+        displayMode == AppPreferences.CARD_MODE_ATTACHED -> {
+            // 附着悬浮球模式：在悬浮球左侧弹出
+            val ballParams = floatBallParams
+            if (ballParams != null) {
+                val savedBounds = if (AppPreferences.isCardBoundsSaved(this)) AppPreferences.getCardBounds(this) else null
+                initialW = if (savedBounds != null && savedBounds[2] > 0) savedBounds[2] else dpToPx(340)
+                initialH = if (savedBounds != null && savedBounds[3] > 0) savedBounds[3] else dpToPx(280)
+                // 卡片在球的左侧，留 12dp 间距
+                initialX = ballParams.x - initialW - dpToPx(12)
+                // 卡片顶部对齐球的顶部
+                initialY = ballParams.y
+                // 如果左侧放不下，放到球的右侧
+                if (initialX < 0) {
+                    initialX = ballParams.x + ballParams.width + dpToPx(12)
+                }
+                // 如果右侧也放不下，居中显示
+                if (initialX + initialW > screenWidth) {
+                    initialX = (screenWidth - initialW) / 2
+                }
+                // 如果底部超出屏幕，向上调整
+                if (initialY + initialH > screenHeight) {
+                    initialY = screenHeight - initialH - dpToPx(16)
+                }
+            } else {
+                val savedBounds = if (AppPreferences.isCardBoundsSaved(this)) AppPreferences.getCardBounds(this) else null
+                initialW = if (savedBounds != null && savedBounds[2] > 0) savedBounds[2] else dpToPx(340)
+                initialH = if (savedBounds != null && savedBounds[3] > 0) savedBounds[3] else dpToPx(280)
+                initialX = (screenWidth - initialW) / 2
+                initialY = screenHeight / 2
+            }
+        }
+        AppPreferences.isCardBoundsSaved(this) -> {
+            val bounds = AppPreferences.getCardBounds(this)
+            initialX = bounds[0]; initialY = bounds[1]
+            initialW = bounds[2]; initialH = bounds[3]
+        }
+        else -> {
+            initialW = dpToPx(340); initialH = dpToPx(280)
+            initialX = (screenWidth - initialW) / 2
+            initialY = screenHeight / 2
+        }
+    }
+
+    val params = WindowManager.LayoutParams(
+        initialW, initialH,
+        WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+        WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM,
+        PixelFormat.TRANSLUCENT
+    ).apply {
+        this.gravity = gravity
+        x = initialX
+        y = initialY
+    }
+
+    resultCardView = LayoutInflater.from(this).inflate(R.layout.layout_float_result, null)
+
+    // 底部弹出模式：去掉底部圆角，像从屏幕底端生长出来
+    if (displayMode == AppPreferences.CARD_MODE_BOTTOM) {
+        resultCardView?.findViewById<View>(R.id.float_result_card)?.setBackgroundResource(R.drawable.bg_float_card_bottom)
+    }
+
+    resultCardView?.findViewById<View>(R.id.btn_close_result)?.setOnClickListener {
+        removeResultCard()
+    }
+    resultCardView?.findViewById<View>(R.id.btn_edit_card)?.setOnClickListener {
+        toggleEditMode(resultCardView!!)
+    }
+    resultCardView?.findViewById<View>(R.id.btn_export_card)?.setOnClickListener {
+        exportCardAsImage(resultCardView!!)
+    }
+
+    if (displayMode == AppPreferences.CARD_MODE_BOTTOM) {
+        setupBottomDrawerBehavior(resultCardView!!, params)
+    } else {
+        setupResultCardInteractions(resultCardView!!, params)
+    }
+
+    resultCardParams = params
+    windowManager.addView(resultCardView, params)
+    setupConfigToolbar(resultCardView!!)
+
+    // 底部弹出动画：高度从0增长到目标高度，像从底部生长出来
+    if (animate) {
+        val targetHeight = initialH
+        params.height = 1
+        try { windowManager.updateViewLayout(resultCardView, params) } catch (_: Exception) {}
+        resultCardView?.animate()
+            ?.setDuration(300)
+            ?.setInterpolator(android.view.animation.DecelerateInterpolator())
+            ?.setUpdateListener { animation ->
+                params.height = (targetHeight * animation.animatedFraction).toInt().coerceAtLeast(1)
+                try { windowManager.updateViewLayout(resultCardView, params) } catch (_: Exception) {}
+            }
+            ?.start()
+    }
+}
+
+internal fun ScreenCaptureService.setupResultCardInteractions(view: View, params: WindowManager.LayoutParams) {
+    val service = this
+    val header = view.findViewById<View>(R.id.layout_result_header)
+
+    // 1. 拖拽移动逻辑 (点击 Header)
+    header.setOnTouchListener(object : View.OnTouchListener {
+        private var initialX = 0
+        private var initialY = 0
+        private var initialTouchX = 0f
+        private var initialTouchY = 0f
+
+        override fun onTouch(v: View, event: MotionEvent): Boolean {
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    initialX = params.x
+                    initialY = params.y
+                    initialTouchX = event.rawX
+                    initialTouchY = event.rawY
+                    return true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    params.x = initialX + (event.rawX - initialTouchX).toInt()
+                    params.y = initialY + (event.rawY - initialTouchY).toInt()
+                    windowManager.updateViewLayout(view, params)
+                    return true
+                }
+                MotionEvent.ACTION_UP -> {
+                    if (!AppPreferences.isDefaultFullscreen(service)) {
+                        AppPreferences.saveCardBounds(service, params.x, params.y, params.width, params.height)
+                    }
+                    return true
+                }
+            }
+            return false
+        }
+    })
+
+    // 2. 8向缩放逻辑 (作用于根布局边缘)
+    view.setOnTouchListener(object : View.OnTouchListener {
+        private var initialX = 0
+        private var initialY = 0
+        private var initialWidth = 0
+        private var initialHeight = 0
+        private var initialTouchX = 0f
+        private var initialTouchY = 0f
+        private var mode = 0
+
+        private val EDGE_SIZE = dpToPx(40)
+
+        override fun onTouch(v: View, event: MotionEvent): Boolean {
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    val ex = event.x
+                    val ey = event.y
+                    val w = view.width
+                    val h = view.height
+
+                    val isLeft = ex < EDGE_SIZE
+                    val isRight = ex > w - EDGE_SIZE
+                    val isTop = ey < EDGE_SIZE
+                    val isBottom = ey > h - EDGE_SIZE
+
+                    mode = when {
+                        isLeft && isTop -> 5
+                        isRight && isTop -> 6
+                        isLeft && isBottom -> 7
+                        isRight && isBottom -> 8
+                        isLeft -> 1
+                        isTop -> 2
+                        isRight -> 3
+                        isBottom -> 4
+                        else -> 0
+                    }
+
+                    if (mode != 0) {
+                        initialX = params.x
+                        initialY = params.y
+                        initialWidth = params.width
+                        initialHeight = params.height
+                        initialTouchX = event.rawX
+                        initialTouchY = event.rawY
+                        return true
+                    }
+                    return false
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (mode == 0) return false
+                    val dx = (event.rawX - initialTouchX).toInt()
+                    val dy = (event.rawY - initialTouchY).toInt()
+
+                    var newX = initialX
+                    var newY = initialY
+                    var newW = initialWidth
+                    var newH = initialHeight
+
+                    val minW = dpToPx(240)
+                    val minH = dpToPx(200)
+
+                    if (mode in listOf(1, 5, 7)) {
+                        newW = (initialWidth - dx).coerceAtLeast(minW)
+                        newX = initialX + (initialWidth - newW)
+                    }
+                    if (mode in listOf(3, 6, 8)) {
+                        newW = (initialWidth + dx).coerceAtLeast(minW)
+                    }
+                    if (mode in listOf(2, 5, 6)) {
+                        newH = (initialHeight - dy).coerceAtLeast(minH)
+                        newY = initialY + (initialHeight - newH)
+                    }
+                    if (mode in listOf(4, 7, 8)) {
+                        newH = (initialHeight + dy).coerceAtLeast(minH)
+                    }
+
+                    params.x = newX
+                    params.y = newY
+                    params.width = newW
+                    params.height = newH
+                    windowManager.updateViewLayout(view, params)
+                    return true
+                }
+                MotionEvent.ACTION_UP -> {
+                    if (mode != 0) {
+                        if (!AppPreferences.isDefaultFullscreen(service)) {
+                            AppPreferences.saveCardBounds(service, params.x, params.y, params.width, params.height)
+                        }
+                        mode = 0
+                        return true
+                    }
+                }
+            }
+            return false
+        }
+    })
+}
+
+/**
+ * 底部弹出模式的抽屉行为：上拉展开、下拉收起/关闭
+ */
+internal fun ScreenCaptureService.setupBottomDrawerBehavior(view: View, params: WindowManager.LayoutParams) {
+    val header = view.findViewById<View>(R.id.layout_result_header)
+    val initialHeight = params.height
+    val expandedHeight = (screenHeight * 0.95).toInt()
+    val dismissThreshold = (screenHeight * 0.35).toInt()  // 下拉超过屏幕35%则关闭
+    var isExpanded = false
+
+    header.setOnTouchListener(object : View.OnTouchListener {
+        private var startY = 0f
+        private var startHeight = 0
+        private var dragging = false
+
+        override fun onTouch(v: View, event: MotionEvent): Boolean {
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    startY = event.rawY
+                    startHeight = params.height
+                    dragging = true
+                    return true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (!dragging) return false
+                    val dy = (startY - event.rawY).toInt() // 上滑为正
+
+                    // 下拉收缩（最小50dp），上拉展开
+                    val minH = dpToPx(50)
+                    val newH = (startHeight + dy).coerceIn(minH, expandedHeight)
+                    if (newH != params.height) {
+                        params.height = newH
+                        try { windowManager.updateViewLayout(view, params) } catch (_: Exception) {}
+                    }
+                    return true
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    if (!dragging) return false
+                    dragging = false
+                    val dy = (startY - event.rawY).toInt()
+                    val currentH = params.height
+                    val closeHeight = (initialHeight * 0.5).toInt()
+
+                    // 下拉超过阈值 或 卡片已缩小到一半以下 → 直接关闭
+                    if (dy < -dismissThreshold || currentH < closeHeight) {
+                        removeResultCard()
+                        return true
+                    }
+
+                    // 根据拖拽方向决定展开/收起
+                    val expandThreshold = (screenHeight * 0.08).toInt()
+                    val targetH = if (dy > expandThreshold) expandedHeight else initialHeight
+                    isExpanded = targetH == expandedHeight
+
+                    val startH = params.height
+                    view.animate()
+                        .setDuration(200)
+                        .setInterpolator(android.view.animation.DecelerateInterpolator())
+                        .setUpdateListener { animation ->
+                            val fraction = animation.animatedFraction
+                            params.height = startH + ((targetH - startH) * fraction).toInt()
+                            try { windowManager.updateViewLayout(view, params) } catch (_: Exception) {}
+                        }
+                        .start()
+                    return true
+                }
+            }
+            return false
+        }
+    })
+}
+
+internal fun ScreenCaptureService.removeResultCard() {
+    isCapturing = false
+    cancelCaptureTimeout()
+    isEditMode = false
+    clearDynamicState()
+    resultCardView?.let {
+        try { windowManager.removeView(it) } catch (_: Exception) {}
+        resultCardView = null
+    }
+    lastCroppedBitmap?.let {
+        if (!it.isRecycled) it.recycle()
+    }
+    lastCroppedBitmap = null
+    lastQuestionText = null
+    if (AppPreferences.isSilentSearchEnabled(this)) {
+        silentSearchText = null
+        silentSearchReady = false
+        reattachSmallBall()
+    }
+}
+
+// ── 内容更新 ──────────────────────────────────────────────────────────
+
+internal fun ScreenCaptureService.showLoading(text: String) {
+    mainHandler.post {
+        resultCardView?.let { card ->
+            card.findViewById<View>(R.id.layout_loading)?.visibility = View.VISIBLE
+            card.findViewById<TextView>(R.id.tv_loading)?.text = text
+            card.findViewById<View>(R.id.layout_content_wrapper)?.visibility = View.GONE
+        }
+    }
+}
+
+internal fun ScreenCaptureService.updateResultCard(text: String, isAiResponse: Boolean = false, onRenderFail: (() -> Unit)? = null) {
+    mainHandler.post {
+        resultCardView?.let { card ->
+            card.findViewById<View>(R.id.layout_loading)?.visibility = View.GONE
+            card.findViewById<View>(R.id.layout_content_wrapper)?.visibility = View.VISIBLE
+            val tvResult = card.findViewById<TextView>(R.id.tv_result)
+
+            if (isAiResponse) {
+                val json = tryParseJsonResponse(text)
+                if (json != null) {
+                    clearDynamicSections(card)
+                    try {
+                        val type = detectSchemaType(json)
+                        when (TeacherManager.activeTeacher.id) {
+                            "huasheng" -> renderHuasheng(card, json, type)
+                            else -> renderHuasheng(card, json, type)
+                        }
+                        showBankMatchTag(card)
+                        showPrimaryModelErrorTag(card)
+                    } catch (e: Exception) {
+                        if (onRenderFail != null) {
+                            onRenderFail()
+                        } else {
+                            hideAllSections(card)
+                            clearDynamicSections(card)
+                            tvResult?.visibility = View.VISIBLE
+                            tvResult?.text = formatSpannableText(cleanTextKeepSpan(text))
+                            showPrimaryModelErrorTag(card)
+                        }
+                    }
+                } else {
+                    if (onRenderFail != null) {
+                        onRenderFail()
+                    } else {
+                        hideAllSections(card)
+                        clearDynamicSections(card)
+                        tvResult?.visibility = View.VISIBLE
+                        tvResult?.text = formatSpannableText(cleanTextKeepSpan(text))
+                        showPrimaryModelErrorTag(card)
+                    }
+                }
+            } else {
+                hideAllSections(card)
+                clearDynamicSections(card)
+                tvResult?.visibility = View.VISIBLE
+                tvResult?.text = cleanHtmlText(text)
+                showPrimaryModelErrorTag(card)
+            }
+        }
+    }
+}
+
+/** 清除动态添加的类型专属 View（tv_result 之后的所有子 View） */
+internal fun ScreenCaptureService.clearDynamicSections(card: View) {
+    val contentLayout = card.findViewById<View>(R.id.zoomable_content)?.let {
+        (it as? com.example.aiassistant.ZoomableLayout)?.getChildAt(0)
+    } as? LinearLayout ?: return
+    val tvResult = card.findViewById<View>(R.id.tv_result) ?: return
+    val resultIdx = contentLayout.indexOfChild(tvResult)
+    if (resultIdx >= 0) {
+        while (contentLayout.childCount > resultIdx + 1) {
+            contentLayout.removeViewAt(resultIdx + 1)
+        }
+    }
+}
+
+/** 在结果卡片顶部显示题库命中标签 */
+internal fun ScreenCaptureService.showBankMatchTag(card: View) {
+    val match = lastBankMatch ?: return
+    val d = resources.displayMetrics.density
+    val dp6 = (6 * d).toInt()
+    val dp3 = (3 * d).toInt()
+    val dp4 = (4 * d).toInt()
+
+    val layoutTags = card.findViewById<LinearLayout>(R.id.layout_tags) ?: return
+    layoutTags.visibility = View.VISIBLE
+
+    // 题库命中标签（绿色）
+    val bankTag = TextView(this).apply {
+        layoutParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { marginEnd = dp4 }
+        text = "题库命中"
+        textSize = 10.5f
+        setTextColor(0xFF10B981.toInt())
+        setTypeface(null, Typeface.BOLD)
+        setBackgroundResource(R.drawable.bg_tag_green)
+        setPadding(dp6, dp3, dp6, dp3)
+    }
+
+    // 答案标签（蓝色）
+    val answerTag = TextView(this).apply {
+        layoutParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { marginEnd = dp4 }
+        text = "正确答案: ${match.answer}"
+        textSize = 10.5f
+        setTextColor(0xFF3B82F6.toInt())
+        setTypeface(null, Typeface.BOLD)
+        setBackgroundResource(R.drawable.bg_tag_blue)
+        setPadding(dp6, dp3, dp6, dp3)
+    }
+
+    // 插入到标签行最前面
+    layoutTags.addView(bankTag, 0)
+    layoutTags.addView(answerTag, 1)
+}
+
+/** 在结果卡片顶部显示主模型故障告警标签（点击可查看详细故障诊断与排查指南） */
+internal fun ScreenCaptureService.showPrimaryModelErrorTag(card: View) {
+    val error = primaryModelError ?: return
+    val d = resources.displayMetrics.density
+    val dp6 = (6 * d).toInt()
+    val dp3 = (3 * d).toInt()
+    val dp4 = (4 * d).toInt()
+
+    val layoutTags = card.findViewById<LinearLayout>(R.id.layout_tags) ?: return
+    layoutTags.visibility = View.VISIBLE
+
+    // 故障告警标签（红色）
+    val errorTag = TextView(this).apply {
+        layoutParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { marginEnd = dp4 }
+        text = "⚠️ 主模型异常"
+        textSize = 10.5f
+        setTextColor(0xFFEF4444.toInt()) // 鲜红色
+        setTypeface(null, Typeface.BOLD)
+        setBackgroundResource(R.drawable.bg_tag_red)
+        setPadding(dp6, dp3, dp6, dp3)
+        
+        setOnClickListener {
+            // 点击弹出排查报告对话框（后台服务弹窗需指定 TYPE_APPLICATION_OVERLAY 窗口类型）
+            val contextThemeWrapper = androidx.appcompat.view.ContextThemeWrapper(this@showPrimaryModelErrorTag, R.style.Theme_AIAssistant)
+            val dialog = androidx.appcompat.app.AlertDialog.Builder(contextThemeWrapper)
+                .setTitle("⚠️ 主模型故障诊断报告")
+                .setMessage(
+                    "主模型请求失败，系统已自动启用备用模型以保证搜题不中断。\n\n" +
+                    "【错误详情】\n" +
+                    "$error\n\n" +
+                    "【诊断与排查建议】\n" +
+                    "1. 🌐 连接超时或失败 (ConnectException / timeout)：某些直连官方 API 需要科学网络。请确认您的设备已连通科学网络，或者进入「AI大模型管理」修改 Base URL 镜像。\n" +
+                    "2. 🔑 鉴权未通过 (401 Unauthorized)：您的 API Key 填错了，或者复制时带入了多余空格，请在设置中重新检查并填写。\n" +
+                    "3. 💳 账户权限不足 (403 / 429)：API 额度可能已耗尽，或请求超过每分钟限制。"
+                )
+                .setPositiveButton("我知道了", null)
+                .setNeutralButton("复制报错") { _, _ ->
+                    val clipboard = getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                    val clip = android.content.ClipData.newPlainText("AI Error", error)
+                    clipboard.setPrimaryClip(clip)
+                    Toast.makeText(this@showPrimaryModelErrorTag, "已复制报错详情", Toast.LENGTH_SHORT).show()
+                }
+                .create()
+            
+            dialog.window?.setType(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY)
+            dialog.show()
+        }
+    }
+
+    // 插入到标签行的最前面，十分醒目但绝不侵占内容排版
+    layoutTags.addView(errorTag, 0)
+}
+
+internal fun ScreenCaptureService.hideAllSections(card: View) {
+    card.findViewById<View>(R.id.layout_tags)?.visibility = View.GONE
+    card.findViewById<View>(R.id.layout_question)?.visibility = View.GONE
+    card.findViewById<View>(R.id.layout_answer)?.visibility = View.GONE
+    card.findViewById<View>(R.id.tv_options_title)?.visibility = View.GONE
+    card.findViewById<View>(R.id.layout_options_container)?.visibility = View.GONE
+    card.findViewById<View>(R.id.tv_logical_title)?.visibility = View.GONE
+    card.findViewById<View>(R.id.layout_logical_labels)?.visibility = View.GONE
+}
+
+// ── JSON 解析与渲染 ───────────────────────────────────────────────────
+
+internal fun ScreenCaptureService.tryParseJsonResponse(text: String): JSONObject? {
+    return try {
+        var cleaned = cleanTextKeepSpan(text)
+
+        // 更稳健的 Markdown 代码块剥离
+        val fencePattern = Regex("```[a-zA-Z]*\\s*")
+        cleaned = cleaned.replace(fencePattern, "")
+        cleaned = cleaned.replace("```", "")
+
+        val firstBrace = cleaned.indexOf('{')
+        val lastBrace = cleaned.lastIndexOf('}')
+        if (firstBrace != -1 && lastBrace > firstBrace) {
+            cleaned = cleaned.substring(firstBrace, lastBrace + 1)
+        }
+
+        val json = JSONObject(cleaned)
+        // 放宽条件：有任何已知字段就认为是有效 JSON
+        val hasKnownField = json.has("question") || json.has("correct_answer") ||
+            json.has("question_type") || json.has("options_analysis") ||
+            json.has("blanks") || json.has("visual_analysis") ||
+            json.has("structure_analysis") || json.has("key_elements") ||
+            json.has("word_pair") || json.has("logical_chain") ||
+            json.has("analysis") || json.has("passage_type") ||
+            json.has("explanation") || json.has("correct_option")
+        if (hasKnownField) json else null
+    } catch (e: Exception) {
+        android.util.Log.e("ResultCard", "JSON parse error: ${e.message}")
+        null
+    }
+}
+
+internal fun ScreenCaptureService.createTag(text: String, colorHex: String, bgRes: Int, d: Float): TextView {
+    val dp6 = (6*d).toInt(); val dp3 = (3*d).toInt()
+    return TextView(this).apply {
+        layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        this.text = text; textSize = 10.5f; setTextColor(android.graphics.Color.parseColor(colorHex))
+        setTypeface(null, android.graphics.Typeface.BOLD); setBackgroundResource(bgRes); setPadding(dp6,dp3,dp6,dp3)
+    }
+}
+
+// ── HTML 文本格式化 ───────────────────────────────────────────────────
+
+internal fun ScreenCaptureService.cleanHtmlText(text: String): String {
+    return text
+        .replace(Regex("<br\\s*/?>", RegexOption.IGNORE_CASE), "\n")
+        .replace(Regex("</?p[^>]*>", RegexOption.IGNORE_CASE), "\n")
+        .replace(Regex("</?div[^>]*>", RegexOption.IGNORE_CASE), "\n")
+        .replace(Regex("<[^>]+>"), "")
+        .replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace(Regex("\\n{3,}"), "\n\n")
+        .trim()
+}
+
+/** 清理 HTML 但保留 <span> 标签（用于 formatSpannableText 红色标注） */
+internal fun ScreenCaptureService.cleanTextKeepSpan(text: String): String {
+    return text
+        .replace(Regex("<br\\s*/?>", RegexOption.IGNORE_CASE), "\n")
+        .replace(Regex("</?p[^>]*>", RegexOption.IGNORE_CASE), "\n")
+        .replace(Regex("</?div[^>]*>", RegexOption.IGNORE_CASE), "\n")
+        .replace(Regex("<(?!/?span\\b)[^>]+>"), "")
+        .replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace(Regex("\\n{3,}"), "\n\n")
+        .trim()
+}
+
+internal fun ScreenCaptureService.formatSpannableText(text: String): CharSequence {
+    val builder = android.text.SpannableStringBuilder()
+    var i = 0
+    val spanOpen = "<span style='color:red'>"
+    val spanClose = "</span>"
+    while (i < text.length) {
+        val tildeIdx = text.indexOf("~~", i)
+        val spanIdx = text.indexOf(spanOpen, i)
+        val nextTilde = if (tildeIdx != -1) tildeIdx else Int.MAX_VALUE
+        val nextSpan = if (spanIdx != -1) spanIdx else Int.MAX_VALUE
+
+        if (nextTilde == Int.MAX_VALUE && nextSpan == Int.MAX_VALUE) {
+            builder.append(text.substring(i)); break
+        }
+
+        if (nextTilde <= nextSpan) {
+            builder.append(text.substring(i, tildeIdx))
+            val endIdx = text.indexOf("~~", tildeIdx + 2)
+            if (endIdx != -1) {
+                val hl = text.substring(tildeIdx + 2, endIdx)
+                val s = builder.length; builder.append(hl)
+                builder.setSpan(android.text.style.ForegroundColorSpan(android.graphics.Color.parseColor("#2563EB")), s, builder.length, android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+                builder.setSpan(android.text.style.StyleSpan(android.graphics.Typeface.BOLD), s, builder.length, android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+                i = endIdx + 2
+            } else { builder.append(text.substring(tildeIdx)); break }
+        } else {
+            builder.append(text.substring(i, spanIdx))
+            val closeIdx = text.indexOf(spanClose, spanIdx)
+            if (closeIdx != -1) {
+                val inner = text.substring(spanIdx + spanOpen.length, closeIdx)
+                val lastChar = if (builder.isNotEmpty()) builder[builder.length - 1] else ' '
+                val hasLeftBracket = lastChar == '(' || lastChar == '（'
+                val afterSpan = closeIdx + spanClose.length
+                val nextChar = if (afterSpan < text.length) text[afterSpan] else ' '
+                val hasRightBracket = nextChar == ')' || nextChar == '）'
+
+                if (hasLeftBracket) {
+                    val s = builder.length - 1
+                    builder.append(inner)
+                    if (hasRightBracket) { builder.append(nextChar); i = afterSpan + 1 } else { builder.append("）"); i = afterSpan }
+                    builder.setSpan(android.text.style.ForegroundColorSpan(android.graphics.Color.parseColor("#DC2626")), s, builder.length, android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+                    builder.setSpan(android.text.style.StyleSpan(android.graphics.Typeface.BOLD), s, builder.length, android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+                } else {
+                    val s = builder.length; builder.append("（$inner")
+                    if (hasRightBracket) { builder.append(nextChar); i = afterSpan + 1 } else { builder.append("）"); i = afterSpan }
+                    builder.setSpan(android.text.style.ForegroundColorSpan(android.graphics.Color.parseColor("#DC2626")), s, builder.length, android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+                    builder.setSpan(android.text.style.StyleSpan(android.graphics.Typeface.BOLD), s, builder.length, android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+                }
+            } else { builder.append(text.substring(spanIdx)); break }
+        }
+    }
+    return builder
+}
+
+// ── 编辑模式 ────────────────────────────────────────────────────────
+@Volatile private var isEditMode = false
+@Volatile internal var resultCardParams: WindowManager.LayoutParams? = null
+
+internal fun ScreenCaptureService.toggleEditMode(card: View) {
+    isEditMode = !isEditMode
+    val btnEdit = card.findViewById<TextView>(R.id.btn_edit_card)
+    btnEdit?.text = if (isEditMode) "✓" else "✎"
+    btnEdit?.setTextColor(if (isEditMode) 0xFF10B981.toInt() else 0xFF3B82F6.toInt())
+
+    val params = resultCardParams ?: return
+    if (isEditMode) {
+        // 去掉 FLAG_ALT_FOCUSABLE_IM 以允许键盘弹出
+        params.flags = params.flags and WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM.inv()
+    } else {
+        params.flags = params.flags or WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM
+    }
+    try { windowManager.updateViewLayout(card, params) } catch (_: Exception) {}
+
+    swapTextEditable(card.findViewById(R.id.scroll_result), isEditMode)
+}
+
+private fun swapTextEditable(parent: View?, editable: Boolean) {
+    if (parent == null) return
+    if (parent is android.view.ViewGroup) {
+        for (i in 0 until parent.childCount) {
+            val child = parent.getChildAt(i)
+            if (child is TextView && child.id != R.id.btn_edit_card
+                && child.id != R.id.btn_export_card && child.id != R.id.btn_close_result
+                && child.id != R.id.tv_loading && child.tag != "no_edit") {
+                if (editable && child !is android.widget.EditText) {
+                    val editText = android.widget.EditText(child.context).apply {
+                        setText(child.text)
+                        textSize = child.textSize / child.context.resources.displayMetrics.scaledDensity
+                        setTextColor(child.currentTextColor)
+                        setTypeface(child.typeface)
+                        setLineSpacing(child.lineSpacingExtra, child.lineSpacingMultiplier)
+                        setPadding(child.paddingLeft, child.paddingTop, child.paddingRight, child.paddingBottom)
+                        layoutParams = child.layoutParams
+                        id = child.id
+                        tag = "edit_swap" // 标记以便换回
+                        background = android.graphics.drawable.ColorDrawable(0x20FFFFFF)
+                        isFocusable = true; isFocusableInTouchMode = true
+                        inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                    }
+                    val vg = child.parent as? android.view.ViewGroup ?: continue
+                    val idx = vg.indexOfChild(child)
+                    vg.removeView(child)
+                    vg.addView(editText, idx)
+                } else if (!editable && child is android.widget.EditText && child.tag == "edit_swap") {
+                    val textView = TextView(child.context).apply {
+                        text = child.text
+                        textSize = child.textSize / child.context.resources.displayMetrics.scaledDensity
+                        setTextColor(child.currentTextColor)
+                        setTypeface(child.typeface)
+                        setLineSpacing(child.lineSpacingExtra, child.lineSpacingMultiplier)
+                        setPadding(child.paddingLeft, child.paddingTop, child.paddingRight, child.paddingBottom)
+                        layoutParams = child.layoutParams
+                        id = child.id
+                        setTextIsSelectable(true)
+                    }
+                    val vg = child.parent as? android.view.ViewGroup ?: continue
+                    val idx = vg.indexOfChild(child)
+                    vg.removeView(child)
+                    vg.addView(textView, idx)
+                }
+            } else {
+                swapTextEditable(child, editable)
+            }
+        }
+    }
+}
+
+// ── 导出图片 ────────────────────────────────────────────────────────
+
+internal fun ScreenCaptureService.exportCardAsImage(card: View) {
+    try {
+        val content = card.findViewById<View>(R.id.layout_content_wrapper) ?: return
+        // 先关闭编辑模式
+        if (isEditMode) toggleEditMode(card)
+
+        val bitmap = android.graphics.Bitmap.createBitmap(
+            content.width, content.height,
+            android.graphics.Bitmap.Config.ARGB_8888
+        )
+        val canvas = android.graphics.Canvas(bitmap)
+        canvas.drawColor(android.graphics.Color.WHITE)
+        content.draw(canvas)
+
+        // 保存到缓存目录
+        val file = java.io.File(cacheDir, "ai_answer_${System.currentTimeMillis()}.png")
+        java.io.FileOutputStream(file).use { fos ->
+            bitmap.compress(Bitmap.CompressFormat.PNG, 100, fos)
+        }
+        bitmap.recycle()
+
+        // 通过系统分享
+        val uri = androidx.core.content.FileProvider.getUriForFile(
+            this, "$packageName.fileprovider", file
+        )
+        val shareIntent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+            type = "image/png"
+            putExtra(android.content.Intent.EXTRA_STREAM, uri)
+            addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        val chooser = android.content.Intent.createChooser(shareIntent, "导出答案卡片")
+        chooser.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+        startActivity(chooser)
+    } catch (e: Exception) {
+        android.util.Log.e("ResultCard", "Export failed", e)
+        android.widget.Toast.makeText(this, "导出失败：${e.message}", android.widget.Toast.LENGTH_SHORT).show()
+    }
+}
+
+private fun ScreenCaptureService.setupConfigToolbar(card: android.view.View) {
+    val tvTeacher = card.findViewById<android.widget.TextView>(R.id.tv_active_teacher_float)
+    val tvType = card.findViewById<android.widget.TextView>(R.id.tv_active_type_float)
+    val tvMode = card.findViewById<android.widget.TextView>(R.id.tv_active_mode_float)
+
+    val panelTeacher = card.findViewById<android.view.View>(R.id.panel_switch_teacher)
+    val panelType = card.findViewById<android.view.View>(R.id.panel_switch_type)
+
+    val btnTeacher = card.findViewById<android.view.View>(R.id.btn_switch_teacher_float)
+    val btnType = card.findViewById<android.view.View>(R.id.btn_switch_type_float)
+    val btnMode = card.findViewById<android.view.View>(R.id.btn_switch_mode_float)
+
+    if (tvTeacher == null || tvType == null || panelTeacher == null || panelType == null || btnTeacher == null || btnType == null) {
+        return
+    }
+
+    val currentType = AppPreferences.getCurrentQuestionType(this)
+
+    // Bind current active values
+    tvTeacher.text = "👤 老师: ${TeacherManager.activeTeacher.name}"
+    tvType.text = "🏷️ 题型: ${currentType.displayName}"
+
+    if (tvMode != null && btnMode != null) {
+        if (currentType == QuestionType.TU_XING_TUI_LI) {
+            tvMode.text = "🔮 模式: 仅截图"
+        } else {
+            val mode = AppPreferences.getAnalysisMode(this)
+            tvMode.text = if (mode == AppPreferences.ANALYSIS_MODE_VISION) "🔮 模式: 截图" else "🔮 模式: 文字"
+        }
+
+        btnMode.setOnClickListener {
+            val qType = AppPreferences.getCurrentQuestionType(this)
+            if (qType == QuestionType.TU_XING_TUI_LI) {
+                android.widget.Toast.makeText(this, "图形推理题只能发送截图解析", android.widget.Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+
+            // 切换模式
+            val currentMode = AppPreferences.getAnalysisMode(this)
+            val newMode = if (currentMode == AppPreferences.ANALYSIS_MODE_VISION) AppPreferences.ANALYSIS_MODE_TEXT else AppPreferences.ANALYSIS_MODE_VISION
+            AppPreferences.setAnalysisMode(this, newMode)
+
+            tvMode.text = if (newMode == AppPreferences.ANALYSIS_MODE_VISION) "🔮 模式: 截图" else "🔮 模式: 文字"
+            
+            val modeStr = if (newMode == AppPreferences.ANALYSIS_MODE_VISION) "截图模式（直接发图）" else "文字模式（OCR后解析）"
+            android.widget.Toast.makeText(this, "已切换为：$modeStr，正在重新分析...", android.widget.Toast.LENGTH_SHORT).show()
+
+            reRunAnalysis()
+        }
+    }
+
+    btnTeacher.setOnClickListener {
+        if (panelTeacher.visibility == android.view.View.VISIBLE) {
+            panelTeacher.visibility = android.view.View.GONE
+        } else {
+            panelTeacher.visibility = android.view.View.VISIBLE
+            panelType.visibility = android.view.View.GONE
+            populateTeachersFloat(card)
+        }
+    }
+
+    btnType.setOnClickListener {
+        if (panelType.visibility == android.view.View.VISIBLE) {
+            panelType.visibility = android.view.View.GONE
+        } else {
+            panelType.visibility = android.view.View.VISIBLE
+            panelTeacher.visibility = android.view.View.GONE
+            populateTypesFloat(card)
+        }
+    }
+}
+
+private fun ScreenCaptureService.populateTeachersFloat(card: android.view.View) {
+    val container = card.findViewById<android.widget.LinearLayout>(R.id.container_teachers) ?: return
+    container.removeAllViews()
+    val activeId = TeacherManager.activeTeacher.id
+    for (t in TeacherManager.allTeachers) {
+        val item = android.widget.TextView(this).apply {
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT, dpToPx(38)
+            )
+            text = if (t.id == activeId) "✓ ${t.name}" else "   ${t.name}"
+            textSize = 13f
+            setTextColor(if (t.id == activeId) 0xFF5C8271.toInt() else 0xFF3C3935.toInt())
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            setPadding(dpToPx(24), 0, dpToPx(24), 0)
+            setBackgroundResource(android.R.drawable.list_selector_background)
+            isClickable = true
+            isFocusable = true
+        }
+        item.setOnClickListener {
+            TeacherManager.switchTeacher(this, t.id)
+            card.findViewById<android.widget.TextView>(R.id.tv_active_teacher_float)?.text = "👤 老师: ${t.name}"
+            card.findViewById<android.view.View>(R.id.panel_switch_teacher)?.visibility = android.view.View.GONE
+            reRunAnalysis()
+        }
+        container.addView(item)
+    }
+}
+
+private fun ScreenCaptureService.populateTypesFloat(card: android.view.View) {
+    val container = card.findViewById<android.widget.LinearLayout>(R.id.container_types) ?: return
+    container.removeAllViews()
+    val activeType = AppPreferences.getCurrentQuestionType(this)
+    for (type in QuestionType.entries) {
+        val item = android.widget.TextView(this).apply {
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT, dpToPx(38)
+            )
+            text = if (type == activeType) "✓ ${type.displayName}" else "   ${type.displayName}"
+            textSize = 13f
+            setTextColor(if (type == activeType) 0xFF5C8271.toInt() else 0xFF3C3935.toInt())
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            setPadding(dpToPx(24), 0, dpToPx(24), 0)
+            setBackgroundResource(android.R.drawable.list_selector_background)
+            isClickable = true
+            isFocusable = true
+        }
+        item.setOnClickListener {
+            AppPreferences.setCurrentQuestionType(this, type)
+            card.findViewById<android.widget.TextView>(R.id.tv_active_type_float)?.text = "🏷️ 题型: ${type.displayName}"
+            
+            // 题型切换时动态同步发送模式文本
+            val tvMode = card.findViewById<android.widget.TextView>(R.id.tv_active_mode_float)
+            if (tvMode != null) {
+                if (type == QuestionType.TU_XING_TUI_LI) {
+                    tvMode.text = "🔮 模式: 仅截图"
+                } else {
+                    val mode = AppPreferences.getAnalysisMode(this@populateTypesFloat)
+                    tvMode.text = if (mode == AppPreferences.ANALYSIS_MODE_VISION) "🔮 模式: 截图" else "🔮 模式: 文字"
+                }
+            }
+
+            card.findViewById<android.view.View>(R.id.panel_switch_type)?.visibility = android.view.View.GONE
+            reRunAnalysis()
+        }
+        container.addView(item)
+    }
+}
+
+/**
+ * 📷 词库截屏识词结果渲染卡片 (抹茶绿圆角禅意悬浮窗)
+ */
+fun ScreenCaptureService.showDictOcrResultCard(
+    matchedList: List<com.example.aiassistant.dictionary.DictItem>,
+    rawText: String
+) {
+    // 1. 如果已有先前的卡片在，先清理掉它
+    removeResultCard()
+
+    // 2. 窗口参数
+    val params = WindowManager.LayoutParams(
+        dpToPx(340),
+        dpToPx(380), // 380dp 高，容纳足够多的选项词语
+        WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+        WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM,
+        PixelFormat.TRANSLUCENT
+    ).apply {
+        gravity = Gravity.CENTER
+    }
+
+    // 3. 构建根布局 (雅淡抹茶绿高层卡片)
+    val context = this
+    val rootView = LinearLayout(context).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(dpToPx(16), dpToPx(16), dpToPx(16), dpToPx(16))
+        background = android.graphics.drawable.GradientDrawable().apply {
+            setColor(0xFFF3F7F5.toInt()) // 雅淡抹茶绿
+            cornerRadius = dpToPx(24).toFloat()
+            setStroke(dpToPx(2), 0xFF8FBC8F.toInt()) // 抹茶绿禅意包边
+        }
+    }
+
+    // 4. 构建 Header (标题栏 + 拖动交互 + 关闭按钮)
+    val headerLayout = LinearLayout(context).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        layoutParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        )
+    }
+
+    val tvTitle = TextView(context).apply {
+        layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        text = "📖 截屏识词匹配结果"
+        textSize = 15f
+        setTextColor(0xFF333333.toInt())
+        setTypeface(null, Typeface.BOLD)
+    }
+
+    val btnClose = TextView(context).apply {
+        layoutParams = LinearLayout.LayoutParams(dpToPx(30), dpToPx(30))
+        text = "✕"
+        textSize = 14f
+        setTextColor(0xFF8FBC8F.toInt())
+        gravity = Gravity.CENTER
+        background = android.graphics.drawable.GradientDrawable().apply {
+            setColor(0xFFFFFFFF.toInt())
+            cornerRadius = dpToPx(15).toFloat()
+            setStroke(dpToPx(1), 0xFF8FBC8F.toInt())
+        }
+        setOnClickListener {
+            removeResultCard()
+        }
+    }
+
+    headerLayout.addView(tvTitle)
+    headerLayout.addView(btnClose)
+    rootView.addView(headerLayout)
+
+    // 拖动交互
+    headerLayout.setOnTouchListener(object : View.OnTouchListener {
+        private var initialX = 0; private var initialY = 0
+        private var initialTouchX = 0f; private var initialTouchY = 0f
+        override fun onTouch(v: View, event: MotionEvent): Boolean {
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    initialX = params.x; initialY = params.y
+                    initialTouchX = event.rawX; initialTouchY = event.rawY
+                    return true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    params.x = initialX + (event.rawX - initialTouchX).toInt()
+                    params.y = initialY + (event.rawY - initialTouchY).toInt()
+                    windowManager.updateViewLayout(rootView, params)
+                    return true
+                }
+            }
+            return false
+        }
+    })
+
+    // 5. 识别预览折叠区
+    val tvPreviewLabel = TextView(context).apply {
+        layoutParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = dpToPx(8) }
+        text = "🔍 截屏识别题目预览（点击展开/折叠）"
+        textSize = 11f
+        setTextColor(0xFF888888.toInt())
+    }
+    
+    val tvPreview = TextView(context).apply {
+        layoutParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = dpToPx(4) }
+        text = rawText
+        textSize = 11f
+        setTextColor(0xFF666666.toInt())
+        maxLines = 2
+        ellipsize = android.text.TextUtils.TruncateAt.END
+        visibility = View.GONE
+    }
+    
+    tvPreviewLabel.setOnClickListener {
+        tvPreview.visibility = if (tvPreview.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+    }
+    
+    rootView.addView(tvPreviewLabel)
+    rootView.addView(tvPreview)
+
+    // 6. 中间滚动内容区
+    val scrollContainer = android.widget.ScrollView(context).apply {
+        layoutParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            0,
+            1f
+        ).apply { topMargin = dpToPx(12) }
+    }
+
+    val listContainer = LinearLayout(context).apply {
+        orientation = LinearLayout.VERTICAL
+        layoutParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        )
+    }
+
+    if (matchedList.isEmpty()) {
+        val tvEmpty = TextView(context).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dpToPx(120)
+            )
+            text = "未在截屏选项中匹配到词库项\n💡 提示：框选行测试题可直接自动提取选项成语解析！"
+            textSize = 13f
+            setTextColor(0xFF999999.toInt())
+            gravity = Gravity.CENTER
+        }
+        listContainer.addView(tvEmpty)
+    } else {
+        // 依次渲染每一个匹配到的 DictItem
+        for (item in matchedList) {
+            val wordName: String
+            val pinyinText: String
+            val briefExpl: String
+            val tagText: String
+            val tagColorBg: Int
+            
+            when (item) {
+                is com.example.aiassistant.dictionary.DictItem.IdiomItem -> {
+                    wordName = item.data.word
+                    pinyinText = item.data.pinyin
+                    briefExpl = item.data.explanation
+                    tagText = "成语"
+                    tagColorBg = 0xFF5C8271.toInt() // 抹茶绿
+                }
+                is com.example.aiassistant.dictionary.DictItem.WordItem -> {
+                    wordName = item.data.word
+                    pinyinText = item.data.pinyin
+                    briefExpl = item.data.explanation
+                    tagText = "字"
+                    tagColorBg = 0xFF4A708B.toInt() // 雅致蓝
+                }
+                is com.example.aiassistant.dictionary.DictItem.CiItem -> {
+                    wordName = item.data.ci
+                    pinyinText = ""
+                    briefExpl = item.data.explanation
+                    tagText = "词语"
+                    tagColorBg = 0xFFCD853F.toInt() // 橘木黄
+                }
+                is com.example.aiassistant.dictionary.DictItem.XiehouyuItem -> {
+                    wordName = item.data.riddle
+                    pinyinText = ""
+                    briefExpl = "答案：${item.data.answer}"
+                    tagText = "歇后"
+                    tagColorBg = 0xFF8B4513.toInt() // 褐木棕
+                }
+            }
+
+            // 单个词条小卡片
+            val itemLayout = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dpToPx(12), dpToPx(12), dpToPx(12), dpToPx(12))
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { bottomMargin = dpToPx(8) }
+                background = android.graphics.drawable.GradientDrawable().apply {
+                    setColor(0xFFFFFFFF.toInt()) // 纯白卡片底色
+                    cornerRadius = dpToPx(12).toFloat()
+                    setStroke(dpToPx(1), 0xFFE5E7EB.toInt())
+                }
+                isClickable = true
+                isFocusable = true
+                
+                // 点击弹窗展示词语深度详情
+                setOnClickListener {
+                    showDictOcrDetailDialog(item)
+                }
+            }
+
+            // 左侧：标签 + 词语名
+            val leftContainer = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            }
+
+            val tvTag = TextView(context).apply {
+                text = tagText
+                textSize = 9.5f
+                setTextColor(0xFFFFFFFF.toInt())
+                setPadding(dpToPx(6), dpToPx(2), dpToPx(6), dpToPx(2))
+                background = android.graphics.drawable.GradientDrawable().apply {
+                    setColor(tagColorBg)
+                    cornerRadius = dpToPx(6).toFloat()
+                }
+            }
+
+            val tvWord = TextView(context).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { marginStart = dpToPx(8) }
+                text = wordName
+                textSize = 14f
+                setTextColor(0xFF222222.toInt())
+                setTypeface(null, Typeface.BOLD)
+            }
+
+            leftContainer.addView(tvTag)
+            leftContainer.addView(tvWord)
+            itemLayout.addView(leftContainer)
+
+            // 右侧：交互按钮 "查看 ➔"
+            val tvAction = TextView(context).apply {
+                text = "查看 ➔"
+                textSize = 11f
+                setTextColor(0xFF5C8271.toInt()) // 抹茶绿配色
+                setTypeface(null, Typeface.BOLD)
+                setPadding(dpToPx(8), dpToPx(4), dpToPx(8), dpToPx(4))
+                background = android.graphics.drawable.GradientDrawable().apply {
+                    setColor(0xFFEDF4F0.toInt()) // 淡淡抹茶绿背景
+                    cornerRadius = dpToPx(6).toFloat()
+                }
+            }
+            itemLayout.addView(tvAction)
+
+            listContainer.addView(itemLayout)
+        }
+    }
+
+    scrollContainer.addView(listContainer)
+    rootView.addView(scrollContainer)
+
+    // 7. 将悬浮窗展示在 WindowManager 中
+    resultCardView = rootView
+    windowManager.addView(rootView, params)
+}
+
+/**
+ * 弹出高保真抹茶绿圆角“词语深度解析详情框”
+ */
+private fun ScreenCaptureService.showDictOcrDetailDialog(item: com.example.aiassistant.dictionary.DictItem) {
+    val contextThemeWrapper = androidx.appcompat.view.ContextThemeWrapper(this, R.style.Theme_AIAssistant)
+    
+    val dialogTitle: String
+    val dialogMessage: String
+    
+    when (item) {
+        is com.example.aiassistant.dictionary.DictItem.IdiomItem -> {
+            dialogTitle = "成语：${item.data.word}"
+            dialogMessage = buildString {
+                append("【拼音】\n${item.data.pinyin}\n\n")
+                append("【解释】\n${item.data.explanation}\n\n")
+                if (item.data.derivation.isNotBlank() && item.data.derivation != "无") {
+                    append("【出处典故】\n${item.data.derivation}\n\n")
+                }
+                if (item.data.example.isNotBlank() && item.data.example != "无") {
+                    append("【例句】\n${item.data.example}\n")
+                }
+            }
+        }
+        is com.example.aiassistant.dictionary.DictItem.WordItem -> {
+            dialogTitle = "汉字：${item.data.word}"
+            dialogMessage = buildString {
+                append("【拼音】\n${item.data.pinyin}\n\n")
+                append("【部首】 ${item.data.radicals}  |  【笔画】 ${item.data.strokes} 画\n\n")
+                append("【解释】\n${item.data.explanation}\n\n")
+                if (item.data.more.isNotBlank() && item.data.more != "无") {
+                    append("【更多】\n${item.data.more}\n")
+                }
+            }
+        }
+        is com.example.aiassistant.dictionary.DictItem.CiItem -> {
+            dialogTitle = "词语：${item.data.ci}"
+            dialogMessage = buildString {
+                append("【解释】\n${item.data.explanation}\n")
+            }
+        }
+        is com.example.aiassistant.dictionary.DictItem.XiehouyuItem -> {
+            dialogTitle = "歇后语：${item.data.riddle}"
+            dialogMessage = buildString {
+                append("【答案】\n${item.data.answer}\n")
+            }
+        }
+    }
+
+    val dialog = androidx.appcompat.app.AlertDialog.Builder(contextThemeWrapper)
+        .setTitle(dialogTitle)
+        .setMessage(dialogMessage)
+        .setPositiveButton("确 定", null)
+        .create()
+
+    // 零权限 WindowManager 前台层级挂载
+    dialog.window?.setType(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY)
+    dialog.show()
+    
+    // 给详情 Dialog 自定义样式微调，渲染抹茶绿按钮
+    dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE)?.setTextColor(0xFF5C8271.toInt())
+}
+

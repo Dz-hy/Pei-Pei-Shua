@@ -39,6 +39,7 @@
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:networkSecurityConfig="@xml/network_security_config"
+        android:resizeableActivity="true"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.AIAssistant">
@@ -97,6 +98,42 @@
         <!-- 番茄钟应用拦截设置 -->
         <activity
             android:name=".pomodoro.AppBlockerSettingsActivity"
+            android:exported="false"
+            android:theme="@style/Theme.AIAssistant" />
+
+        <!-- 时政热点主页 -->
+        <activity
+            android:name=".shizheng.ShizhengActivity"
+            android:exported="false"
+            android:theme="@style/Theme.AIAssistant" />
+
+        <!-- 时政文章详情 -->
+        <activity
+            android:name=".shizheng.ShizhengArticleActivity"
+            android:exported="false"
+            android:theme="@style/Theme.AIAssistant" />
+
+        <!-- 时政练习 -->
+        <activity
+            android:name=".shizheng.ShizhengPracticeActivity"
+            android:exported="false"
+            android:theme="@style/Theme.AIAssistant" />
+
+        <!-- 时政错题本 -->
+        <activity
+            android:name=".shizheng.ShizhengWrongActivity"
+            android:exported="false"
+            android:theme="@style/Theme.AIAssistant" />
+
+        <!-- 时政错题详情 -->
+        <activity
+            android:name=".shizheng.ShizhengWrongDetailActivity"
+            android:exported="false"
+            android:theme="@style/Theme.AIAssistant" />
+
+        <!-- 悬浮球计时记录 -->
+        <activity
+            android:name=".TimerHistoryActivity"
             android:exported="false"
             android:theme="@style/Theme.AIAssistant" />
 
