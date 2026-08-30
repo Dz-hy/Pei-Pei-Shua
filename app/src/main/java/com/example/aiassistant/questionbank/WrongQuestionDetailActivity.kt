@@ -140,6 +140,64 @@ class WrongQuestionDetailActivity : AppCompatActivity() {
         }
     }
 
+    /** 重做此题：把单条错题送进练习页（选项/答题卡/报告/AI解析全套沿用） */
+    private fun startRedo() {
+        val intent = android.content.Intent(this, PracticeActivity::class.java)
+        intent.putStringArrayListExtra("wrong_practice_ids", arrayListOf(currentId))
+        intent.putExtra("module_name", "错题重练")
+        startActivity(intent)
+    }
+
+    /** 重新匹配题库原题：跑三级匹配链，候选列表让用户确认 */
+    private fun startRematch() {
+        val item = getCurrentItem() ?: return
+        if (item.questionText.isBlank()) {
+            Toast.makeText(this, "该错题没有保留 OCR 原文，无法重新匹配", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val progress = android.app.ProgressDialog(this).apply {
+            setMessage("正在通过三级匹配链检索题库…")
+            setCancelable(false)
+            show()
+        }
+        com.example.aiassistant.questionbank.QuestionMatcher.match(this, item.questionText) { result ->
+            runOnUiThread {
+                progress.dismiss()
+                val candidates = result.candidates
+                when {
+                    result.confidence == com.example.aiassistant.questionbank.QuestionMatcher.CONF_AUTO && result.question != null -> {
+                        applyRematch(result.question)
+                    }
+                    candidates.isNotEmpty() -> showRematchCandidateDialog(candidates)
+                    else -> Toast.makeText(this, "未在题库中找到相似题目（可先在设置里构建/补全向量索引）", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
+    private fun showRematchCandidateDialog(candidates: List<Question>) {
+        val labels = candidates.map { it.stem.take(60) + if (it.stem.length > 60) "…" else "" }
+            .toTypedArray() + arrayOf("都不是，保持 OCR 录入")
+        android.app.AlertDialog.Builder(this, R.style.TransparentDialog)
+            .setTitle("疑似原题（请确认）")
+            .setItems(labels) { dialog, which ->
+                if (which < candidates.size) {
+                    applyRematch(candidates[which])
+                } else {
+                    Toast.makeText(this, "已保持 OCR 录入", Toast.LENGTH_SHORT).show()
+                }
+                dialog.dismiss()
+            }
+            .show()
+    }
+
+    private fun applyRematch(question: Question) {
+        WrongQuestionManager.updateSnapshot(this, currentId, question)
+        cachedItem = null
+        Toast.makeText(this, "已匹配题库原题，OCR 原文已清除", Toast.LENGTH_SHORT).show()
+        recreate()
+    }
+
     private fun loadDetail() {
         val item = getCurrentItem() ?: run {
             Toast.makeText(this, "错题不存在", Toast.LENGTH_SHORT).show()
@@ -157,6 +215,19 @@ class WrongQuestionDetailActivity : AppCompatActivity() {
             tvBadge.text = "OCR识别"
             tvBadge.setTextColor(getColor(R.color.tag_blue_text))
             tvBadge.setBackgroundResource(R.drawable.bg_source_badge_ocr)
+        }
+
+        // 重做/重新匹配：有题面快照 → 重做此题；未匹配的 OCR 题 → 重新匹配
+        val btnRedo = findViewById<TextView>(R.id.btn_redo)
+        val btnRematch = findViewById<TextView>(R.id.btn_rematch)
+        if (item.isFromBank) {
+            btnRedo.visibility = View.VISIBLE
+            btnRematch.visibility = View.GONE
+            btnRedo.setOnClickListener { startRedo() }
+        } else {
+            btnRedo.visibility = View.GONE
+            btnRematch.visibility = if (item.questionText.isNotBlank()) View.VISIBLE else View.GONE
+            btnRematch.setOnClickListener { startRematch() }
         }
 
         // 题干

@@ -294,10 +294,89 @@ class AiModelFragment : Fragment() {
         val ballSize = AppPreferences.getFloatBallSize(ctx)
         sbBallSize.progress = ballSize
         tvBallSizeVal.text = "${ballSize}dp"
+
+        // 向量模型配置回显
+        view?.findViewById<EditText>(R.id.et_emb_base_url)?.setText(AppPreferences.getEmbBaseUrl(ctx))
+        view?.findViewById<EditText>(R.id.et_emb_key)?.setText(AppPreferences.getEmbKey(ctx))
+        view?.findViewById<EditText>(R.id.et_emb_model)?.setText(AppPreferences.getEmbModel(ctx))
+        refreshEmbIndexStatus()
+    }
+
+    /** 向量索引状态行刷新（DB 统计放后台线程） */
+    private fun refreshEmbIndexStatus() {
+        val ctx = context ?: return
+        val tv = view?.findViewById<TextView>(R.id.tv_emb_index_status) ?: return
+        val btn = view?.findViewById<com.google.android.material.button.MaterialButton>(R.id.btn_build_index)
+        if (com.example.aiassistant.questionbank.VectorIndexer.isRunning) {
+            tv.visibility = View.VISIBLE
+            tv.text = "索引构建中…（点击下方按钮可暂停）"
+            btn?.text = "暂停构建"
+            return
+        }
+        Thread {
+            val (done, total) = try {
+                val db = com.example.aiassistant.questionbank.QuestionBankDb(ctx)
+                db.countVectorized() to db.countAllQuestions()
+            } catch (e: Exception) {
+                -1 to -1
+            }
+            activity?.runOnUiThread {
+                if (!isAdded) return@runOnUiThread
+                tv.visibility = View.VISIBLE
+                tv.text = when {
+                    !AppPreferences.hasEmbConfig(ctx) -> "未配置向量模型，保存配置后再构建索引"
+                    done < 0 -> "索引进度：未知"
+                    total in 1..done -> "向量索引已完成：$done / $total 题"
+                    else -> "索引进度：$done / $total 题"
+                }
+                btn?.text = if (total > 0 && done >= total) "重建缺失向量（增量）" else "构建向量索引（全库，可暂停续跑）"
+            }
+        }.start()
     }
 
     private fun setupSettingsListeners() {
         val ctx = requireContext()
+
+        // ── 向量模型（错题匹配） ──
+        view?.findViewById<com.google.android.material.button.MaterialButton>(R.id.btn_save_emb)?.setOnClickListener {
+            val baseUrl = view?.findViewById<EditText>(R.id.et_emb_base_url)?.text?.toString()?.trim().orEmpty()
+            val key = view?.findViewById<EditText>(R.id.et_emb_key)?.text?.toString()?.trim().orEmpty()
+            val model = view?.findViewById<EditText>(R.id.et_emb_model)?.text?.toString()?.trim().orEmpty()
+            AppPreferences.setEmbBaseUrl(ctx, baseUrl)
+            AppPreferences.setEmbKey(ctx, key)
+            AppPreferences.setEmbModel(ctx, model)
+            Toast.makeText(ctx, if (AppPreferences.hasEmbConfig(ctx)) "向量模型配置已保存" else "Key/模型为空，向量匹配暂不可用", Toast.LENGTH_SHORT).show()
+            refreshEmbIndexStatus()
+        }
+        view?.findViewById<com.google.android.material.button.MaterialButton>(R.id.btn_build_index)?.setOnClickListener {
+            if (com.example.aiassistant.questionbank.VectorIndexer.isRunning) {
+                com.example.aiassistant.questionbank.VectorIndexer.pause()
+                Toast.makeText(ctx, "已请求暂停，当前批次完成后停止", Toast.LENGTH_SHORT).show()
+            } else {
+                if (!AppPreferences.hasEmbConfig(ctx)) {
+                    Toast.makeText(ctx, "请先填写并保存向量模型配置", Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+                com.example.aiassistant.questionbank.VectorIndexer.start(
+                    ctx,
+                    onProgress = { done, total ->
+                        activity?.runOnUiThread {
+                            view?.findViewById<TextView>(R.id.tv_emb_index_status)?.apply {
+                                visibility = View.VISIBLE
+                                text = "索引进度：$done / $total 题"
+                            }
+                        }
+                    },
+                    onFinished = { pausedOrError, message ->
+                        activity?.runOnUiThread {
+                            Toast.makeText(ctx, message, if (pausedOrError) Toast.LENGTH_LONG else Toast.LENGTH_SHORT).show()
+                            refreshEmbIndexStatus()
+                        }
+                    }
+                )
+                refreshEmbIndexStatus()
+            }
+        }
 
         rgCaptureMode.setOnCheckedChangeListener { _, id ->
             val mode = if (id == R.id.rb_fixed_area) AppPreferences.MODE_FIXED_AREA else AppPreferences.MODE_CUSTOM_AREA
@@ -686,8 +765,7 @@ class AiModelFragment : Fragment() {
     }
 
     private fun getWrongQuestionsJson(context: android.content.Context): String {
-        val raw = context.getSharedPreferences("wrong_questions_prefs", android.content.Context.MODE_PRIVATE)
-            .getString("wrong_questions_list", "[]") ?: "[]"
+        val raw = com.example.aiassistant.questionbank.WrongQuestionManager.exportLegacyJson(context)
         try {
             val arr = org.json.JSONArray(raw)
             for (i in 0 until arr.length()) {
@@ -744,6 +822,8 @@ class AiModelFragment : Fragment() {
                 .edit()
                 .putString("wrong_questions_list", arr.toString())
                 .apply()
+            // 错题本已迁至 WCDB：还原数据先进旧 SP，清迁移标记后下次读取幂等并入 DB
+            com.example.aiassistant.questionbank.WrongQuestionManager.invalidateMigration(context)
         } catch (e: Exception) {
             e.printStackTrace()
             context.getSharedPreferences("wrong_questions_prefs", android.content.Context.MODE_PRIVATE)
@@ -973,7 +1053,7 @@ class AiModelFragment : Fragment() {
 
         val etParent = EditText(ctx).apply {
             hint = "目标一级大分类 (例如: 判断推理)"
-            setText("自定义大分类")
+            setText("自建题库")
             textSize = 14f
             setBackgroundResource(R.drawable.bg_default_chip)
             val padding = (12 * resources.displayMetrics.density).toInt()
@@ -989,7 +1069,7 @@ class AiModelFragment : Fragment() {
 
         val etChild = EditText(ctx).apply {
             hint = "目标二级子分类 (例如: 类比推理)"
-            setText("自定义子分类")
+            setText(queryDisplayName(uri).substringBeforeLast(".").ifEmpty { "自定义子分类" })
             textSize = 14f
             setBackgroundResource(R.drawable.bg_default_chip)
             val padding = (12 * resources.displayMetrics.density).toInt()
@@ -1016,6 +1096,16 @@ class AiModelFragment : Fragment() {
             .create()
         importDialog.show()
         importDialog.capDialogWidth()
+    }
+
+    private fun queryDisplayName(uri: android.net.Uri): String {
+        return try {
+            context?.contentResolver?.query(
+                uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null
+            )?.use { c -> if (c.moveToFirst()) c.getString(0) ?: "" else "" } ?: ""
+        } catch (e: Exception) {
+            ""
+        }
     }
 
     private fun performBankImport(uri: android.net.Uri, parentModule: String, childModule: String) {

@@ -66,6 +66,10 @@ class PracticeActivity : AppCompatActivity() {
     private var questionCount: Int = 15
     private var rateMin: Int = 0
     private var rateMax: Int = 100
+    // 错题重练模式：传入错题 id 列表，题面来自错题快照；判分联动 mastered / wrongCount
+    private var wrongPracticeIds: List<String> = emptyList()
+    private val wrongIdByQuestionId = mutableMapOf<String, String>()  // 快照题id → 错题记录id
+    private val isWrongPractice: Boolean get() = wrongPracticeIds.isNotEmpty()
     private var questions: List<Question> = emptyList()
     private var currentIndex: Int = 0
     private var selectedOptions: IntArray = IntArray(0)  // 每题选择，-1 = 未作答
@@ -129,6 +133,7 @@ class PracticeActivity : AppCompatActivity() {
         questionCount = intent.getIntExtra("question_count", 15)
         rateMin = intent.getIntExtra("rate_min", 0)
         rateMax = intent.getIntExtra("rate_max", 100)
+        wrongPracticeIds = intent.getStringArrayListExtra("wrong_practice_ids") ?: emptyList()
 
         initViews()
         loadData()
@@ -257,6 +262,27 @@ try {
     }
 
     private fun loadData() {
+        if (isWrongPractice) {
+            val items = WrongQuestionManager.getWrongQuestions(this).filter { it.id in wrongPracticeIds }
+            wrongIdByQuestionId.clear()
+            questions = items.mapNotNull { wq ->
+                wq.snapshot?.also { wrongIdByQuestionId[it.id] = wq.id }
+            }
+            selectedOptions = IntArray(questions.size) { -1 }
+            results = arrayOfNulls(questions.size)
+            submitted = false
+            practiceStartTime = System.currentTimeMillis()
+            lastElapsedMs = 0
+
+            if (questions.isEmpty()) {
+                Toast.makeText(this, "这些错题没有可重做的题面（纯OCR题无法重做）", Toast.LENGTH_SHORT).show()
+                finish()
+                return
+            }
+            showQuestion(0)
+            return
+        }
+
         if (!QuestionBankManager.isLoaded()) {
             Toast.makeText(this, "题库加载中，请稍候...", Toast.LENGTH_SHORT).show()
             QuestionBankManager.addOnReadyListener(readyListener)
@@ -574,11 +600,18 @@ try {
         questions.forEachIndexed { i, q ->
             val sel = selectedOptions[i]
             if (sel >= 0) {
-                QuestionBankManager.markQuestionCompleted(q.id)
+                // 错题重练不算题库做题记录
+                if (!isWrongPractice) QuestionBankManager.markQuestionCompleted(q.id)
                 val correctIndex = q.answer.firstOrNull()?.minus('A') ?: -1
                 val correct = sel == correctIndex
                 results[i] = correct
-                if (correct) correctCount++ else wrongCount++
+                if (correct) {
+                    correctCount++
+                    // 错题重练答对：标记已掌握（记录保留，列表默认隐藏）
+                    if (isWrongPractice) {
+                        wrongIdByQuestionId[q.id]?.let { WrongQuestionManager.setMastered(this, it, true) }
+                    }
+                } else wrongCount++
             }
         }
 

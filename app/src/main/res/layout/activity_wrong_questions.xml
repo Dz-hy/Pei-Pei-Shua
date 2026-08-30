@@ -94,6 +94,40 @@
             android:focusable="true" />
     </LinearLayout>
 
+    <!-- ===== 操作栏：错题重练 + 已掌握开关 ===== -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:paddingHorizontal="16dp"
+        android:paddingBottom="12dp">
+
+        <TextView
+            android:id="@+id/btn_wrong_practice"
+            android:layout_width="0dp"
+            android:layout_height="40dp"
+            android:layout_weight="1"
+            android:gravity="center"
+            android:text="⚡ 错题重练"
+            android:textSize="14sp"
+            android:textStyle="bold"
+            android:textColor="@color/white"
+            android:background="@drawable/bg_pomodoro_button" />
+
+        <TextView
+            android:id="@+id/btn_toggle_mastered"
+            android:layout_width="0dp"
+            android:layout_height="40dp"
+            android:layout_weight="1"
+            android:layout_marginStart="10dp"
+            android:gravity="center"
+            android:text="显示已掌握"
+            android:textSize="14sp"
+            android:textStyle="bold"
+            android:textColor="@color/primary"
+            android:background="@drawable/bg_outline_button" />
+    </LinearLayout>
+
     <!-- ===== Empty Placeholder ===== -->
     <LinearLayout
         android:id="@+id/layout_empty"

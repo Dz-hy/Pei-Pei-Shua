@@ -9,11 +9,21 @@ import os
 import re
 import json
 import sys
+from pathlib import Path
 
 sys.stdout.reconfigure(encoding='utf-8')
 
 QA_ROOT = os.path.join(os.path.dirname(__file__), 'qa_md')
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), 'question_bank')
+
+
+def safe_output_path(*parts):
+    """拼接输出路径并校验不越出 OUTPUT_DIR（防路径穿越）"""
+    root = Path(OUTPUT_DIR).resolve()
+    path = (root / Path(*parts)).resolve()
+    if not path.is_relative_to(root):
+        raise ValueError(f'输出路径越界: {path}')
+    return path
 
 # 子类型标签 -> 短码（用于ID）
 SUBTYPE_CODE = {
@@ -348,9 +358,8 @@ def main():
                 'questions': questions,
             }
 
-            out_path = os.path.join(cat_output_dir, f'{type_name}.json')
-            with open(out_path, 'w', encoding='utf-8') as f:
-                json.dump(output, f, ensure_ascii=False, indent=2)
+            out_path = safe_output_path(category, f'{type_name}.json')
+            out_path.write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding='utf-8')
 
             index_data['categories'][category][type_name] = {
                 'count': len(questions),
@@ -364,9 +373,8 @@ def main():
     index_data['total'] = total_questions
 
     # 输出 index.json
-    index_path = os.path.join(OUTPUT_DIR, 'index.json')
-    with open(index_path, 'w', encoding='utf-8') as f:
-        json.dump(index_data, f, ensure_ascii=False, indent=2)
+    index_path = safe_output_path('index.json')
+    index_path.write_text(json.dumps(index_data, ensure_ascii=False, indent=2), encoding='utf-8')
 
     print(f"\n总计: {total_files} files -> {total_questions} questions")
     print(f"输出目录: {OUTPUT_DIR}")

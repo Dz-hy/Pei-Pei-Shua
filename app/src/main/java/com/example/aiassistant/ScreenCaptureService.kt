@@ -563,22 +563,30 @@ class ScreenCaptureService : Service() {
 
     private fun recordWrongQuestionDirectly(text: String, originalBitmap: Bitmap) {
         captureHandler?.post {
-            // 先搜题库，命中则用题库结构化数据
-            val bankMatch = QuestionBankManager.search(text)
-            if (bankMatch != null) {
-                WrongQuestionManager.addFromBank(this@ScreenCaptureService, bankMatch, originalBitmap)
-                Log.d(TAG, "错题录入：命中题库 ${bankMatch.id}")
-            } else {
-                WrongQuestionManager.addFromOcr(this@ScreenCaptureService, text, originalBitmap)
-                Log.d(TAG, "错题录入：题库未命中，保存OCR文本")
-            }
-            originalBitmap.recycle()
-            mainHandler.post {
-                isCapturing = false
-                isSilentCapture = false
-                cancelCaptureTimeout()
-                val msg = if (bankMatch != null) "📝 错题已录入（来自题库）" else "📝 错题已录入（OCR识别）"
-                Toast.makeText(this@ScreenCaptureService, msg, Toast.LENGTH_LONG).show()
+            // 三级匹配链：①FTS/LCS 快筛 ②向量召回 ③LLM 裁决
+            com.example.aiassistant.questionbank.QuestionMatcher.match(this@ScreenCaptureService, text) { result ->
+                val service = this@ScreenCaptureService
+                val matched = result.question
+                val fromBank = result.confidence == com.example.aiassistant.questionbank.QuestionMatcher.CONF_AUTO && matched != null
+                if (fromBank) {
+                    WrongQuestionManager.addFromBank(service, matched, originalBitmap)
+                    Log.d(TAG, "错题录入：匹配题库原题 ${matched.id}")
+                } else {
+                    WrongQuestionManager.addFromOcr(service, text, originalBitmap)
+                    Log.d(TAG, "错题录入：未确定匹配（${result.confidence}），保存OCR文本")
+                }
+                originalBitmap.recycle()
+                mainHandler.post {
+                    isCapturing = false
+                    isSilentCapture = false
+                    cancelCaptureTimeout()
+                    val msg = when {
+                        fromBank -> "📝 错题已录入（已匹配题库原题）"
+                        result.candidates.isNotEmpty() -> "📝 错题已录入（OCR识别）\n🔍 疑似题库原题，可在错题本详情「重新匹配」确认"
+                        else -> "📝 错题已录入（OCR识别）"
+                    }
+                    Toast.makeText(service, msg, Toast.LENGTH_LONG).show()
+                }
             }
         }
     }

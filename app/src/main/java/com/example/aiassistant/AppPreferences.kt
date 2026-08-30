@@ -81,6 +81,56 @@ object AppPreferences {
     fun setApiModel(context: Context, model: String) =
         prefs(context).edit().putString(KEY_API_MODEL, model).apply()
 
+    // ── 向量模型（embedding，错题三级匹配链第二级；DeepSeek 无 embeddings 接口需另配） ──
+
+    private const val KEY_EMB_BASE_URL = "emb_base_url"
+    private const val KEY_EMB_KEY = "emb_key"
+    private const val KEY_EMB_MODEL = "emb_model"
+    const val DEFAULT_EMB_BASE_URL = "https://api.siliconflow.cn"
+    const val DEFAULT_EMB_MODEL = "BAAI/bge-m3"
+
+    fun getEmbBaseUrl(context: Context): String =
+        prefs(context).getString(KEY_EMB_BASE_URL, DEFAULT_EMB_BASE_URL)?.takeIf { it.isNotBlank() }
+            ?: DEFAULT_EMB_BASE_URL
+
+    fun setEmbBaseUrl(context: Context, url: String) =
+        prefs(context).edit().putString(KEY_EMB_BASE_URL, url).apply()
+
+    fun getEmbKey(context: Context): String =
+        prefs(context).getString(KEY_EMB_KEY, "")?.takeIf { it.isNotBlank() } ?: ""
+
+    fun setEmbKey(context: Context, key: String) =
+        prefs(context).edit().putString(KEY_EMB_KEY, key).apply()
+
+    fun getEmbModel(context: Context): String =
+        prefs(context).getString(KEY_EMB_MODEL, DEFAULT_EMB_MODEL)?.takeIf { it.isNotBlank() }
+            ?: DEFAULT_EMB_MODEL
+
+    fun setEmbModel(context: Context, model: String) =
+        prefs(context).edit().putString(KEY_EMB_MODEL, model).apply()
+
+    /** 向量服务是否已配置（key + model 齐备才可用） */
+    fun hasEmbConfig(context: Context): Boolean =
+        getEmbKey(context).isNotBlank() && getEmbModel(context).isNotBlank()
+
+    // ── 错题匹配阈值（三级匹配链） ──
+    private const val KEY_MATCH_VECTOR_AUTO = "match_vector_auto_threshold"
+    private const val KEY_MATCH_VECTOR_MIN = "match_vector_min_threshold"
+
+    /** 向量相似度 ≥ 此值直接自动收录（高置信） */
+    fun getMatchVectorAutoThreshold(context: Context): Float =
+        prefs(context).getFloat(KEY_MATCH_VECTOR_AUTO, 0.85f)
+
+    fun setMatchVectorAutoThreshold(context: Context, v: Float) =
+        prefs(context).edit().putFloat(KEY_MATCH_VECTOR_AUTO, v).apply()
+
+    /** 向量召回下限：低于此值的候选不进入 LLM 裁决 */
+    fun getMatchVectorMinThreshold(context: Context): Float =
+        prefs(context).getFloat(KEY_MATCH_VECTOR_MIN, 0.60f)
+
+    fun setMatchVectorMinThreshold(context: Context, v: Float) =
+        prefs(context).edit().putFloat(KEY_MATCH_VECTOR_MIN, v).apply()
+
     // ── 老师系统 ──────────────────────────────────────────────────────
 
     fun getActiveTeacherId(context: Context): String =

@@ -14,13 +14,14 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
     companion object {
         private const val TAG = "QuestionBankDb"
         private const val DB_NAME = "question_bank_v2.db"
-        private const val DB_VERSION = 5
+        private const val DB_VERSION = 6
 
         const val T_MODULES = "modules"
         const val T_QUESTIONS = "questions"
         const val T_MATERIALS = "materials"
         const val T_FTS = "questions_fts"
         const val T_ANNOTATIONS = "question_annotations"
+        const val T_VECTORS = "question_vectors"
 
         // 模块定义：大模块 → 小模块列表
         val MODULE_TREE = mapOf(
@@ -132,6 +133,16 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
                 updated_at INTEGER
             )
         """)
+
+        // 题目向量表（错题三级匹配链第二级；FloatArray 序列化为 BLOB）
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS $T_VECTORS (
+                question_id TEXT PRIMARY KEY,
+                dim INTEGER NOT NULL,
+                vector BLOB NOT NULL,
+                FOREIGN KEY (question_id) REFERENCES $T_QUESTIONS(id)
+            )
+        """)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -148,6 +159,16 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
                     question_id TEXT PRIMARY KEY,
                     strokes TEXT NOT NULL,
                     updated_at INTEGER
+                )
+            """)
+        }
+        if (oldVersion < 6) {
+            db.execSQL("""
+                CREATE TABLE IF NOT EXISTS $T_VECTORS (
+                    question_id TEXT PRIMARY KEY,
+                    dim INTEGER NOT NULL,
+                    vector BLOB NOT NULL,
+                    FOREIGN KEY (question_id) REFERENCES $T_QUESTIONS(id)
                 )
             """)
         }
@@ -173,6 +194,72 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
         ).use { cursor ->
             if (cursor.moveToFirst()) cursor.getString(0) else null
         }
+    }
+
+    // ── 题目向量（错题三级匹配链第二级） ─────────────────────────────
+
+    private val QUESTION_SELECT_COLS =
+        "SELECT q.id, q.stem, q.stem_html, q.options, q.answer, q.analysis, q.knowledge_point, q.source, q.rate, q.title_images, q.material_id, COALESCE(m.content, ''), q.difficulty "
+
+    /** 保存/更新题目向量（FloatArray → BLOB，little-endian） */
+    fun saveVector(questionId: String, vector: FloatArray) {
+        val buf = java.nio.ByteBuffer.allocate(vector.size * 4).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        for (v in vector) buf.putFloat(v)
+        val values = ContentValues().apply {
+            put("question_id", questionId)
+            put("dim", vector.size)
+            put("vector", buf.array())
+        }
+        writableDatabase.insertWithOnConflict(
+            T_VECTORS, null, values, SQLiteDatabase.CONFLICT_REPLACE
+        )
+    }
+
+    /** 全量向量：questionId → FloatArray */
+    fun loadAllVectors(): Map<String, FloatArray> {
+        val map = mutableMapOf<String, FloatArray>()
+        readableDatabase.rawQuery("SELECT question_id, vector FROM $T_VECTORS", arrayOf()).use { c ->
+            while (c.moveToNext()) {
+                val bytes = c.getBlob(1) ?: continue
+                val buf = java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                val vec = FloatArray(bytes.size / 4)
+                for (i in vec.indices) vec[i] = buf.float
+                map[c.getString(0)] = vec
+            }
+        }
+        return map
+    }
+
+    /** 尚未向量化的题目（断点续跑：LEFT JOIN 天然跳过已完成的） */
+    fun getQuestionsWithoutVectors(limit: Int): List<Question> {
+        val questions = mutableListOf<Question>()
+        readableDatabase.rawQuery(
+            QUESTION_SELECT_COLS +
+            "FROM $T_QUESTIONS q LEFT JOIN $T_MATERIALS m ON q.material_id = m.id " +
+            "LEFT JOIN $T_VECTORS v ON q.id = v.question_id " +
+            "WHERE v.question_id IS NULL ORDER BY q.id LIMIT ?",
+            arrayOf(limit.toString())
+        ).use { cursor ->
+            while (cursor.moveToNext()) questions.add(cursorToQuestion(cursor))
+        }
+        return questions
+    }
+
+    fun countAllQuestions(): Int {
+        return readableDatabase.rawQuery("SELECT COUNT(*) FROM $T_QUESTIONS", arrayOf()).use { c ->
+            if (c.moveToFirst()) c.getInt(0) else 0
+        }
+    }
+
+    fun countVectorized(): Int {
+        return readableDatabase.rawQuery("SELECT COUNT(*) FROM $T_VECTORS", arrayOf()).use { c ->
+            if (c.moveToFirst()) c.getInt(0) else 0
+        }
+    }
+
+    /** 删除题目时同步清向量 */
+    fun deleteVector(questionId: String) {
+        writableDatabase.delete(T_VECTORS, "question_id = ?", arrayOf(questionId))
     }
 
     fun isImported(): Boolean {

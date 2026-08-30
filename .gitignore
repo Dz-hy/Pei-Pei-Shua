@@ -32,3 +32,7 @@ __MACOSX/
 /高频800词记忆版.md
 /一般/
 /CLAUDE.md
+
+# 题库素材与转换器测试产物（脚本本身提交，素材不入库）
+tools/test_samples/
+tools/历年真题/

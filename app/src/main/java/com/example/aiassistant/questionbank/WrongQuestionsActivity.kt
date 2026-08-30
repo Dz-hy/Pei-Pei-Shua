@@ -28,9 +28,12 @@ class WrongQuestionsActivity : AppCompatActivity() {
     private lateinit var tabAll: TextView
     private lateinit var tabBank: TextView
     private lateinit var tabOcr: TextView
+    private lateinit var btnWrongPractice: TextView
+    private lateinit var btnToggleMastered: TextView
     private lateinit var layoutEmpty: View
 
     private var currentFilter = SourceFilter.ALL
+    private var showMastered = false
     private var adapter: WrongQuestionsAdapter? = null
     private val sdf = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
 
@@ -43,6 +46,8 @@ class WrongQuestionsActivity : AppCompatActivity() {
         tabAll = findViewById(R.id.tab_all)
         tabBank = findViewById(R.id.tab_bank)
         tabOcr = findViewById(R.id.tab_ocr)
+        btnWrongPractice = findViewById(R.id.btn_wrong_practice)
+        btnToggleMastered = findViewById(R.id.btn_toggle_mastered)
         layoutEmpty = findViewById(R.id.layout_empty)
 
         // 手机单列，平板多列网格（列数由 sw600dp/sw840dp 资源决定）
@@ -58,6 +63,13 @@ class WrongQuestionsActivity : AppCompatActivity() {
         tabAll.setOnClickListener { switchFilter(SourceFilter.ALL) }
         tabBank.setOnClickListener { switchFilter(SourceFilter.BANK) }
         tabOcr.setOnClickListener { switchFilter(SourceFilter.OCR) }
+
+        btnWrongPractice.setOnClickListener { startWrongPractice() }
+        btnToggleMastered.setOnClickListener {
+            showMastered = !showMastered
+            btnToggleMastered.text = if (showMastered) "隐藏已掌握" else "显示已掌握"
+            loadWrongQuestions()
+        }
 
         updateTabStyles()
         loadWrongQuestions()
@@ -95,11 +107,15 @@ class WrongQuestionsActivity : AppCompatActivity() {
 
     private fun loadWrongQuestions() {
         val allList = WrongQuestionManager.getWrongQuestions(this)
-        val filteredList = when (currentFilter) {
-            SourceFilter.ALL -> allList
-            SourceFilter.BANK -> allList.filter { it.isFromBank }
-            SourceFilter.OCR -> allList.filter { !it.isFromBank }
-        }
+        val filteredList = allList
+            .filter { showMastered || !it.mastered }
+            .filter {
+                when (currentFilter) {
+                    SourceFilter.ALL -> true
+                    SourceFilter.BANK -> it.isFromBank
+                    SourceFilter.OCR -> !it.isFromBank
+                }
+            }
 
         if (filteredList.isEmpty()) {
             layoutEmpty.visibility = View.VISIBLE
@@ -111,6 +127,41 @@ class WrongQuestionsActivity : AppCompatActivity() {
 
         adapter = WrongQuestionsAdapter(filteredList)
         rvWrongQuestions.adapter = adapter
+    }
+
+    /** 错题重练：按当前 tab 筛选、排除已掌握、只抽有结构化题面的错题随机组卷 */
+    private fun startWrongPractice() {
+        val pool = WrongQuestionManager.getWrongQuestions(this)
+            .filter { it.snapshot != null && !it.mastered }
+            .filter {
+                when (currentFilter) {
+                    SourceFilter.ALL -> true
+                    SourceFilter.BANK -> it.isFromBank
+                    SourceFilter.OCR -> !it.isFromBank
+                }
+            }
+        if (pool.isEmpty()) {
+            Toast.makeText(this, "当前筛选下没有可重练的错题（纯OCR题无法重做）", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val options = arrayOf("10 题", "20 题", "全部（${pool.size} 题）")
+        AlertDialog.Builder(this)
+            .setTitle("错题重练")
+            .setItems(options) { dialog, which ->
+                val picked = when (which) {
+                    0 -> pool.shuffled().take(10)
+                    1 -> pool.shuffled().take(20)
+                    else -> pool.shuffled()
+                }
+                val ids = ArrayList(picked.map { it.id })
+                val intent = Intent(this, PracticeActivity::class.java)
+                intent.putStringArrayListExtra("wrong_practice_ids", ids)
+                intent.putExtra("module_name", "错题重练")
+                startActivity(intent)
+                dialog.dismiss()
+            }
+            .setNegativeButton("取消", null)
+            .show()
     }
 
     inner class WrongQuestionsAdapter(
@@ -175,9 +226,14 @@ class WrongQuestionsActivity : AppCompatActivity() {
                 holder.tvAnswerBadge.visibility = View.GONE
             }
 
-            // 累计做错次数（>1 才显示）
-            if (item.wrongCount > 1) {
+            // 累计做错次数 / 已掌握标记
+            if (item.mastered) {
+                holder.tvWrongCount.text = "已掌握"
+                holder.tvWrongCount.setTextColor(getColor(R.color.primary))
+                holder.tvWrongCount.visibility = View.VISIBLE
+            } else if (item.wrongCount > 1) {
                 holder.tvWrongCount.text = "错${item.wrongCount}次"
+                holder.tvWrongCount.setTextColor(getColor(R.color.text_secondary))
                 holder.tvWrongCount.visibility = View.VISIBLE
             } else {
                 holder.tvWrongCount.visibility = View.GONE

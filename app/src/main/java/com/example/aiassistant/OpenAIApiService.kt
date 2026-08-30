@@ -117,6 +117,53 @@ object OpenAIApiService {
 
     // ── 内部请求构造引擎 ───────────────────────────────────────────────
 
+    /**
+     * OpenAI 兼容 /v1/embeddings 批量向量化（阻塞调用，请在工作线程使用）。
+     * 返回顺序与输入 texts 一致（按响应中的 index 字段回填）。
+     */
+    fun embedTextsBlocking(
+        texts: List<String>,
+        baseUrl: String,
+        apiKey: String,
+        model: String
+    ): List<FloatArray> {
+        if (texts.isEmpty()) return emptyList()
+        val url = baseUrl.trimEnd('/') + "/v1/embeddings"
+        val body = JSONObject().apply {
+            put("model", model)
+            put("input", JSONArray(texts))
+        }.toString()
+        val request = Request.Builder()
+            .url(url)
+            .addHeader("Authorization", "Bearer $apiKey")
+            .post(body.toRequestBody("application/json".toMediaType()))
+            .build()
+
+        var lastErr: Exception? = null
+        for (attempt in 0 until 3) {
+            try {
+                client.newCall(request).execute().use { resp ->
+                    val str = resp.body?.string() ?: ""
+                    if (!resp.isSuccessful) throw IOException("HTTP ${resp.code}: ${str.take(200)}")
+                    val data = JSONObject(str).getJSONArray("data")
+                    val out = arrayOfNulls<FloatArray>(data.length())
+                    for (i in 0 until data.length()) {
+                        val item = data.getJSONObject(i)
+                        val emb = item.getJSONArray("embedding")
+                        val vec = FloatArray(emb.length())
+                        for (j in 0 until emb.length()) vec[j] = emb.getDouble(j).toFloat()
+                        out[item.optInt("index", i)] = vec
+                    }
+                    return out.map { it ?: FloatArray(0) }
+                }
+            } catch (e: Exception) {
+                lastErr = e
+                if (attempt < 2) Thread.sleep(1500L * (attempt + 1))
+            }
+        }
+        throw lastErr ?: IOException("embeddings 请求失败")
+    }
+
     private fun buildTextRequest(
         baseUrl: String,
         apiKey: String,
