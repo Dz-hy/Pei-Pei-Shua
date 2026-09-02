@@ -115,8 +115,21 @@ class WrongQuestionsActivity : AppCompatActivity() {
         }
     }
 
+    /** 请求序号：连续触发时（如快速切 tab）只让最后一次的结果上屏，防旧数据覆盖新状态 */
+    @Volatile private var loadSeq = 0
+
     private fun loadWrongQuestions() {
-        val allList = WrongQuestionManager.getWrongQuestions(this)
+        val seq = ++loadSeq
+        Thread {
+            val allList = WrongQuestionManager.getWrongQuestions(this)
+            runOnUiThread {
+                if (isDestroyed || isFinishing || seq != loadSeq) return@runOnUiThread
+                applyWrongQuestions(allList)
+            }
+        }.start()
+    }
+
+    private fun applyWrongQuestions(allList: List<WrongQuestion>) {
         refreshSourceChips(allList)
         val filteredList = allList
             .filter { showMastered || !it.mastered }

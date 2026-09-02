@@ -42,6 +42,7 @@ object QuestionBankManager {
     }
 
     private fun notifyBankDataChanged() {
+        VectorCache.invalidate()
         android.os.Handler(android.os.Looper.getMainLooper()).post {
             dataChangedListeners.forEach { it() }
         }

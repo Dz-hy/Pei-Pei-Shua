@@ -45,12 +45,14 @@ object QuestionMatcher {
         val cleaned = ocrText.trim().take(OCR_MAX_LEN)
         if (cleaned.isBlank()) return MatchResult(null, CONF_NONE)
 
+        // 本次匹配共用一个连接（材料比对 + 向量候选两段都要读库）
+        val db by lazy { QuestionBankDb(context) }
+
         // 材料单独匹配先行：用户框到了材料段 → 先与题库 materials 表比对，命中则该组
         // 候选题限定在材料组内再走题干匹配；未命中 → 提示可能未转换成功、回退原链
         var materialGroupId: String? = null
         var materialMatched = false
         if (!materialText.isNullOrBlank()) {
-            val db = QuestionBankDb(context)
             materialGroupId = db.findMaterialByText(materialText)
             materialMatched = materialGroupId != null
         }
@@ -72,7 +74,6 @@ object QuestionMatcher {
         if (!AppPreferences.hasEmbConfig(context)) return MatchResult(null, CONF_NONE, materialMatched = materialMatched)
 
         return try {
-            val db = QuestionBankDb(context)
             val queryVec = OpenAIApiService.embedTextsBlocking(
                 listOf(cleaned),
                 AppPreferences.getEmbBaseUrl(context),
@@ -81,7 +82,7 @@ object QuestionMatcher {
             ).first()
 
             val minThreshold = AppPreferences.getMatchVectorMinThreshold(context)
-            val sims = db.loadAllVectors()
+            val sims = VectorCache.get(context)
                 .map { (id, vec) -> id to cosine(queryVec, vec) }
                 .filter { it.second >= minThreshold }
                 .sortedByDescending { it.second }

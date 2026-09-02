@@ -451,15 +451,20 @@ class PomodoroFragment : Fragment(), PomodoroTimer.TimerListener {
 
     private fun refreshStats() {
         if (!isAdded) return
-        val stats = PomodoroManager.getTodayStats()
-        val focusH = stats.totalFocusMinutes / 60
-        val focusM = stats.totalFocusMinutes % 60
-        statsFocusTime?.text = if (focusH > 0) "${focusH}h${focusM}m" else "${focusM}m"
-        statsTomatoCount?.text = "${stats.completedCount}"
-        val dailyTarget = timer?.config?.dailyTarget ?: 8
-        val pct = if (dailyTarget > 0) (stats.completedCount * 100 / dailyTarget) else 0
-        statsCompletion?.text = "${pct.coerceAtMost(100)}%"
-        tvTodayProgress?.text = "今日 ${stats.completedCount}/$dailyTarget 🍅"
+        Thread {
+            val stats = PomodoroManager.getTodayStats()
+            activity?.runOnUiThread {
+                if (!isAdded) return@runOnUiThread
+                val focusH = stats.totalFocusMinutes / 60
+                val focusM = stats.totalFocusMinutes % 60
+                statsFocusTime?.text = if (focusH > 0) "${focusH}h${focusM}m" else "${focusM}m"
+                statsTomatoCount?.text = "${stats.completedCount}"
+                val dailyTarget = timer?.config?.dailyTarget ?: 8
+                val pct = if (dailyTarget > 0) (stats.completedCount * 100 / dailyTarget) else 0
+                statsCompletion?.text = "${pct.coerceAtMost(100)}%"
+                tvTodayProgress?.text = "今日 ${stats.completedCount}/$dailyTarget 🍅"
+            }
+        }.start()
     }
 
     // ── 自定义专注时长 ──

@@ -77,6 +77,8 @@ class HomeFragment : Fragment() {
     private val bankReadyListener: () -> Unit = { loadModules() }
     // hide/show 切 tab 不重发 onResume：导入外部题库后靠这个通知重载模块列表
     private val bankDataChangedListener: () -> Unit = { loadModules() }
+    // TeacherManager 后台加载完成后刷新首页老师名（加载完成前显示 fallback「默认」）
+    private val teacherLoadedListener: () -> Unit = { if (isAdded) updateTeacherDisplay() }
 
     override fun onAttach(context: Context) {
         super.onAttach(context)
@@ -102,6 +104,7 @@ class HomeFragment : Fragment() {
         updateHeaderGreeting()
         showRandomQuote(false)
         QuestionBankManager.addOnBankDataChangedListener(bankDataChangedListener)
+        TeacherManager.addOnLoadedListener(teacherLoadedListener)
 
         // 开启 staggered 卡片入场动画，营造高级交互体验
         val container = (view as? ViewGroup)?.getChildAt(0) as? ViewGroup
@@ -131,6 +134,7 @@ class HomeFragment : Fragment() {
     override fun onDestroyView() {
         super.onDestroyView()
         QuestionBankManager.removeOnBankDataChangedListener(bankDataChangedListener)
+        TeacherManager.removeOnLoadedListener(teacherLoadedListener)
     }
 
     private fun updateTeacherDisplay() {

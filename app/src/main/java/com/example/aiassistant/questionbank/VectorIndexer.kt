@@ -35,6 +35,7 @@ object VectorIndexer {
         }
         isRunning = true
         pauseRequested = false
+        if (force) VectorCache.invalidate()
         val appCtx = context.applicationContext
         Thread {
             var paused = false
@@ -71,6 +72,7 @@ object VectorIndexer {
                 error = e.message ?: "索引构建失败"
             } finally {
                 isRunning = false
+                VectorCache.invalidate()
                 val msg = when {
                     error.isNotEmpty() -> "索引构建出错：$error（已完成的进度保留，可重试续跑）"
                     paused -> "已暂停（已完成的进度保留）"
