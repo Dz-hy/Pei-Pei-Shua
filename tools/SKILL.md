@@ -121,7 +121,7 @@ python bank_converter.py --stem test_samples/题干.txt   --analysis test_sample
 
 ## 产物流：导入 App
 
-App（`com.example.aiassistant`）导入入口在 **设置 → 数据备份与管理 → 「📥 导入外部题库 (.json)」**：
+App（`com.example.aiassistant`）导入入口在 **设置 → 数据备份与管理 → 「📂 导入外部题库 (.json)」**：
 
 1. 点按钮 → 系统文件选择器选 JSON
 2. 弹配置对话框：**目标一级大分类**默认"真题"（可改），**默认二级子分类**默认文件名
@@ -134,6 +134,7 @@ App（`com.example.aiassistant`）导入入口在 **设置 → 数据备份与�
 - 题目主键 = `key` = `custom_<卷名>_<题号>`；重复导入按 key **REPLACE 覆盖**，幂等安全；错题快照存独立库（wrong_questions_v2.db），重导不影响
 - 材料按内容哈希聚组存 `materials` 表，`questions.material_id` 关联
 - **重要：如果这次导入的题目内容变了（如加了材料字段），旧向量索引全部失效**——设置里"构建向量索引"按钮只补缺失的增量，必须先清空 `question_vectors` 表再全量重建（设置 → 向量模型 → 构建，约 1-2 分钟/2000 题）。题没变只是重导则不用重建
+- 向量在 App 内存有缓存（`VectorCache`，2026-09 起）：导入题库、重建索引完成都会**自动失效并重读**，错题三级匹配链（FTS 快筛 → 向量召回 → LLM 裁决）始终拿到最新向量，**无需重启 App**。例外：用 adb 直改 `question_vectors` 表 App 感知不到，需重启进程
 
 ## 安全
 
