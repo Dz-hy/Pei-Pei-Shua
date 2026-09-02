@@ -116,6 +116,16 @@ class WrongQuestionDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, nul
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {}
 
+    /** 总数与未总结数（COUNT 下推到 SQL，避免首页为了两个数字全表加载快照 JSON） */
+    fun counts(): Pair<Int, Int> {
+        readableDatabase.rawQuery(
+            "SELECT COUNT(*), COALESCE(SUM(CASE WHEN is_summarized = 0 THEN 1 ELSE 0 END), 0) FROM $T_WRONG",
+            arrayOf()
+        ).use { c ->
+            return if (c.moveToFirst()) Pair(c.getInt(0), c.getInt(1)) else Pair(0, 0)
+        }
+    }
+
     fun listAll(): List<WrongQuestion> {
         val result = mutableListOf<WrongQuestion>()
         readableDatabase.rawQuery(

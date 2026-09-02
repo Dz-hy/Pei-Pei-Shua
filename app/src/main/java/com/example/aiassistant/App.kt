@@ -23,6 +23,7 @@ class App : Application() {
     override fun onCreate() {
         super.onCreate()
         instance = this
+        LaunchPerf.mark("App.onCreate start")
 
         // 在最早时机禁用 OpenMP 亲和性，防止 PaddleOCR 在 Android 16 上崩溃
         try {
@@ -42,6 +43,7 @@ class App : Application() {
         } catch (e: Exception) {
             android.util.Log.e("App", "Failed to register BuiltInTools: ${e.message}")
         }
+        LaunchPerf.mark("App.onCreate end")
 
         // targetSdk 36 在 Android 15+ 强制 edge-to-edge，所有页面内容会画到状态栏/手势条下面。
         // 统一给每个 Activity 的根视图加上系统栏 + 刘海内边距（一次性适配全部页面）。

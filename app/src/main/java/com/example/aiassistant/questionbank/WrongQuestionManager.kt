@@ -127,6 +127,21 @@ object WrongQuestionManager {
         return getDb(context).listAll().sortedByDescending { it.timestamp }
     }
 
+    /** (总数, 未总结数)，COUNT 下推到 SQL；后台线程执行、回调在主线程 */
+    fun getStatsAsync(context: Context, onResult: (total: Int, unsummarized: Int) -> Unit) {
+        val appCtx = context.applicationContext
+        Thread {
+            val stats = getStats(appCtx)
+            android.os.Handler(android.os.Looper.getMainLooper()).post { onResult(stats.first, stats.second) }
+        }.start()
+    }
+
+    @Synchronized
+    fun getStats(context: Context): Pair<Int, Int> {
+        migrateIfNeeded(context)
+        return getDb(context).counts()
+    }
+
     @Synchronized
     fun getWrongQuestion(context: Context, id: String): WrongQuestion? {
         migrateIfNeeded(context)

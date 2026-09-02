@@ -67,7 +67,9 @@ class MainActivity : AppCompatActivity(), HomeFragment.ServiceControlListener {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        LaunchPerf.mark("MainActivity super.onCreate done")
         setContentView(R.layout.activity_main_new)
+        LaunchPerf.mark("setContentView done")
 
         // 旋转或重建时，恢复 Fragment 实例的内部引用，防止重复创建
         if (savedInstanceState != null) {
@@ -89,6 +91,7 @@ class MainActivity : AppCompatActivity(), HomeFragment.ServiceControlListener {
 
         // 初始化老师系统
         TeacherManager.init(this)
+        LaunchPerf.mark("TeacherManager.init done")
         // 初始化 AI 模型
         ModelManager.init(this)
         // 初始化题库（后台加载）
@@ -101,8 +104,10 @@ class MainActivity : AppCompatActivity(), HomeFragment.ServiceControlListener {
         PomodoroManager.init(this)
         // 初始化时政模块
         ShizhengManager.init(this)
+        LaunchPerf.mark("7 managers init done")
 
         setupBottomNav(savedInstanceState)
+        LaunchPerf.mark("setupBottomNav done")
 
         // 注册 moveToBack 广播（AppBlockerService 在 overlay 被 Activity 盖住时发送）
         val moveBackFilter = IntentFilter("com.example.aiassistant.MOVE_TO_BACK")
@@ -120,6 +125,12 @@ class MainActivity : AppCompatActivity(), HomeFragment.ServiceControlListener {
         if (savedInstanceState == null) {
             ShizhengManager.checkAndSync()
         }
+        LaunchPerf.mark("MainActivity.onCreate end")
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) LaunchPerf.mark("onWindowFocusChanged true (首帧)")
     }
 
     override fun onNewIntent(intent: Intent) {

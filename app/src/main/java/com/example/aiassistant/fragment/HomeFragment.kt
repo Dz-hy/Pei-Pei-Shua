@@ -14,6 +14,7 @@ import androidx.fragment.app.Fragment
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.example.aiassistant.AppPreferences
+import com.example.aiassistant.LaunchPerf
 import com.example.aiassistant.QuestionType
 import com.example.aiassistant.R
 import com.example.aiassistant.TeacherManager
@@ -82,15 +83,21 @@ class HomeFragment : Fragment() {
         if (context is ServiceControlListener) listener = context
     }
 
-    override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View? =
-        inflater.inflate(R.layout.fragment_home, container, false)
+    override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View? {
+        com.example.aiassistant.LaunchPerf.mark("HomeFragment.onCreateView start")
+        val v = inflater.inflate(R.layout.fragment_home, container, false)
+        com.example.aiassistant.LaunchPerf.mark("HomeFragment.onCreateView done (inflate)")
+        return v
+    }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
         bindViews(view)
+        LaunchPerf.mark("Home bindViews done")
         loadConfig()
         setupListeners()
         buildTypeChips()
+        LaunchPerf.mark("Home buildTypeChips done")
         loadModules()
         updateHeaderGreeting()
         showRandomQuote(false)
@@ -99,6 +106,7 @@ class HomeFragment : Fragment() {
         // 开启 staggered 卡片入场动画，营造高级交互体验
         val container = (view as? ViewGroup)?.getChildAt(0) as? ViewGroup
         container?.let { animateEntrance(it) }
+        LaunchPerf.mark("Home.onViewCreated done")
     }
 
     override fun onResume() {
@@ -131,18 +139,19 @@ class HomeFragment : Fragment() {
 
     private fun updateWrongStats() {
         val ctx = context ?: return
-        val allQuestions = com.example.aiassistant.questionbank.WrongQuestionManager.getWrongQuestions(ctx)
-        val totalCount = allQuestions.size
-        val unsummarizedCount = allQuestions.count { !it.isSummarized }
-        tvWrongStats.text = "共 ${totalCount} 道错题 · ${unsummarizedCount} 道未总结"
+        com.example.aiassistant.questionbank.WrongQuestionManager.getStatsAsync(ctx) { total, unsummarized ->
+            if (!isAdded) return@getStatsAsync
+            tvWrongStats.text = "共 ${total} 道错题 · ${unsummarized} 道未总结"
+        }
     }
 
     private fun updateShizhengStats() {
-        val count = com.example.aiassistant.shizheng.ShizhengManager.questionCount()
-        val wrong = com.example.aiassistant.shizheng.ShizhengManager.wrongCount()
-        tvShizhengStats.text =
-            if (wrong > 0) "共 $count 道时政题 · $wrong 道错题待回顾"
-            else "共 $count 道时政题 · 打开自动抓取最新时政"
+        com.example.aiassistant.shizheng.ShizhengManager.getStatsAsync { count, wrong ->
+            if (!isAdded) return@getStatsAsync
+            tvShizhengStats.text =
+                if (wrong > 0) "共 $count 道时政题 · $wrong 道错题待回顾"
+                else "共 $count 道时政题 · 打开自动抓取最新时政"
+        }
     }
 
     private fun bindViews(view: View) {

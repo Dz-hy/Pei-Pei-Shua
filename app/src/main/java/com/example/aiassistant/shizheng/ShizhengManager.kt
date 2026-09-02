@@ -325,6 +325,19 @@ object ShizhengManager {
     fun getUnansweredQuestions(limit: Int): List<ShizhengQuestion> = db.getUnansweredQuestions(limit)
     fun questionCount(): Int = db.questionCount()
     fun wrongCount(): Int = db.wrongCount()
+
+    /** (总题数, 错题数)，后台线程执行、回调在主线程（首页统计用，避免主线程读库） */
+    fun getStatsAsync(onResult: (total: Int, wrong: Int) -> Unit) {
+        if (!::db.isInitialized) {
+            onResult(0, 0)
+            return
+        }
+        executor.execute {
+            val total = db.questionCount()
+            val wrong = db.wrongCount()
+            mainHandler.post { onResult(total, wrong) }
+        }
+    }
     fun getWrongQuestionIds(): List<Long> = db.getWrongQuestionIds()
 
     fun insertWrongRecord(record: ShizhengWrongRecord) { db.insertWrongRecord(record) }
