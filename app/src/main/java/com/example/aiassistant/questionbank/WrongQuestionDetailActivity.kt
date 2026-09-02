@@ -20,6 +20,7 @@ import android.view.ViewGroup
 import android.widget.EditText
 import android.widget.ImageView
 import android.widget.LinearLayout
+import com.example.aiassistant.MarkdownRenderer
 import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
@@ -44,6 +45,12 @@ class WrongQuestionDetailActivity : AppCompatActivity() {
 
     companion object {
         const val EXTRA_ID = "wrong_question_id"
+
+        /** 无专属题型模板（大模块）时的通用讲解 prompt：不要求 JSON 结构，纯文本讲解 */
+        private val GENERIC_ANALYSIS_PROMPT =
+            "你是一名经验丰富的公务员考试辅导老师。用户会给你一道完整题目（题干、选项、正确答案、官方解析）。" +
+                "请用简洁清晰的中文讲解：1) 本题考点；2) 正确解题思路；3) 若我的作答有误，指出错因与易错点；" +
+                "4) 给一条实用的记忆技巧或秒杀技巧。不要复述题目，直接开讲。"
     }
 
     private val sdf = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
@@ -205,16 +212,29 @@ class WrongQuestionDetailActivity : AppCompatActivity() {
             return
         }
 
-        // 来源标记
+        // 来源标记：题库题展示完整 JSON key（快照 id，含 custom_ 前缀，用于排查转换失败），
+        // 无快照回落"来自题库"
         val tvBadge = findViewById<TextView>(R.id.tv_source_badge)
         if (item.isFromBank) {
-            tvBadge.text = "来自题库"
+            val key = item.snapshot?.id
+            tvBadge.text = if (!key.isNullOrBlank()) key else "来自题库"
             tvBadge.setTextColor(getColor(android.R.color.white))
             tvBadge.setBackgroundResource(R.drawable.bg_primary_chip)
         } else {
             tvBadge.text = "OCR识别"
             tvBadge.setTextColor(getColor(R.color.tag_blue_text))
             tvBadge.setBackgroundResource(R.drawable.bg_source_badge_ocr)
+        }
+
+        // 材料卡片：题库题快照带材料时显示（text + <img> data URL，HtmlAnalysis 支持缩放）
+        val cardMaterial = findViewById<View>(R.id.card_material)
+        val tvMaterial = findViewById<TextView>(R.id.tv_material)
+        val materialContent = item.snapshot?.materialContent
+        if (item.isFromBank && !materialContent.isNullOrBlank()) {
+            cardMaterial.visibility = View.VISIBLE
+            tvMaterial.text = HtmlAnalysis.render(materialContent, tvMaterial)
+        } else {
+            cardMaterial.visibility = View.GONE
         }
 
         // 重做/重新匹配：有题面快照 → 重做此题；未匹配的 OCR 题 → 重新匹配
@@ -311,18 +331,17 @@ class WrongQuestionDetailActivity : AppCompatActivity() {
         val tvAnalysis = findViewById<TextView>(R.id.tv_analysis)
         if (item.isFromBank && item.bankAnalysis.isNotEmpty()) {
             cardAnalysisSection.visibility = View.VISIBLE
-            tvAnalysis.text = item.bankAnalysis
+            tvAnalysis.text = HtmlAnalysis.render(item.bankAnalysis, tvAnalysis)
 
             // 获取题目类型
             val moduleName = QuestionBankManager.getQuestionModuleName(item.bankQuestionId)
             currentQuestionType = mapModuleToQuestionType(moduleName)
 
-            // 如果无法识别题型，禁用AI解析
-            if (currentQuestionType == null) {
-                btnStartAi.isEnabled = false
-                btnStartAi.text = "该题型暂不支持AI解析"
-                btnStartAi.alpha = 0.5f
-            }
+            // 大模块（数量关系/资料分析/常识判断等）无专属题型模板：不按钮置灰，
+            // 走通用 AI 解析（见 GENERIC_ANALYSIS_PROMPT）
+            btnStartAi.isEnabled = true
+            btnStartAi.text = "AI 解析"
+            btnStartAi.alpha = 1f
         } else {
             cardAnalysisSection.visibility = View.GONE
         }
@@ -437,7 +456,7 @@ class WrongQuestionDetailActivity : AppCompatActivity() {
     // ==================== AI解析功能 ====================
 
     private fun startAiAnalysis() {
-        val questionType = currentQuestionType ?: return
+        val questionType = currentQuestionType // null = 大模块无专属模板，走通用解析
         val item = getCurrentItem() ?: return
 
         // 显示加载状态
@@ -458,12 +477,12 @@ class WrongQuestionDetailActivity : AppCompatActivity() {
         val thinking = activeModel?.thinkingDefault ?: false
         val thinkingBudget = activeModel?.thinkingBudget ?: 4096
 
-        val useTools = AppPreferences.isToolCallingEnabled(this) && ToolRegistry.hasTools()
+        val useTools = AppPreferences.isToolCallingEnabled(this) && ToolRegistry.hasTools() && questionType != null
 
-        var prompt = if (useTools) {
-            getUniversalAgentPrompt()
-        } else {
-            AppPreferences.getPromptForType(this, questionType)
+        var prompt = when {
+            questionType == null -> GENERIC_ANALYSIS_PROMPT
+            useTools -> getUniversalAgentPrompt()
+            else -> AppPreferences.getPromptForType(this, questionType)
         }
 
         // 如果错题来自于题库，则注入题库上下文以确保答案准确性
@@ -485,13 +504,16 @@ class WrongQuestionDetailActivity : AppCompatActivity() {
                 appendLine()
                 if (item.bankAnalysis.isNotBlank()) {
                     appendLine("【题库参考解析】")
-                    appendLine(item.bankAnalysis)
+                    appendLine(HtmlAnalysis.toPlainText(item.bankAnalysis))
                     appendLine()
                 }
                 appendLine("=== 以上为题库数据，请以此为基础进行分析 ===")
                 appendLine("特别注意：")
                 appendLine("1. 正确答案已确定为 ${item.bankAnswer}，请围绕该答案展开分析，对每个选项逐一说明选或不选的理由。")
-                appendLine("2. 请在JSON中额外输出 keywords 数组，列出题目中的3-8个关键词/关键语句（用于在题目中标红高亮）。")
+                if (questionType != null) {
+                    // 仅题型模板要求 JSON 时引导输出 keywords；通用讲解要求纯文本，不能诱导 JSON
+                    appendLine("2. 请在JSON中额外输出 keywords 数组，列出题目中的3-8个关键词/关键语句（用于在题目中标红高亮）。")
+                }
                 appendLine()
             }
             prompt = bankContext + prompt
@@ -503,7 +525,7 @@ class WrongQuestionDetailActivity : AppCompatActivity() {
         val onCompleteCallback = { result: String ->
             runOnUiThread {
                 layoutAiLoading.visibility = View.GONE
-                renderAiResult(result, questionType)
+                if (questionType == null) renderGenericAiResult(result) else renderAiResult(result, questionType)
             }
         }
 
@@ -722,7 +744,6 @@ class WrongQuestionDetailActivity : AppCompatActivity() {
 
         try {
             val json = JSONObject(result)
-
             // 正确答案
             val correctAnswer = json.optString("correct_answer", "")
             if (correctAnswer.isNotEmpty()) {
@@ -743,6 +764,23 @@ class WrongQuestionDetailActivity : AppCompatActivity() {
             // JSON解析失败，显示原始文本
             addTextContent(result)
         }
+    }
+
+    /** 通用解析：AI 返回纯文本讲解（markdown），直接渲染 */
+    private fun renderGenericAiResult(result: String) {
+        layoutAiResult.removeAllViews()
+        layoutAiResult.visibility = View.VISIBLE
+        val tv = TextView(this).apply {
+            textSize = 15f
+            setTextColor(getColor(R.color.text_primary))
+            setLineSpacing(0f, 1.3f)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+        MarkdownRenderer.applyTo(tv, result)
+        layoutAiResult.addView(tv)
     }
 
     private fun addAnswerCard(answer: String) {
@@ -1026,7 +1064,7 @@ class WrongQuestionDetailActivity : AppCompatActivity() {
 
     private fun addTextContent(text: String) {
         val tv = TextView(this).apply {
-            this.text = text
+            com.example.aiassistant.MarkdownRenderer.applyTo(this, text)
             textSize = 13f
             setTextColor(getColor(R.color.text_primary))
             setLineSpacing(0f, 1.4f)
@@ -1168,7 +1206,7 @@ class WrongQuestionDetailActivity : AppCompatActivity() {
         // 解析
         if (item.isFromBank && item.bankAnalysis.isNotEmpty()) {
             totalHeight += cardPadding + 20 * density
-            val analysisLines = wrapText(item.bankAnalysis, textPaint, maxWidth)
+            val analysisLines = wrapText(HtmlAnalysis.toPlainText(item.bankAnalysis), textPaint, maxWidth)
             totalHeight += analysisLines.size * lineHeight + cardPadding
             totalHeight += cardMargin
         }
@@ -1248,7 +1286,7 @@ class WrongQuestionDetailActivity : AppCompatActivity() {
 
         // 绘制解析
         if (item.isFromBank && item.bankAnalysis.isNotEmpty()) {
-            val analysisLines = wrapText(item.bankAnalysis, textPaint, maxWidth)
+            val analysisLines = wrapText(HtmlAnalysis.toPlainText(item.bankAnalysis), textPaint, maxWidth)
             val analysisHeight = cardPadding + 20 * density + analysisLines.size * lineHeight + cardPadding
             drawRoundRect(canvas, padding.toFloat(), y, (widthPx - padding).toFloat(),
                 y + analysisHeight, cornerRadius, Color.parseColor("#FFF3E0"))

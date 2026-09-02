@@ -1,14 +1,12 @@
 package com.example.aiassistant.plan
 
 import android.app.AlertDialog
-import android.app.DatePickerDialog
+import android.content.Intent
 import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
-import android.widget.EditText
 import android.widget.LinearLayout
-import android.widget.RadioGroup
 import android.widget.TextView
 import android.widget.Toast
 import androidx.fragment.app.Fragment
@@ -16,35 +14,39 @@ import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.example.aiassistant.R
-import com.example.aiassistant.capDialogWidth
-import com.google.android.material.floatingactionbutton.FloatingActionButton
+import com.example.aiassistant.questionbank.PracticeActivity
+import com.example.aiassistant.questionbank.PracticeSessionRecord
+import com.example.aiassistant.questionbank.QuestionBankManager
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 
+/**
+ * 计划表 = 日历 + 做题历史：日历常驻（今天高亮、月份切换、有记录打点、点选日期高亮），
+ * 下方列出选中日期的训练记录；点卡片回看整场训练（PracticeActivity 回看模式），长按删除。
+ */
 class PlanFragment : Fragment() {
 
-    // 0=日历模式, 1=时间线模式
-    private var viewMode = 0
     private var currentYear = 0
     private var currentMonth = 0
-    private var currentFilter = 0 // 0=全部, 1=未完成, 2=已完成
+    private var selectedDate = ""   // yyyy-MM-dd，默认今天
 
-    private lateinit var layoutCalendar: LinearLayout
-    private lateinit var layoutTimeline: LinearLayout
-    private lateinit var btnViewMode: TextView
     private lateinit var tvMonthTitle: TextView
+    private lateinit var tvHistoryTitle: TextView
     private lateinit var rvCalendar: RecyclerView
-    private lateinit var rvTimeline: RecyclerView
+    private lateinit var rvHistory: RecyclerView
     private lateinit var tvEmpty: TextView
-    private lateinit var tvTaskStats: TextView
-    private lateinit var fabAdd: FloatingActionButton
 
     private lateinit var calendarAdapter: CalendarDayAdapter
-    private lateinit var timelineAdapter: TimelineAdapter
+    private lateinit var historyAdapter: PracticeHistoryAdapter
 
     private val dateFormat = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
+    private val showFormat = SimpleDateFormat("M月d日", Locale.getDefault())
+
+    private val bankReadyListener: () -> Unit = {
+        if (isAdded) refreshAll()
+    }
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View? {
         return inflater.inflate(R.layout.fragment_plan, container, false)
@@ -56,49 +58,32 @@ class PlanFragment : Fragment() {
         val cal = Calendar.getInstance()
         currentYear = cal.get(Calendar.YEAR)
         currentMonth = cal.get(Calendar.MONTH) + 1
+        selectedDate = dateFormat.format(Date())
 
-        layoutCalendar = view.findViewById(R.id.layout_calendar)
-        layoutTimeline = view.findViewById(R.id.layout_timeline)
-        btnViewMode = view.findViewById(R.id.btn_view_mode)
         tvMonthTitle = view.findViewById(R.id.tv_month_title)
+        tvHistoryTitle = view.findViewById(R.id.tv_history_title)
         rvCalendar = view.findViewById(R.id.rv_calendar)
-        rvTimeline = view.findViewById(R.id.rv_timeline)
+        rvHistory = view.findViewById(R.id.rv_history)
         tvEmpty = view.findViewById(R.id.tv_empty)
-        tvTaskStats = view.findViewById(R.id.tv_task_stats)
-        fabAdd = view.findViewById(R.id.fab_add_task)
 
-        // 日历适配器
         calendarAdapter = CalendarDayAdapter { day ->
-            // 点击日期 → 切换到时间线并筛选该日
-            viewMode = 1
-            switchView()
-            loadTimeline()
+            val date = day.dateStr ?: return@CalendarDayAdapter
+            if (date == selectedDate) return@CalendarDayAdapter
+            selectedDate = date
+            loadCalendar()
+            loadHistory()
         }
         rvCalendar.layoutManager = GridLayoutManager(requireContext(), 7)
         rvCalendar.adapter = calendarAdapter
 
-        // 时间线适配器
-        timelineAdapter = TimelineAdapter(
-            onToggle = { task ->
-                PlanManager.toggleComplete(task.id)
-                loadTimeline()
-            },
-            onDelete = { task ->
-                AlertDialog.Builder(requireContext())
-                    .setTitle("删除任务")
-                    .setMessage("确定删除「${task.title}」？")
-                    .setPositiveButton("删除") { _, _ ->
-                        PlanManager.deleteTask(task.id)
-                        loadTimeline()
-                    }
-                    .setNegativeButton("取消", null)
-                    .show()
-            }
+        historyAdapter = PracticeHistoryAdapter(
+            onClick = { rec -> openReview(rec) },
+            onLongClick = { rec -> confirmDelete(rec) }
         )
-        rvTimeline.layoutManager = LinearLayoutManager(requireContext())
-        rvTimeline.adapter = timelineAdapter
+        rvHistory.layoutManager = LinearLayoutManager(requireContext())
+        rvHistory.adapter = historyAdapter
 
-        // 月份切换
+        // 月份切换（翻看历史月份）
         view.findViewById<TextView>(R.id.btn_prev_month).setOnClickListener {
             currentMonth--
             if (currentMonth < 1) { currentMonth = 12; currentYear-- }
@@ -110,72 +95,27 @@ class PlanFragment : Fragment() {
             loadCalendar()
         }
 
-        // 视图切换
-        btnViewMode.setOnClickListener {
-            viewMode = if (viewMode == 0) 1 else 0
-            switchView()
-        }
-
-        // 筛选按钮
-        view.findViewById<TextView>(R.id.filter_all).setOnClickListener { setFilter(0) }
-        view.findViewById<TextView>(R.id.filter_pending).setOnClickListener { setFilter(1) }
-        view.findViewById<TextView>(R.id.filter_done).setOnClickListener { setFilter(2) }
-
-        // 添加任务
-        fabAdd.setOnClickListener { showAddTaskDialog() }
-
-        // 初始化星期标题行
         initWeekHeader(view)
 
-        switchView()
+        // 训练会话与题库同库：题库就绪后刷新一次（冷启动直接进本页时避免读到空表）
+        QuestionBankManager.addOnReadyListener(bankReadyListener)
+        refreshAll()
     }
 
     override fun onResume() {
         super.onResume()
-        if (viewMode == 0) loadCalendar() else loadTimeline()
+        // 做完训练切回本页时刷新列表与打点
+        refreshAll()
     }
 
-    // ── 视图切换 ──────────────────────────────────────────────────────
-
-    private fun switchView() {
-        if (viewMode == 0) {
-            layoutCalendar.visibility = View.VISIBLE
-            layoutTimeline.visibility = View.GONE
-            btnViewMode.text = "📅 日历"
-            loadCalendar()
-        } else {
-            layoutCalendar.visibility = View.GONE
-            layoutTimeline.visibility = View.VISIBLE
-            btnViewMode.text = "📊 时间线"
-            loadTimeline()
-        }
+    override fun onDestroyView() {
+        super.onDestroyView()
+        QuestionBankManager.removeOnReadyListener(bankReadyListener)
     }
 
-    // ── 筛选 ──────────────────────────────────────────────────────────
-
-    private fun setFilter(filter: Int) {
-        currentFilter = filter
-        val v = requireView()
-        val allBtn = v.findViewById<TextView>(R.id.filter_all)
-        val pendingBtn = v.findViewById<TextView>(R.id.filter_pending)
-        val doneBtn = v.findViewById<TextView>(R.id.filter_done)
-
-        // 重置样式
-        for (btn in listOf(allBtn, pendingBtn, doneBtn)) {
-            btn.setTextColor(0xFF6B7280.toInt())
-            btn.setBackgroundResource(R.drawable.bg_default_chip)
-        }
-
-        // 高亮当前
-        val selected = when (filter) {
-            1 -> pendingBtn
-            2 -> doneBtn
-            else -> allBtn
-        }
-        selected.setTextColor(0xFFFFFFFF.toInt())
-        selected.setBackgroundResource(R.drawable.bg_tag_blue)
-
-        loadTimeline()
+    private fun refreshAll() {
+        loadCalendar()
+        loadHistory()
     }
 
     // ── 日历 ──────────────────────────────────────────────────────────
@@ -198,96 +138,66 @@ class PlanFragment : Fragment() {
     private fun loadCalendar() {
         tvMonthTitle.text = "${currentYear}年${currentMonth}月"
 
-        val stats = PlanManager.getDailyStats(currentYear, currentMonth)
+        // 走管理器单线程队列：避免与 savePracticeSession 竞态（刚做完训练回来收不到记录）
+        QuestionBankManager.getPracticeSessionDatesAsync(currentYear, currentMonth) { sessionDates ->
+            activity?.runOnUiThread {
+                if (!isAdded) return@runOnUiThread
+                val cal = Calendar.getInstance()
+                cal.set(currentYear, currentMonth - 1, 1)
+                val firstDayOfWeek = cal.get(Calendar.DAY_OF_WEEK) - 1
+                val daysInMonth = cal.getActualMaximum(Calendar.DAY_OF_MONTH)
 
-        val cal = Calendar.getInstance()
-        cal.set(currentYear, currentMonth - 1, 1)
-        val firstDayOfWeek = cal.get(Calendar.DAY_OF_WEEK) - 1
-        val daysInMonth = cal.getActualMaximum(Calendar.DAY_OF_MONTH)
-
-        val days = mutableListOf<CalendarDay>()
-        for (i in 0 until firstDayOfWeek) {
-            days.add(CalendarDay(0, null))
+                val days = mutableListOf<CalendarDay>()
+                for (i in 0 until firstDayOfWeek) {
+                    days.add(CalendarDay(0, null))
+                }
+                val todayStr = dateFormat.format(Date())
+                for (d in 1..daysInMonth) {
+                    val dateStr = String.format("%04d-%02d-%02d", currentYear, currentMonth, d)
+                    days.add(CalendarDay(
+                        day = d,
+                        dateStr = dateStr,
+                        isToday = dateStr == todayStr,
+                        isSelected = dateStr == selectedDate,
+                        hasSession = dateStr in sessionDates
+                    ))
+                }
+                calendarAdapter.setData(days)
+            }
         }
-        val todayStr = dateFormat.format(Date())
-        for (d in 1..daysInMonth) {
-            val dateStr = String.format("%04d-%02d-%02d", currentYear, currentMonth, d)
-            val stat = stats[dateStr]
-            days.add(CalendarDay(
-                day = d,
-                dateStr = dateStr,
-                isToday = dateStr == todayStr,
-                totalTasks = stat?.first ?: 0,
-                doneTasks = stat?.second ?: 0
-            ))
-        }
-        calendarAdapter.setData(days)
     }
 
-    // ── 时间线 ──────────────────────────────────────────────────────
+    // ── 做题历史 ──────────────────────────────────────────────────────
 
-    private fun loadTimeline() {
-        val grouped = PlanManager.getGroupedTasks(currentFilter)
-        timelineAdapter.setData(grouped)
-
-        // 统计
-        var totalTasks = 0
-        var totalDone = 0
-        for ((_, tasks) in grouped) {
-            totalTasks += tasks.size
-            totalDone += tasks.count { it.isCompleted }
+    private fun loadHistory() {
+        QuestionBankManager.getPracticeSessionsByDateAsync(selectedDate) { sessions ->
+            activity?.runOnUiThread {
+                if (!isAdded) return@runOnUiThread
+                historyAdapter.setData(sessions)
+                tvHistoryTitle.text = "做题历史 · ${showFormat.format(dateFormat.parse(selectedDate) ?: Date())}"
+                tvEmpty.visibility = if (sessions.isEmpty()) View.VISIBLE else View.GONE
+                rvHistory.visibility = if (sessions.isEmpty()) View.GONE else View.VISIBLE
+            }
         }
-        tvTaskStats.text = if (totalTasks > 0) "共${totalTasks}条 已完成${totalDone}条" else ""
-
-        tvEmpty.visibility = if (grouped.isEmpty()) View.VISIBLE else View.GONE
-        rvTimeline.visibility = if (grouped.isEmpty()) View.GONE else View.VISIBLE
     }
 
-    // ── 添加任务对话框 ────────────────────────────────────────────────
+    private fun openReview(rec: PracticeSessionRecord) {
+        val intent = Intent(requireContext(), PracticeActivity::class.java)
+        intent.putExtra("review_session_id", rec.id)
+        startActivity(intent)
+    }
 
-    private fun showAddTaskDialog() {
-        val dialogView = LayoutInflater.from(requireContext()).inflate(R.layout.dialog_add_task, null)
-        val etTitle = dialogView.findViewById<EditText>(R.id.et_title)
-        val etDesc = dialogView.findViewById<EditText>(R.id.et_description)
-        val tvDate = dialogView.findViewById<TextView>(R.id.tv_date)
-        val rgPriority = dialogView.findViewById<RadioGroup>(R.id.rg_priority)
-
-        val today = dateFormat.format(Date())
-        tvDate.text = today
-
-        tvDate.setOnClickListener {
-            val cal = Calendar.getInstance()
-            DatePickerDialog(requireContext(), { _, year, month, day ->
-                tvDate.text = String.format("%04d-%02d-%02d", year, month + 1, day)
-            }, cal.get(Calendar.YEAR), cal.get(Calendar.MONTH), cal.get(Calendar.DAY_OF_MONTH)).show()
-        }
-
-        val dialog = AlertDialog.Builder(requireContext())
-            .setView(dialogView)
-            .setPositiveButton("添加") { _, _ ->
-                val title = etTitle.text.toString().trim()
-                if (title.isEmpty()) {
-                    Toast.makeText(requireContext(), "请输入任务标题", Toast.LENGTH_SHORT).show()
-                    return@setPositiveButton
-                }
-                val priority = when (rgPriority.checkedRadioButtonId) {
-                    R.id.rb_important -> PlanTask.PRIORITY_IMPORTANT
-                    R.id.rb_urgent -> PlanTask.PRIORITY_URGENT
-                    else -> PlanTask.PRIORITY_NORMAL
-                }
-                PlanManager.addTask(PlanTask(
-                    title = title,
-                    description = etDesc.text.toString().trim(),
-                    date = tvDate.text.toString(),
-                    priority = priority
-                ))
-                Toast.makeText(requireContext(), "已添加", Toast.LENGTH_SHORT).show()
-                if (viewMode == 0) loadCalendar() else loadTimeline()
+    private fun confirmDelete(rec: PracticeSessionRecord) {
+        AlertDialog.Builder(requireContext())
+            .setTitle("删除记录")
+            .setMessage("确定删除 ${rec.moduleName} 的这条训练记录？删除后不可恢复。")
+            .setPositiveButton("删除") { _, _ ->
+                QuestionBankManager.deletePracticeSession(rec.id)
+                Toast.makeText(requireContext(), "已删除", Toast.LENGTH_SHORT).show()
+                refreshAll()
             }
             .setNegativeButton("取消", null)
-            .create()
-        dialog.show()
-        dialog.capDialogWidth()
+            .show()
     }
 
     // ── 数据类 ────────────────────────────────────────────────────────
@@ -296,14 +206,14 @@ class PlanFragment : Fragment() {
         val day: Int,
         val dateStr: String?,
         val isToday: Boolean = false,
-        val totalTasks: Int = 0,
-        val doneTasks: Int = 0
+        val isSelected: Boolean = false,
+        val hasSession: Boolean = false
     )
 
     // ── 日历适配器 ────────────────────────────────────────────────────
 
     inner class CalendarDayAdapter(
-        private val onDayClick: (Int) -> Unit
+        private val onDayClick: (CalendarDay) -> Unit
     ) : RecyclerView.Adapter<CalendarDayAdapter.VH>() {
 
         private var items = listOf<CalendarDay>()
@@ -323,32 +233,36 @@ class PlanFragment : Fragment() {
             val item = items[position]
             if (item.day == 0) {
                 holder.tvDay.text = ""
+                holder.tvDay.background = null  // 复用清背景，防选中样式残留到空格
                 holder.dotIndicator.visibility = View.GONE
                 holder.itemView.setOnClickListener(null)
             } else {
                 holder.tvDay.text = item.day.toString()
 
-                if (item.isToday) {
-                    holder.tvDay.setBackgroundResource(R.drawable.bg_tag_blue)
-                    holder.tvDay.setTextColor(0xFFFFFFFF.toInt())
-                } else {
-                    holder.tvDay.background = null
-                    holder.tvDay.setTextColor(0xFF374151.toInt())
+                when {
+                    item.isToday -> {
+                        holder.tvDay.setBackgroundResource(R.drawable.bg_tag_blue)
+                        holder.tvDay.setTextColor(0xFFFFFFFF.toInt())
+                    }
+                    item.isSelected -> {
+                        holder.tvDay.setBackgroundResource(R.drawable.bg_day_selected)
+                        holder.tvDay.setTextColor(0xFF3C5A4E.toInt())
+                    }
+                    else -> {
+                        holder.tvDay.background = null
+                        holder.tvDay.setTextColor(0xFF374151.toInt())
+                    }
                 }
 
-                if (item.totalTasks > 0) {
+                if (item.hasSession) {
                     holder.dotIndicator.visibility = View.VISIBLE
-                    val dotBg = holder.dotIndicator.background as? android.graphics.drawable.GradientDrawable
-                    if (item.doneTasks >= item.totalTasks) {
-                        dotBg?.setColor(0xFF10B981.toInt())
-                    } else {
-                        dotBg?.setColor(0xFF2563EB.toInt())
-                    }
+                    (holder.dotIndicator.background as? android.graphics.drawable.GradientDrawable)
+                        ?.setColor(0xFF5C8271.toInt())
                 } else {
                     holder.dotIndicator.visibility = View.GONE
                 }
 
-                holder.itemView.setOnClickListener { onDayClick(item.day) }
+                holder.itemView.setOnClickListener { onDayClick(item) }
             }
         }
 

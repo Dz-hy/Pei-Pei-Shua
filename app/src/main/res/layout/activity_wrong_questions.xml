@@ -94,6 +94,23 @@
             android:focusable="true" />
     </LinearLayout>
 
+    <!-- ===== 卷名筛选 chips（按错题快照的卷名动态生成，默认隐藏） ===== -->
+    <HorizontalScrollView
+        android:id="@+id/chips_scroll"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:scrollbars="none"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:id="@+id/chips_row"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:paddingHorizontal="16dp"
+            android:paddingBottom="12dp" />
+    </HorizontalScrollView>
+
     <!-- ===== 操作栏：错题重练 + 已掌握开关 ===== -->
     <LinearLayout
         android:layout_width="match_parent"

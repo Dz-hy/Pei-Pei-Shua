@@ -19,11 +19,14 @@ object VectorIndexer {
     @Volatile
     private var pauseRequested = false
 
-    /** 启动构建（已在跑则忽略）。onFinished(paused: 全部完成=false/暂停或出错=true？见参) */
+    /** 启动构建（已在跑则忽略）。force=true 先清空 question_vectors 全量重建：材料变更后
+     *  旧向量内容已失效，断点续跑按"表里没有的题"看不出差异，需清表
+     *  onFinished(paused: 全部完成=false/暂停或出错=true？见参) */
     fun start(
         context: Context,
         onProgress: (done: Int, total: Int) -> Unit,
-        onFinished: (pausedOrError: Boolean, message: String) -> Unit
+        onFinished: (pausedOrError: Boolean, message: String) -> Unit,
+        force: Boolean = false
     ) {
         if (isRunning) return
         if (!AppPreferences.hasEmbConfig(context)) {
@@ -38,6 +41,7 @@ object VectorIndexer {
             var error = ""
             try {
                 val db = QuestionBankDb(appCtx)
+                if (force) db.clearAllVectors()
                 val total = db.countAllQuestions()
                 val baseUrl = AppPreferences.getEmbBaseUrl(appCtx)
                 val key = AppPreferences.getEmbKey(appCtx)

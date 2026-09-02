@@ -36,3 +36,10 @@ __MACOSX/
 # 题库素材与转换器测试产物（脚本本身提交，素材不入库）
 tools/test_samples/
 tools/历年真题/
+tools/省考真题/
+tools/ocr_work/
+/test_samples/
+
+# 密钥与 Python 运行时（不入库）
+tools/ocr_config.json
+__pycache__/

@@ -930,7 +930,7 @@ class AiModelFragment : Fragment() {
                         qbCount = db.importQuestionsFromStream(ins)
                     }
                     if (qbCount >= 0) {
-                        com.example.aiassistant.questionbank.QuestionBankManager.init(ctx, force = true)
+                        com.example.aiassistant.questionbank.QuestionBankManager.reloadDatabaseAfterImport(ctx)
                     } else {
                         val errMsg = when (qbCount) {
                             -4 -> "该文件是单分类专项题包，请使用上面的【导入题库数据】功能导入"
@@ -968,7 +968,7 @@ class AiModelFragment : Fragment() {
                             val db = com.example.aiassistant.questionbank.QuestionBankDb(ctx)
                             qbCount = db.importQuestionsFromJson(qbObj.toString())
                             if (qbCount > 0) {
-                                com.example.aiassistant.questionbank.QuestionBankManager.init(ctx, force = true)
+                                com.example.aiassistant.questionbank.QuestionBankManager.reloadDatabaseAfterImport(ctx)
                             }
                         }
                     } else {
@@ -985,7 +985,7 @@ class AiModelFragment : Fragment() {
                                 val db = com.example.aiassistant.questionbank.QuestionBankDb(ctx)
                                 qbCount = db.importQuestionsFromJson(jsonStr)
                                 if (qbCount > 0) {
-                                    com.example.aiassistant.questionbank.QuestionBankManager.init(ctx, force = true)
+                                    com.example.aiassistant.questionbank.QuestionBankManager.reloadDatabaseAfterImport(ctx)
                                 }
                             }
                             else -> {
@@ -1052,8 +1052,8 @@ class AiModelFragment : Fragment() {
         layout.addView(tvTitle)
 
         val etParent = EditText(ctx).apply {
-            hint = "目标一级大分类 (例如: 判断推理)"
-            setText("自建题库")
+            hint = "目标一级大分类 (例如: 真题)"
+            setText("真题")
             textSize = 14f
             setBackgroundResource(R.drawable.bg_default_chip)
             val padding = (12 * resources.displayMetrics.density).toInt()
@@ -1068,7 +1068,7 @@ class AiModelFragment : Fragment() {
         layout.addView(etParent)
 
         val etChild = EditText(ctx).apply {
-            hint = "目标二级子分类 (例如: 类比推理)"
+            hint = "默认二级子分类（题目自带分类时忽略，例如: 2026国考卷）"
             setText(queryDisplayName(uri).substringBeforeLast(".").ifEmpty { "自定义子分类" })
             textSize = 14f
             setBackgroundResource(R.drawable.bg_default_chip)
@@ -1127,7 +1127,7 @@ class AiModelFragment : Fragment() {
                 activity?.runOnUiThread {
                     dialog.dismiss()
                     if (count >= 0) {
-                        com.example.aiassistant.questionbank.QuestionBankManager.init(ctx, force = true)
+                        com.example.aiassistant.questionbank.QuestionBankManager.reloadDatabaseAfterImport(ctx)
 
                         AlertDialog.Builder(ctx)
                             .setTitle("导入成功")

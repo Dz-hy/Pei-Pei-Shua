@@ -14,6 +14,7 @@ object QuestionBankManager {
     @Volatile private var importing = false
 
     private val onReadyListeners = java.util.concurrent.CopyOnWriteArrayList<() -> Unit>()
+    @Volatile private var dataChangedListeners = java.util.concurrent.CopyOnWriteArrayList<() -> Unit>()
 
     fun addOnReadyListener(listener: () -> Unit) {
         if (ready) {
@@ -25,6 +26,25 @@ object QuestionBankManager {
 
     fun removeOnReadyListener(listener: () -> Unit) {
         onReadyListeners.remove(listener)
+    }
+
+    /**
+     * 注册"题库数据变更"监听（导入等外部写入后触发）。
+     * 与 onReady 不同：随时可注册、反复触发——MainActivity 用 hide/show 切 tab 不会重发
+     * onResume，首页必须靠这个通知重载模块列表。
+     */
+    fun addOnBankDataChangedListener(listener: () -> Unit) {
+        dataChangedListeners.add(listener)
+    }
+
+    fun removeOnBankDataChangedListener(listener: () -> Unit) {
+        dataChangedListeners.remove(listener)
+    }
+
+    private fun notifyBankDataChanged() {
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            dataChangedListeners.forEach { it() }
+        }
     }
 
     fun init(context: Context, force: Boolean = false) {
@@ -91,6 +111,41 @@ object QuestionBankManager {
 
     fun getModules(): List<QuestionModule> {
         return db?.getModules() ?: emptyList()
+    }
+
+    /**
+     * 外部题库导入成功后调用（导入线程）：丢弃旧连接并重开。
+     * 导入走独立的 QuestionBankDb 实例，提交后旧连接可能持有过期快照，
+     * 导致界面继续显示导入前的数据（需重启 App 才可见）。重开后下次读取立即拿到新数据。
+     */
+    fun reloadDatabaseAfterImport(context: Context) {
+        val appCtx = context.applicationContext
+        executor.execute {
+            try {
+                // 丢弃旧连接，避免读到导入前的状态
+                try { db?.close() } catch (_: Exception) {}
+                db = null
+                val helper = QuestionBankDb(appCtx)
+                db = helper
+                ready = true
+                val modules = getModules()
+                val total = modules.sumOf { it.questionCount + it.children.sumOf { c -> c.questionCount } }
+                Log.i(TAG, "题库已热刷新：${modules.size} 大模块 / $total 题")
+                notifyBankDataChanged()
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    onReadyListeners.forEach { it() }
+                    onReadyListeners.clear()
+                }
+            } catch (e: Exception) {
+                ready = true
+                Log.e(TAG, "题库热刷新失败: ${e.message}")
+            }
+        }
+    }
+
+    /** 删除自定义分类（级联其子分类与全部题目），用于长按分类删除 */
+    fun deleteModule(context: Context, moduleId: String) {
+        QuestionBankDb(context).deleteModuleCascade(moduleId)
     }
 
     fun getModulesAsync(onResult: (List<QuestionModule>) -> Unit) {
@@ -165,5 +220,83 @@ object QuestionBankManager {
     fun getQuestionModuleName(questionId: String): String? {
         val moduleId = db?.getQuestionModuleId(questionId) ?: return null
         return db?.getModuleName(moduleId)
+    }
+
+    // ── 训练会话（计划表-做题历史） ───────────────────────────────────
+
+    /** 保存整场训练快照（异步写入） */
+    fun savePracticeSession(session: PracticeSessionRecord) {
+        executor.execute {
+            try {
+                db?.savePracticeSession(session)
+            } catch (e: Exception) {
+                Log.e(TAG, "保存训练记录失败: ${e.message}")
+            }
+        }
+    }
+
+    /** 某天的训练记录，按完成时间倒序 */
+    fun getPracticeSessionsByDate(dateStr: String): List<PracticeSessionRecord> {
+        return try {
+            db?.getPracticeSessionsByDate(dateStr) ?: emptyList()
+        } catch (e: Exception) {
+            Log.e(TAG, "查询训练记录失败: ${e.message}")
+            emptyList()
+        }
+    }
+
+    /** 异步版：与 savePracticeSession 同走单线程队列，做完训练立即返回计划表时不会读到还没落库的记录 */
+    fun getPracticeSessionsByDateAsync(dateStr: String, onResult: (List<PracticeSessionRecord>) -> Unit) {
+        executor.execute {
+            val list = try {
+                db?.getPracticeSessionsByDate(dateStr) ?: emptyList()
+            } catch (e: Exception) {
+                Log.e(TAG, "查询训练记录失败: ${e.message}")
+                emptyList()
+            }
+            onResult(list)
+        }
+    }
+
+    /** 某月有训练记录的日期集合（日历打点）。异步版：见 getPracticeSessionsByDateAsync */
+    fun getPracticeSessionDates(year: Int, month: Int): Set<String> {
+        return try {
+            db?.getPracticeSessionDates(year, month) ?: emptySet()
+        } catch (e: Exception) {
+            Log.e(TAG, "查询训练日期失败: ${e.message}")
+            emptySet()
+        }
+    }
+
+    fun getPracticeSessionDatesAsync(year: Int, month: Int, onResult: (Set<String>) -> Unit) {
+        executor.execute {
+            val dates = try {
+                db?.getPracticeSessionDates(year, month) ?: emptySet()
+            } catch (e: Exception) {
+                Log.e(TAG, "查询训练日期失败: ${e.message}")
+                emptySet()
+            }
+            onResult(dates)
+        }
+    }
+
+    fun getPracticeSession(id: Long): PracticeSessionRecord? {
+        return try {
+            db?.getPracticeSession(id)
+        } catch (e: Exception) {
+            Log.e(TAG, "查询训练记录失败: ${e.message}")
+            null
+        }
+    }
+
+    /** 删除一条训练记录（异步） */
+    fun deletePracticeSession(id: Long) {
+        executor.execute {
+            try {
+                db?.deletePracticeSession(id)
+            } catch (e: Exception) {
+                Log.e(TAG, "删除训练记录失败: ${e.message}")
+            }
+        }
     }
 }

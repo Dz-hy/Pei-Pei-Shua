@@ -20,7 +20,6 @@ import com.example.aiassistant.fragment.PromptManageFragment
 import com.example.aiassistant.knowledge.KnowledgeCardFragment
 import com.example.aiassistant.knowledge.KnowledgeCardManager
 import com.example.aiassistant.plan.PlanFragment
-import com.example.aiassistant.plan.PlanManager
 import com.example.aiassistant.pomodoro.PomodoroFragment
 import com.example.aiassistant.pomodoro.PomodoroManager
 import com.example.aiassistant.shizheng.ShizhengManager
@@ -98,8 +97,6 @@ class MainActivity : AppCompatActivity(), HomeFragment.ServiceControlListener {
         DictionaryManager.init(this)
         // 初始化知识卡片
         KnowledgeCardManager.init(this)
-        // 初始化计划表
-        PlanManager.init(this)
         // 初始化番茄钟
         PomodoroManager.init(this)
         // 初始化时政模块

@@ -25,6 +25,7 @@ object WrongSnapshotCodec {
             put("id", q.id)
             put("stem", q.stem)
             put("stemHtml", q.stemHtml)
+            put("titleImages", JSONArray(q.titleImages))
             put("options", opts)
             put("answer", q.answer)
             put("analysis", q.analysis)
@@ -54,6 +55,10 @@ object WrongSnapshotCodec {
                     opts.add(QuestionOption(o.optString("text"), o.optString("html"), images))
                 }
             }
+            val titleImages = mutableListOf<String>()
+            obj.optJSONArray("titleImages")?.let { arr ->
+                for (i in 0 until arr.length()) titleImages.add(arr.optString(i))
+            }
             Question(
                 id = obj.getString("id"),
                 stem = obj.getString("stem"),
@@ -64,7 +69,7 @@ object WrongSnapshotCodec {
                 knowledgePoint = obj.optString("knowledgePoint"),
                 source = obj.optString("source"),
                 rate = obj.optInt("rate", 50),
-                titleImages = emptyList(),
+                titleImages = titleImages,
                 materialId = obj.optString("materialId"),
                 materialContent = obj.optString("materialContent"),
                 difficulty = obj.optString("difficulty", "medium")

@@ -14,7 +14,7 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
     companion object {
         private const val TAG = "QuestionBankDb"
         private const val DB_NAME = "question_bank_v2.db"
-        private const val DB_VERSION = 6
+        private const val DB_VERSION = 7
 
         const val T_MODULES = "modules"
         const val T_QUESTIONS = "questions"
@@ -22,6 +22,7 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
         const val T_FTS = "questions_fts"
         const val T_ANNOTATIONS = "question_annotations"
         const val T_VECTORS = "question_vectors"
+        const val T_SESSIONS = "practice_sessions"
 
         // 模块定义：大模块 → 小模块列表
         val MODULE_TREE = mapOf(
@@ -143,6 +144,26 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
                 FOREIGN KEY (question_id) REFERENCES $T_QUESTIONS(id)
             )
         """)
+
+        // 训练会话表（计划表-做题历史；整场训练的完整快照）
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS $T_SESSIONS (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                finished_at INTEGER NOT NULL,
+                date_str TEXT NOT NULL,
+                module_id TEXT DEFAULT '',
+                module_name TEXT DEFAULT '',
+                is_wrong_practice INTEGER DEFAULT 0,
+                question_count INTEGER DEFAULT 0,
+                correct_count INTEGER DEFAULT 0,
+                wrong_count INTEGER DEFAULT 0,
+                elapsed_ms INTEGER DEFAULT 0,
+                rate_min INTEGER DEFAULT 0,
+                rate_max INTEGER DEFAULT 100,
+                questions_json TEXT DEFAULT '[]'
+            )
+        """)
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_practice_sessions_date ON $T_SESSIONS(date_str)")
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -171,6 +192,26 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
                     FOREIGN KEY (question_id) REFERENCES $T_QUESTIONS(id)
                 )
             """)
+        }
+        if (oldVersion < 7) {
+            db.execSQL("""
+                CREATE TABLE IF NOT EXISTS $T_SESSIONS (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    finished_at INTEGER NOT NULL,
+                    date_str TEXT NOT NULL,
+                    module_id TEXT DEFAULT '',
+                    module_name TEXT DEFAULT '',
+                    is_wrong_practice INTEGER DEFAULT 0,
+                    question_count INTEGER DEFAULT 0,
+                    correct_count INTEGER DEFAULT 0,
+                    wrong_count INTEGER DEFAULT 0,
+                    elapsed_ms INTEGER DEFAULT 0,
+                    rate_min INTEGER DEFAULT 0,
+                    rate_max INTEGER DEFAULT 100,
+                    questions_json TEXT DEFAULT '[]'
+                )
+            """)
+            db.execSQL("CREATE INDEX IF NOT EXISTS idx_practice_sessions_date ON $T_SESSIONS(date_str)")
         }
     }
 
@@ -260,6 +301,11 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
     /** 删除题目时同步清向量 */
     fun deleteVector(questionId: String) {
         writableDatabase.delete(T_VECTORS, "question_id = ?", arrayOf(questionId))
+    }
+
+    /** 清空全部向量（材料变更后全量重建用，VectorIndexer force 模式） */
+    fun clearAllVectors() {
+        writableDatabase.delete(T_VECTORS, null, null)
     }
 
     fun isImported(): Boolean {
@@ -461,6 +507,32 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
         return rootModules
     }
 
+    /** 级联删除分类：分类+其子分类、名下全部题目及关联数据（FTS/向量/批注/完成记录），并清理孤儿材料 */
+    fun deleteModuleCascade(moduleId: String) {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            // 用模块子查询删除，避免题目数超过 SQLite 999 个绑定参数上限
+            db.execSQL(
+                "DELETE FROM $T_QUESTIONS WHERE module_id IN " +
+                "(SELECT id FROM $T_MODULES WHERE id = ? OR parent_id = ?)",
+                arrayOf(moduleId, moduleId)
+            )
+            db.execSQL("DELETE FROM $T_FTS WHERE id NOT IN (SELECT id FROM $T_QUESTIONS)")
+            db.execSQL("DELETE FROM $T_VECTORS WHERE question_id NOT IN (SELECT id FROM $T_QUESTIONS)")
+            db.execSQL("DELETE FROM $T_ANNOTATIONS WHERE question_id NOT IN (SELECT id FROM $T_QUESTIONS)")
+            db.execSQL("DELETE FROM completed_questions WHERE question_id NOT IN (SELECT id FROM $T_QUESTIONS)")
+            db.execSQL("DELETE FROM $T_MODULES WHERE id = ? OR parent_id = ?", arrayOf(moduleId, moduleId))
+            db.execSQL(
+                "DELETE FROM $T_MATERIALS WHERE id NOT IN " +
+                "(SELECT DISTINCT material_id FROM $T_QUESTIONS WHERE material_id != '')"
+            )
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
     fun getQuestionsByModule(moduleId: String): List<Question> {
         val questions = mutableListOf<Question>()
         readableDatabase.rawQuery(
@@ -504,6 +576,41 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
             }
         }
         return questions
+    }
+
+    /**
+     * 材料段单独匹配：OCR 框选的"材料段"与题库 materials 表比对。
+     * 取材料文本特征行（长度≥15 的行）与库内材料做 LCS 相似度，最优 ≥0.45 视为命中。
+     * 命中返回 materialId；未命中返回 null（通常说明该组未转换成功，调用方回退题干链）。
+     */
+    fun findMaterialByText(ocrText: String): String? {
+        val lines = ocrText.lines().map { it.trim() }.filter { it.length >= 15 }
+        if (lines.isEmpty()) return null
+        val best = mutableListOf<Pair<String, Double>>()
+        readableDatabase.rawQuery("SELECT id, content FROM $T_MATERIALS", null).use { cursor ->
+            while (cursor.moveToNext()) {
+                val content = cursor.getString(1)
+                var bestSim = 0.0
+                for (line in lines.take(6)) {  // 取前 6 行特征行足矣
+                    for (cand in materialCandidates(content)) {
+                        val sim = lcsSimilarity(line, cand)
+                        if (sim > bestSim) bestSim = sim
+                        if (sim >= 0.45) break
+                    }
+                    if (bestSim >= 0.45) break
+                }
+                if (bestSim >= 0.45) best.add(cursor.getString(0) to bestSim)
+            }
+        }
+        return best.maxByOrNull { it.second }?.first
+    }
+
+    private fun materialCandidates(content: String): List<String> {
+        // 剥掉 HTML 标签后按 <br>/换行拆候选行，取长度 ≥15 的行
+        val plain = content.replace(Regex("<img[^>]*>", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("<br\\s*/?>", RegexOption.IGNORE_CASE), "\n")
+            .replace(Regex("<[^>]+>", RegexOption.IGNORE_CASE), "")
+        return plain.lines().map { it.trim() }.filter { it.length >= 15 }
     }
 
     fun getQuestionById(id: String): Question? {
@@ -556,46 +663,85 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
 
     fun getQuestionsByRateRange(moduleId: String, rateMin: Int, rateMax: Int, limit: Int): List<Question> {
         val questions = mutableListOf<Question>()
-        
-        // 1. 尝试先获取未做过的题目
-        readableDatabase.rawQuery(
-            "SELECT q.id, q.stem, q.stem_html, q.options, q.answer, q.analysis, q.knowledge_point, q.source, q.rate, q.title_images, q.material_id, COALESCE(m.content, ''), q.difficulty " +
-            "FROM $T_QUESTIONS q LEFT JOIN $T_MATERIALS m ON q.material_id = m.id " +
-            "WHERE q.module_id = ? AND q.rate >= ? AND q.rate <= ? " +
-            "AND q.id NOT IN (SELECT question_id FROM completed_questions) " +
-            "ORDER BY RANDOM() LIMIT ?",
-            arrayOf(moduleId, rateMin.toString(), rateMax.toString(), limit.toString())
-        ).use { cursor ->
-            while (cursor.moveToNext()) {
-                questions.add(cursorToQuestion(cursor))
-            }
-        }
-        
+
+        // 1. 尝试先获取未做过的题目（材料组感知：同 material_id 整组进/整组出，组内连续）
+        questions.addAll(pickQuestionsByRange(moduleId, rateMin, rateMax, limit, onlyUncompleted = true))
+
         // 2. 如果未做过的题目不足，且该范围内所有题目均已做完，则自动重置已做记录并重新派送
         if (questions.size < limit) {
             val totalInModuleRange = getQuestionCountByRateRange(moduleId, rateMin, rateMax)
             val completedInModuleRange = getCompletedQuestionCountByRateRange(moduleId, rateMin, rateMax)
-            
+
             if (completedInModuleRange >= totalInModuleRange && totalInModuleRange > 0) {
                 // 该范围的所有题都做完了，重置它们以允许重新派送
                 resetCompletedQuestionsByRange(moduleId, rateMin, rateMax)
-                
-                // 再次尝试获取
-                val remainingLimit = limit - questions.size
-                readableDatabase.rawQuery(
-                    "SELECT q.id, q.stem, q.stem_html, q.options, q.answer, q.analysis, q.knowledge_point, q.source, q.rate, q.title_images, q.material_id, COALESCE(m.content, ''), q.difficulty " +
-                    "FROM $T_QUESTIONS q LEFT JOIN $T_MATERIALS m ON q.material_id = m.id " +
-                    "WHERE q.module_id = ? AND q.rate >= ? AND q.rate <= ? " +
-                    "ORDER BY RANDOM() LIMIT ?",
-                    arrayOf(moduleId, rateMin.toString(), rateMax.toString(), remainingLimit.toString())
-                ).use { cursor ->
-                    while (cursor.moveToNext()) {
-                        questions.add(cursorToQuestion(cursor))
-                    }
-                }
+                questions.addAll(
+                    pickQuestionsByRange(moduleId, rateMin, rateMax,
+                        limit - questions.size, onlyUncompleted = false)
+                )
             }
         }
         return questions
+    }
+
+    /**
+     * 材料组感知组卷：把 [moduleId] 范围内 (rate 区间) 的题读全量，按 material_id 分组——
+     * 材料组整组抽取（一组 N 题占 N 配额，组内连续、组间按题号序）；无材料散题单抽。
+     * onlyUncompleted=true 时优先未做过的题（组内任一未做过即整组保留）。
+     */
+    private fun pickQuestionsByRange(moduleId: String, rateMin: Int, rateMax: Int,
+                                     limit: Int, onlyUncompleted: Boolean): List<Question> {
+        if (limit <= 0) return emptyList()
+        val all = readableDatabase.rawQuery(
+            "SELECT q.id, q.stem, q.stem_html, q.options, q.answer, q.analysis, q.knowledge_point, q.source, q.rate, q.title_images, q.material_id, COALESCE(m.content, ''), q.difficulty " +
+            "FROM $T_QUESTIONS q LEFT JOIN $T_MATERIALS m ON q.material_id = m.id " +
+            "WHERE q.module_id = ? AND q.rate >= ? AND q.rate <= ?" +
+            if (onlyUncompleted) " AND q.id NOT IN (SELECT question_id FROM completed_questions)" else "",
+            if (onlyUncompleted) arrayOf(moduleId, rateMin.toString(), rateMax.toString()) else
+                arrayOf(moduleId, rateMin.toString(), rateMax.toString())
+        ).use { cursor ->
+            val list = mutableListOf<Question>()
+            while (cursor.moveToNext()) list.add(cursorToQuestion(cursor))
+            list
+        }
+        if (all.isEmpty()) return emptyList()
+
+        // 按 material_id 分组；同组按题号序（id 尾数字）。空串 = 无材料散题，
+        // 必须以题目自身为组键——否则整卷无材料题会聚成一个"大组"被整组塞进去（选20题出全部题）。
+        val groups = LinkedHashMap<String, MutableList<Question>>()
+        for (q in all) {
+            val key = q.materialId.ifBlank { "single#" + q.id }
+            groups.getOrPut(key) { mutableListOf() }.add(q)
+        }
+        for (qs in groups.values) {
+            qs.sortBy { it.id.substringAfterLast('_').toIntOrNull() ?: 0 }
+        }
+
+        val shuffledGroups = groups.values.shuffled()
+        val picked = mutableListOf<Question>()
+        val pickedSize = mutableSetOf<String>()
+        var remain = limit
+        // 先保证组完整性：组超配额不拆（一组 N 题占 N 配额），组内连续追加
+        for (group in shuffledGroups) {
+            // 去重必须按"组键"（散题=自身id）而非原始 material_id——散题都是空串，
+            // 按空串记账会导致第一个散题之后的所有散题被 continue 跳过（只出一题）
+            val groupKey = group[0].materialId.ifBlank { "single#" + group[0].id }
+            if (pickedSize.contains(groupKey)) continue
+            if (group.size > 1) {
+                // 材料组：整组进（超配额也整组进，保材料一致性）
+                picked.addAll(group)
+                remain -= group.size
+                pickedSize.add(groupKey)
+            } else {
+                if (remain > 0) {
+                    picked.add(group[0])
+                    remain -= 1
+                    pickedSize.add(groupKey)
+                }
+            }
+            if (remain <= 0) break
+        }
+        return picked
     }
 
     fun getCompletedQuestionCountByRateRange(moduleId: String, rateMin: Int, rateMax: Int): Int {
@@ -623,6 +769,84 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
             put("completed_at", System.currentTimeMillis())
         }
         writableDatabase.insertWithOnConflict("completed_questions", null, values, SQLiteDatabase.CONFLICT_IGNORE)
+    }
+
+    // ── 训练会话（计划表-做题历史） ───────────────────────────────────
+
+    private val SESSION_COLS = "id, finished_at, date_str, module_id, module_name, is_wrong_practice, question_count, correct_count, wrong_count, elapsed_ms, rate_min, rate_max, questions_json"
+
+    fun savePracticeSession(s: PracticeSessionRecord): Long {
+        val values = ContentValues().apply {
+            put("finished_at", s.finishedAt)
+            put("date_str", s.dateStr)
+            put("module_id", s.moduleId)
+            put("module_name", s.moduleName)
+            put("is_wrong_practice", if (s.isWrongPractice) 1 else 0)
+            put("question_count", s.questionCount)
+            put("correct_count", s.correctCount)
+            put("wrong_count", s.wrongCount)
+            put("elapsed_ms", s.elapsedMs)
+            put("rate_min", s.rateMin)
+            put("rate_max", s.rateMax)
+            put("questions_json", s.questionsJson)
+        }
+        return writableDatabase.insert(T_SESSIONS, null, values)
+    }
+
+    /** 某天的训练记录，按完成时间倒序 */
+    fun getPracticeSessionsByDate(dateStr: String): List<PracticeSessionRecord> {
+        val list = mutableListOf<PracticeSessionRecord>()
+        readableDatabase.rawQuery(
+            "SELECT $SESSION_COLS FROM $T_SESSIONS WHERE date_str = ? ORDER BY finished_at DESC",
+            arrayOf(dateStr)
+        ).use { cursor ->
+            while (cursor.moveToNext()) list.add(cursorToSession(cursor))
+        }
+        return list
+    }
+
+    /** 某月有训练记录的日期集合（日历打点） */
+    fun getPracticeSessionDates(year: Int, month: Int): Set<String> {
+        val dates = mutableSetOf<String>()
+        val prefix = String.format("%04d-%02d", year, month)
+        readableDatabase.rawQuery(
+            "SELECT DISTINCT date_str FROM $T_SESSIONS WHERE date_str LIKE ?",
+            arrayOf("$prefix%")
+        ).use { cursor ->
+            while (cursor.moveToNext()) dates.add(cursor.getString(0))
+        }
+        return dates
+    }
+
+    fun getPracticeSession(id: Long): PracticeSessionRecord? {
+        return readableDatabase.rawQuery(
+            "SELECT $SESSION_COLS FROM $T_SESSIONS WHERE id = ?",
+            arrayOf(id.toString())
+        ).use { cursor ->
+            if (cursor.moveToFirst()) cursorToSession(cursor) else null
+        }
+    }
+
+    fun deletePracticeSession(id: Long) {
+        writableDatabase.delete(T_SESSIONS, "id = ?", arrayOf(id.toString()))
+    }
+
+    private fun cursorToSession(cursor: android.database.Cursor): PracticeSessionRecord {
+        return PracticeSessionRecord(
+            id = cursor.getLong(0),
+            finishedAt = cursor.getLong(1),
+            dateStr = cursor.getString(2),
+            moduleId = cursor.getString(3) ?: "",
+            moduleName = cursor.getString(4) ?: "",
+            isWrongPractice = cursor.getInt(5) == 1,
+            questionCount = cursor.getInt(6),
+            correctCount = cursor.getInt(7),
+            wrongCount = cursor.getInt(8),
+            elapsedMs = cursor.getLong(9),
+            rateMin = cursor.getInt(10),
+            rateMax = cursor.getInt(11),
+            questionsJson = cursor.getString(12) ?: "[]"
+        )
     }
 
     fun getQuestionCountByRateRange(moduleId: String, rateMin: Int, rateMax: Int): Int {
@@ -1177,7 +1401,10 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
             } else {
                 // ================== 2. 自定义单分类热导入流模式 ==================
                 val parentId = "mod_${parentModule.hashCode().toString().replace("-", "n")}"
-                val childId = "mod_${childModule.hashCode().toString().replace("-", "n")}"
+                // 子分类 id 以「父分类/子分类」组合哈希命名：避免与预置树同名顶级模块 id 冲突，
+                // 同时同父分类下跨卷同名子分类（如两套卷的"常识判断"）仍能合并
+                val childScope = "$parentModule/"
+                val childId = "mod_${(childScope + childModule).hashCode().toString().replace("-", "n")}"
 
                 db.insertWithOnConflict(T_MODULES, null, ContentValues().apply {
                     put("id", parentId)
@@ -1186,12 +1413,34 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
                     put("sort_order", 999)
                 }, SQLiteDatabase.CONFLICT_IGNORE)
 
-                db.insertWithOnConflict(T_MODULES, null, ContentValues().apply {
-                    put("id", childId)
-                    put("name", childModule)
-                    put("parent_id", parentId)
-                    put("sort_order", 999)
-                }, SQLiteDatabase.CONFLICT_IGNORE)
+                // 题目自带 module 字段（如真题大题标题）→ 按值分组在父分类下自动建子分类；
+                // 未带的题归对话框指定的子分类（惰性创建，避免整卷带分类时留空分类）
+                val sectionIds = mutableMapOf<String, String>()
+                fun resolveChildId(section: String): String {
+                    return sectionIds.getOrPut(section) {
+                        val id = "mod_${(childScope + section).hashCode().toString().replace("-", "n")}"
+                        db.insertWithOnConflict(T_MODULES, null, ContentValues().apply {
+                            put("id", id)
+                            put("name", section)
+                            put("parent_id", parentId)
+                            put("sort_order", 999)
+                        }, SQLiteDatabase.CONFLICT_IGNORE)
+                        id
+                    }
+                }
+                var defaultChildCreated = false
+                fun defaultChildId(): String {
+                    if (!defaultChildCreated) {
+                        db.insertWithOnConflict(T_MODULES, null, ContentValues().apply {
+                            put("id", childId)
+                            put("name", childModule)
+                            put("parent_id", parentId)
+                            put("sort_order", 999)
+                        }, SQLiteDatabase.CONFLICT_IGNORE)
+                        defaultChildCreated = true
+                    }
+                    return childId
+                }
 
                 reader.beginArray()
                 while (reader.hasNext()) {
@@ -1207,6 +1456,7 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
                     var kpName = ""
                     var titleImages = "[]"
                     var materialContent = ""
+                    var qModule = ""
                     
                     while (reader.hasNext()) {
                         val k = reader.nextName()
@@ -1220,6 +1470,11 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
                             "rate" -> rate = reader.nextInt()
                             "knowledge_point" -> kpName = reader.nextString()
                             "material" -> materialContent = reader.nextString()
+                            "module" -> qModule = if (reader.peek() == android.util.JsonToken.NULL) {
+                                reader.nextNull(); ""
+                            } else {
+                                reader.nextString()
+                            }
                             "options" -> {
                                 val optList = mutableListOf<String>()
                                 reader.beginArray()
@@ -1279,9 +1534,11 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
                         }, SQLiteDatabase.CONFLICT_IGNORE)
                     }
 
-                    db.insert(T_QUESTIONS, null, ContentValues().apply {
+                    val targetChildId = if (qModule.isNotBlank()) resolveChildId(qModule) else defaultChildId()
+
+                    db.insertWithOnConflict(T_QUESTIONS, null, ContentValues().apply {
                         put("id", keyName)
-                        put("module_id", childId)
+                        put("module_id", targetChildId)
                         put("stem", stemName)
                         put("stem_html", stemHtml)
                         put("material_id", materialId)
@@ -1293,13 +1550,13 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
                         put("rate", rate)
                         put("difficulty", "medium")
                         put("title_images", titleImages)
-                    })
+                    }, SQLiteDatabase.CONFLICT_REPLACE)
 
-                    db.insert(T_FTS, null, ContentValues().apply {
+                    db.insertWithOnConflict(T_FTS, null, ContentValues().apply {
                         put("id", keyName)
                         put("stem", toBigrams(stemName))
                         put("tags", toBigrams(kpName))
-                    })
+                    }, SQLiteDatabase.CONFLICT_REPLACE)
                     resultCount++
                 }
                 reader.endArray()

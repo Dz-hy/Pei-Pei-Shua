@@ -9,6 +9,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.view.LayoutInflater
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.WebSettings
@@ -18,6 +19,7 @@ import android.widget.ArrayAdapter
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.PopupWindow
+import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
@@ -46,6 +48,7 @@ class PracticeActivity : AppCompatActivity() {
     private lateinit var tvProgress: TextView
     private lateinit var cardMaterial: CardView
     private lateinit var wvMaterial: WebView
+    private lateinit var svContent: ScrollView
     private lateinit var tvKnowledgePoint: TextView
     private lateinit var wvStem: WebView
     private lateinit var layoutStemImages: android.widget.LinearLayout
@@ -81,6 +84,12 @@ class PracticeActivity : AppCompatActivity() {
     private var lastElapsedMs = 0L
     private var answerCardDialog: AlertDialog? = null
     private var aiDialog: AlertDialog? = null
+    // 当前材料区渲染的 materialId：同组子题共用，切换子题不重载材料（滚动位置保持）
+    private var lastMaterialKey: String? = null
+
+    // 回看模式：从计划表-做题历史打开往期训练（session_id >= 0），进来即交卷后锁定状态
+    private var reviewSessionId = -1L
+    private var reviewRecord: PracticeSessionRecord? = null
 
     // KaTeX 资源整读一次缓存：切题时不再重复读 assets 大文件（点击/切题卡顿优化）
     private val katexAssets: Triple<String, String, String> by lazy {
@@ -89,6 +98,15 @@ class PracticeActivity : AppCompatActivity() {
             assets.open("katex/katex.min.js").bufferedReader().readText(),
             assets.open("katex/auto-render.min.js").bufferedReader().readText()
         )
+    }
+
+    // 公式选项 WebView 池：WebView 构造是主线程大开销，切题复用避免每题新建（响应慢的另一半原因）
+    private val optionWebViewPool = mutableListOf<WebView>()
+    private val activeOptionWebViews = mutableListOf<WebView>()
+
+    /** 纯展示 WebView：默认 WebView 会消费触摸事件（吃掉选项行的点击），这里全部穿透 */
+    private inner class DisplayWebView(context: android.content.Context) : WebView(context) {
+        override fun onTouchEvent(event: MotionEvent): Boolean = false
     }
 
     // 自定义浮动工具栏 (PopupWindow)
@@ -123,11 +141,13 @@ class PracticeActivity : AppCompatActivity() {
 
     private var destroyed = false
     private val readyListener: () -> Unit = { loadData() }
+    private val reviewReadyListener: () -> Unit = { loadReviewSession() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_practice)
 
+        reviewSessionId = intent.getLongExtra("review_session_id", -1L)
         moduleId = intent.getStringExtra("module_id") ?: ""
         moduleName = intent.getStringExtra("module_name") ?: ""
         questionCount = intent.getIntExtra("question_count", 15)
@@ -146,6 +166,7 @@ class PracticeActivity : AppCompatActivity() {
         tvProgress = findViewById(R.id.tv_progress)
         cardMaterial = findViewById(R.id.card_material)
         wvMaterial = findViewById(R.id.wv_material)
+        svContent = findViewById(R.id.sv_content)
         tvKnowledgePoint = findViewById(R.id.tv_knowledge_point)
         wvStem = findViewById(R.id.wv_stem)
         layoutStemImages = findViewById(R.id.layout_stem_images)
@@ -262,12 +283,47 @@ try {
     }
 
     private fun loadData() {
+        if (reviewSessionId >= 0) {
+            // 回看模式：等题库就绪后从快照重建（会话表与题库同库）
+            if (QuestionBankManager.isLoaded()) {
+                loadReviewSession()
+            } else {
+                QuestionBankManager.addOnReadyListener(reviewReadyListener)
+            }
+            return
+        }
+
         if (isWrongPractice) {
             val items = WrongQuestionManager.getWrongQuestions(this).filter { it.id in wrongPracticeIds }
             wrongIdByQuestionId.clear()
-            questions = items.mapNotNull { wq ->
+            // 整组重做：快照题的 materialId 非空 → 从题库拉同材料全部子题（组内按题号序），
+            // 错题快照优先；组内非错题照常判分（答对不动，答错 recordBankWrong 入错题本）。
+            // 微大题（材料+多子题）在错题重练时整组还原，避免单题断裂
+            val snapshots = items.mapNotNull { wq ->
                 wq.snapshot?.also { wrongIdByQuestionId[it.id] = wq.id }
             }
+            val snapshotById = snapshots.associateBy { it.id }
+            val expanded = mutableListOf<Question>()
+            val seen = HashSet<String>()
+            // 先放带材料的错题所在组（整组），再放无材料错题
+            val groupSnapshots = snapshots.filter { it.materialId.isNotEmpty() }
+            val singleSnapshots = snapshots.filter { it.materialId.isEmpty() }
+            for (s in groupSnapshots) {
+                if (!seen.add(s.materialId)) continue
+                val group = if (QuestionBankManager.isLoaded()) {
+                    QuestionBankManager.getMaterialQuestions(s.materialId)
+                } else emptyList()
+                if (group.isNotEmpty()) {
+                    // 组内保留错题快照优先（题面不一定与题库一致），其余用题库题
+                    expanded.addAll(group.map { g -> snapshotById[g.id] ?: g })
+                } else {
+                    expanded.add(s)  // 题库无此组（已删），落单题
+                }
+            }
+            for (s in singleSnapshots) {
+                if (seen.add(s.id)) expanded.add(s)
+            }
+            questions = expanded
             selectedOptions = IntArray(questions.size) { -1 }
             results = arrayOfNulls(questions.size)
             submitted = false
@@ -305,6 +361,39 @@ try {
         showQuestion(0)
     }
 
+    /** 回看模式：从训练快照重建整场记录，进来即交卷后状态（与刚完成训练时一致） */
+    private fun loadReviewSession() {
+        val rec = QuestionBankManager.getPracticeSession(reviewSessionId)
+        if (rec == null) {
+            Toast.makeText(this, "训练记录不存在", Toast.LENGTH_SHORT).show()
+            finish()
+            return
+        }
+        reviewRecord = rec
+        moduleId = rec.moduleId
+        moduleName = rec.moduleName
+        questionCount = rec.questionCount
+        rateMin = rec.rateMin
+        rateMax = rec.rateMax
+        tvTitle.text = moduleName
+
+        questions = PracticeSessionRecord.parseQuestions(rec.questionsJson)
+        selectedOptions = PracticeSessionRecord.parseSelected(rec.questionsJson)
+        results = PracticeSessionRecord.parseResults(rec.questionsJson)
+        if (questions.isEmpty() || selectedOptions.size != questions.size || results.size != questions.size) {
+            Toast.makeText(this, "训练记录已损坏", Toast.LENGTH_SHORT).show()
+            finish()
+            return
+        }
+        correctCount = rec.correctCount
+        wrongCount = rec.wrongCount
+        lastElapsedMs = rec.elapsedMs
+        submitted = true
+
+        showQuestion(0)
+        showAnswerCard()
+    }
+
     private fun setupListeners() {
         btnPrev.setOnClickListener {
             if (currentIndex > 0) showQuestion(currentIndex - 1)
@@ -329,20 +418,20 @@ try {
 
         val question = questions[index]
 
-        // 材料区域
+        // 材料区域：同组子题共享同一 materialId，切换子题时不重载、滚动位置保持；
+        // 无材料时整个材料区隐藏（上半区让给题目，sv_content 占满）
         if (question.materialContent.isNotEmpty()) {
-            cardMaterial.visibility = View.VISIBLE
-            if (hasFormulas(question.materialContent)) {
+            if (lastMaterialKey != question.materialId) {
+                lastMaterialKey = question.materialId
                 wvMaterial.visibility = View.VISIBLE
                 renderInWebView(wvMaterial, question.materialContent)
-            } else {
-                wvMaterial.visibility = View.GONE
-                // 纯文本材料用隐藏的 WebView 渲染（保持一致性）
-                wvMaterial.visibility = View.VISIBLE
-                renderInWebView(wvMaterial, question.materialContent)
+                // 换组：新材料新题号，题目区滚回顶部
+                svContent.post { svContent.scrollTo(0, 0) }
             }
+            cardMaterial.visibility = View.VISIBLE
         } else {
             cardMaterial.visibility = View.GONE
+            lastMaterialKey = null
         }
 
         if (question.knowledgePoint.isNotEmpty()) {
@@ -390,10 +479,10 @@ try {
         updateProgress()
 
         btnPrev.isEnabled = index > 0
-        if (index == questions.size - 1) {
-            btnNext.text = "完成训练"
-        } else {
-            btnNext.text = "下一题"
+        btnNext.text = when {
+            index == questions.size - 1 && reviewSessionId >= 0 -> "练习报告"
+            index == questions.size - 1 -> "完成训练"
+            else -> "下一题"
         }
 
         // 切题：自动保存上一题批注；交卷前不显示旧批注（防剧透），交卷后回看显示
@@ -424,6 +513,12 @@ try {
 
     private fun showOptions(options: List<QuestionOption>) {
         layoutOptions.removeAllViews()
+        // 回收上一题的公式 WebView：旧行已被移除，脱离父布局后重新入池
+        for (wv in activeOptionWebViews) {
+            (wv.parent as? ViewGroup)?.removeView(wv)
+            optionWebViewPool.add(wv)
+        }
+        activeOptionWebViews.clear()
         val labels = listOf("A", "B", "C", "D", "E", "F", "G", "H")
 
         for ((i, option) in options.withIndex()) {
@@ -439,15 +534,9 @@ try {
             // 优先使用HTML格式
             if (option.html.isNotEmpty()) {
                 if (hasFormulas(option.html)) {
-                    // 选项有公式：用 WebView 渲染
+                    // 选项有公式：用 WebView 渲染（纯展示实例，触摸穿透给选项行）
                     tvText.visibility = View.GONE
-                    val optionWv = WebView(this).apply {
-                        layoutParams = LinearLayout.LayoutParams(
-                            LinearLayout.LayoutParams.MATCH_PARENT,
-                            LinearLayout.LayoutParams.WRAP_CONTENT
-                        )
-                        setBackgroundColor(0)
-                    }
+                    val optionWv = obtainOptionWebView()
                     setupWebView(optionWv)
                     // 插入到 tvText 之后
                     val parent = tvText.parent as android.view.ViewGroup
@@ -474,9 +563,9 @@ try {
             }
 
             if (option.html.isEmpty() && option.text.isEmpty() && option.images.isEmpty()) {
+                // 图形题等"选项即图"的题：图在题干图区展示，选项留空（仅保留点击区）
                 tvText.visibility = View.VISIBLE
-                tvText.text = "(图片加载中...)"
-                tvText.setTextColor(resources.getColor(R.color.text_secondary, null))
+                tvText.text = ""
             }
 
             optionView.setOnClickListener {
@@ -485,6 +574,23 @@ try {
 
             layoutOptions.addView(optionView)
         }
+    }
+
+    /** 取池中复用的纯展示 WebView，池空才新建；复用实例已带正确的 LayoutParams */
+    private fun obtainOptionWebView(): WebView {
+        val wv = if (optionWebViewPool.isNotEmpty()) {
+            optionWebViewPool.removeAt(optionWebViewPool.lastIndex)
+        } else {
+            DisplayWebView(this).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                )
+                setBackgroundColor(0)
+            }
+        }
+        activeOptionWebViews.add(wv)
+        return wv
     }
 
     private fun loadImage(url: String, imageView: ImageView, isStemImage: Boolean = false, retryCount: Int = 0) {
@@ -639,6 +745,23 @@ try {
             }.start()
         }
 
+        // 记录整场训练快照（计划表-做题历史；只记完成训练，中途退出不记）
+        val finishedAt = System.currentTimeMillis()
+        QuestionBankManager.savePracticeSession(PracticeSessionRecord(
+            finishedAt = finishedAt,
+            dateStr = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault()).format(java.util.Date(finishedAt)),
+            moduleId = if (isWrongPractice) "" else moduleId,
+            moduleName = moduleName.ifBlank { if (isWrongPractice) "错题重练" else "练习" },
+            isWrongPractice = isWrongPractice,
+            questionCount = questions.size,
+            correctCount = correctCount,
+            wrongCount = wrongCount,
+            elapsedMs = lastElapsedMs,
+            rateMin = rateMin,
+            rateMax = rateMax,
+            questionsJson = PracticeSessionRecord.snapshotToJson(questions, selectedOptions, results)
+        ))
+
         applyResult(questions[currentIndex], selectedOptions[currentIndex])
         updateProgress()
 
@@ -673,8 +796,12 @@ try {
         cardAnswer.visibility = View.VISIBLE
         tvAnswer.text = question.answer
         tvRate.text = "正确率: ${question.rate}%"
-        tvSource.text = question.source
-        tvAnalysis.text = if (sel < 0) "本题未作答。\n\n解析：${question.analysis}" else question.analysis
+        // 显示完整 JSON key（含 custom_ 前缀），用于排查未转换成功的题目
+        tvSource.text = question.id
+        tvAnalysis.text = HtmlAnalysis.render(
+            if (sel < 0) "本题未作答。\n\n解析：${question.analysis}" else question.analysis,
+            tvAnalysis
+        )
     }
 
     /** 最后一题「完成训练」：统一判分并弹出练习报告（答题卡浮层） */
@@ -832,7 +959,10 @@ try {
         dialog.capDialogWidth()
         answerCardDialog = dialog
 
-        dialogView.findViewById<MaterialButton>(R.id.btn_card_restart).setOnClickListener {
+        val btnRestart = dialogView.findViewById<MaterialButton>(R.id.btn_card_restart)
+        // 错题重练的回看没有"同分类再来一组"语义，隐藏该按钮
+        btnRestart.visibility = if (reviewRecord?.isWrongPractice == true) View.GONE else View.VISIBLE
+        btnRestart.setOnClickListener {
             dialog.dismiss()
             restartTraining()
         }
@@ -946,7 +1076,7 @@ try {
                         if (destroyed || !dialog.isShowing) return@runOnUiThread
                         layoutProgress.visibility = View.GONE
                         tvContent.visibility = View.VISIBLE
-                        tvContent.text = text
+                        com.example.aiassistant.MarkdownRenderer.applyTo(tvContent, text)
                     }
                 },
                 onError = { error ->
@@ -980,11 +1110,12 @@ try {
             append("\n正确答案：").append(q.answer)
             val sel = selectedOptions.getOrNull(currentIndex) ?: -1
             append("\n我的作答：").append(if (sel >= 0) labels.getOrElse(sel) { "?" } else "未作答")
-            if (q.analysis.isNotBlank()) append("\n官方解析：").append(q.analysis)
+            if (q.analysis.isNotBlank()) append("\n官方解析：").append(HtmlAnalysis.toPlainText(q.analysis))
         }
     }
 
     private fun restartTraining() {
+        reviewRecord = null
         currentIndex = 0
         selectedOptions = IntArray(questions.size) { -1 }
         results = arrayOfNulls(questions.size)
@@ -1022,8 +1153,15 @@ try {
         try { aiDialog?.dismiss() } catch (_: Exception) {}
         handler.removeCallbacksAndMessages(null)
         imageClient.dispatcher.cancelAll()
+        for (wv in activeOptionWebViews + optionWebViewPool) {
+            (wv.parent as? ViewGroup)?.removeView(wv)
+            wv.destroy()
+        }
+        activeOptionWebViews.clear()
+        optionWebViewPool.clear()
         wvStem.destroy()
         wvMaterial.destroy()
         QuestionBankManager.removeOnReadyListener(readyListener)
+        QuestionBankManager.removeOnReadyListener(reviewReadyListener)
     }
 }

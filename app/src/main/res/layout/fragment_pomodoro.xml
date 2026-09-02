@@ -125,11 +125,14 @@
                         android:textStyle="bold"
                         android:letterSpacing="0.05" />
 
-                    <!-- 圆形进度环倒计时 -->
+                    <!-- 圆形进度环倒计时（待机时点按可自定义专注时长） -->
                     <FrameLayout
+                        android:id="@+id/layout_timer_ring"
                         android:layout_width="210dp"
                         android:layout_height="210dp"
-                        android:layout_gravity="center_horizontal">
+                        android:layout_gravity="center_horizontal"
+                        android:clickable="true"
+                        android:focusable="true">
 
                         <!-- 背景淡砂岩圆环 -->
                         <View
@@ -173,6 +176,17 @@
                                 android:letterSpacing="0.12" />
                         </LinearLayout>
                     </FrameLayout>
+
+                    <!-- 自定义时长提示（仅待机可见） -->
+                    <TextView
+                        android:id="@+id/tv_duration_hint"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="10dp"
+                        android:text="点按圆环可自定义专注时长"
+                        android:textSize="11.5sp"
+                        android:textColor="@color/text_secondary"
+                        android:alpha="0.75" />
 
                     <!-- 当前任务 -->
                     <LinearLayout

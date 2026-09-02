@@ -317,6 +317,7 @@ object ShizhengManager {
 
     fun getNewsBySource(source: String): List<NewsArticle> = db.getNewsBySource(source)
     fun getAllNews(): List<NewsArticle> = db.getAllNews()
+    fun searchNews(keyword: String): List<NewsArticle> = db.searchNews(keyword)
     fun getNews(id: Long): NewsArticle? = db.getNews(id)
     fun getAllQuestions(): List<ShizhengQuestion> = db.getAllQuestions()
     fun getQuestion(id: Long): ShizhengQuestion? = db.getQuestion(id)

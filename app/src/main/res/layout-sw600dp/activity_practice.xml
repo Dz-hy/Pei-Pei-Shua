@@ -56,63 +56,74 @@
         </LinearLayout>
     </androidx.cardview.widget.CardView>
 
-    <!-- 内容区域：限宽居中 -->
+    <!-- 内容区域：限宽居中；有材料时上半材料区(WebView 独立滚动)+下半题目区 -->
     <androidx.constraintlayout.widget.ConstraintLayout
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1">
 
-        <ScrollView
-            android:id="@+id/sv_content"
+        <LinearLayout
+            android:id="@+id/content_area"
             android:layout_width="0dp"
             android:layout_height="match_parent"
-            android:fillViewport="true"
+            android:orientation="vertical"
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintEnd_toEndOf="parent"
             app:layout_constraintWidth_max="720dp">
 
-            <LinearLayout
+            <!-- 材料区域（一拖多）：固定比例上半区 -->
+            <androidx.cardview.widget.CardView
+                android:id="@+id/card_material"
                 android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:padding="24dp">
+                android:layout_height="0dp"
+                android:layout_weight="4.5"
+                android:layout_marginHorizontal="12dp"
+                android:layout_marginTop="8dp"
+                android:layout_marginBottom="4dp"
+                android:visibility="gone"
+                app:cardCornerRadius="12dp"
+                app:cardElevation="2dp"
+                app:cardBackgroundColor="#FFF8E1">
 
-                <!-- 材料区域（一拖多） -->
-                <androidx.cardview.widget.CardView
-                    android:id="@+id/card_material"
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:orientation="vertical"
+                    android:padding="12dp">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="材料"
+                        android:textSize="14sp"
+                        android:textStyle="bold"
+                        android:textColor="#F57F17"
+                        android:layout_marginBottom="6dp" />
+
+                    <WebView
+                        android:id="@+id/wv_material"
+                        android:layout_width="match_parent"
+                        android:layout_height="0dp"
+                        android:layout_weight="1"
+                        android:background="@android:color/transparent" />
+                </LinearLayout>
+            </androidx.cardview.widget.CardView>
+
+            <ScrollView
+                android:id="@+id/sv_content"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="5.5"
+                android:fillViewport="true">
+
+                <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginBottom="12dp"
-                    android:visibility="gone"
-                    app:cardCornerRadius="12dp"
-                    app:cardElevation="2dp"
-                    app:cardBackgroundColor="#FFF8E1">
+                    android:orientation="vertical"
+                    android:padding="24dp">
 
-                    <LinearLayout
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:orientation="vertical"
-                        android:padding="16dp">
-
-                        <TextView
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:text="材料"
-                            android:textSize="14sp"
-                            android:textStyle="bold"
-                            android:textColor="#F57F17"
-                            android:layout_marginBottom="8dp" />
-
-                        <WebView
-                            android:id="@+id/wv_material"
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:background="@android:color/transparent" />
-                    </LinearLayout>
-                </androidx.cardview.widget.CardView>
-
-                <!-- 题目区域 -->
-                <androidx.cardview.widget.CardView
+                    <!-- 题目区域 -->
+                    <androidx.cardview.widget.CardView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginBottom="12dp"
@@ -271,6 +282,7 @@
 
             </LinearLayout>
         </ScrollView>
+    </LinearLayout>
     </androidx.constraintlayout.widget.ConstraintLayout>
 
     <!-- 底部导航栏：按钮行限宽居中 -->

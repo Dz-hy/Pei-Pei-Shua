@@ -22,8 +22,11 @@ import android.os.IBinder
 import android.os.Looper
 import android.util.DisplayMetrics
 import android.util.Log
+import android.view.Gravity
+import android.view.LayoutInflater
 import android.view.View
 import android.view.WindowManager
+import android.widget.TextView
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import com.equationl.ncnnandroidppocr.OCR
@@ -561,10 +564,79 @@ class ScreenCaptureService : Service() {
     // AI 管道
     // ═════════════════════════════════════════════════════════════════════
 
+    // 材料题 OCR 暂存：用户先框材料选"材料"暂存文本，再框题目选"题目"一并匹配；
+    // 匹配流程结束（无论成败）清空。材料题 OCR 识别入口 flow（材料未入库→提示回退题干）见 QuestionMatcher
+    private var pendingMaterialText: String? = null
+    private var confirmOverlayView: View? = null
+
     private fun recordWrongQuestionDirectly(text: String, originalBitmap: Bitmap) {
+        // 文字型 OCR 错题：先弹"这是题目 / 这是材料"确认浮层（材料题用户可能先框了材料区）
+        showRecordConfirmOverlay(text, originalBitmap)
+    }
+
+    /** 弹"题目/材料"确认浮层；回调里回收 bitmap 并清暂存 */
+    private fun showRecordConfirmOverlay(text: String, originalBitmap: Bitmap) {
+        if (confirmOverlayView != null) {
+            // 防御：浮层已在展示中，避免叠浮层
+            originalBitmap.recycle()
+            return
+        }
+        try {
+            // Service 无 Material 主题，MaterialButton 需要 ContextThemeWrapper 包裹主题，否则 inflate 崩溃
+            val themedCtx = android.view.ContextThemeWrapper(this, R.style.Theme_AIAssistant)
+            val inflater = LayoutInflater.from(themedCtx)
+            val view = inflater.inflate(R.layout.layout_record_confirm, null)
+            val tvPending = view.findViewById<TextView>(R.id.tv_pending_hint)
+            // 已有暂存材料：提示会一并匹配，且"这是题目"变主操作
+            val pending = pendingMaterialText
+            if (!pending.isNullOrBlank()) {
+                tvPending.visibility = View.VISIBLE
+                tvPending.text = "已暂存材料段（${pending.length}字），随题目一并匹配"
+            }
+            val params = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+                PixelFormat.TRANSLUCENT
+            ).apply { gravity = Gravity.CENTER }
+            windowManager.addView(view, params)
+            confirmOverlayView = view
+
+            view.findViewById<View>(R.id.btn_kind_question).setOnClickListener {
+                val mat = pendingMaterialText
+                dismissRecordConfirmOverlay()
+                proceedWrongMatch(text, originalBitmap, mat)
+            }
+            view.findViewById<View>(R.id.btn_kind_material).setOnClickListener {
+                dismissRecordConfirmOverlay()
+                // 暂存材料，提示用户再框题目；本次截图用完即回收
+                pendingMaterialText = text
+                originalBitmap.recycle()
+                mainHandler.post {
+                    Toast.makeText(this, "📄 材料已暂存，请框选这道题的题干部分", Toast.LENGTH_LONG).show()
+                }
+            }
+        } catch (e: Exception) {
+            originalBitmap.recycle()
+            Log.e(TAG, "showRecordConfirmOverlay failed", e)
+        }
+    }
+
+    private fun dismissRecordConfirmOverlay() {
+        confirmOverlayView?.let { v ->
+            try { windowManager.removeView(v) } catch (_: Exception) {}
+        }
+        confirmOverlayView = null
+    }
+
+    /** 确认"这是题目"后进入匹配链：带暂存材料（如有）匹配，流程结束清暂存 */
+    private fun proceedWrongMatch(text: String, originalBitmap: Bitmap, materialText: String?) {
         captureHandler?.post {
-            // 三级匹配链：①FTS/LCS 快筛 ②向量召回 ③LLM 裁决
-            com.example.aiassistant.questionbank.QuestionMatcher.match(this@ScreenCaptureService, text) { result ->
+            // 三级匹配链：①材料单独匹配→FTS/LCS 快筛 ②向量召回 ③LLM 裁决（材料对比）
+            com.example.aiassistant.questionbank.QuestionMatcher.match(
+                this@ScreenCaptureService, text, materialText
+            ) { result ->
                 val service = this@ScreenCaptureService
                 val matched = result.question
                 val fromBank = result.confidence == com.example.aiassistant.questionbank.QuestionMatcher.CONF_AUTO && matched != null
@@ -576,12 +648,15 @@ class ScreenCaptureService : Service() {
                     Log.d(TAG, "错题录入：未确定匹配（${result.confidence}），保存OCR文本")
                 }
                 originalBitmap.recycle()
+                pendingMaterialText = null  // 匹配流程结束（无论成败）清暂存
                 mainHandler.post {
                     isCapturing = false
                     isSilentCapture = false
                     cancelCaptureTimeout()
                     val msg = when {
                         fromBank -> "📝 错题已录入（已匹配题库原题）"
+                        !materialText.isNullOrBlank() && !result.materialMatched ->
+                            "📝 错题已录入（OCR识别）\n⚠️ 该材料在题库中未找到（可能未转换成功），已按题干匹配"
                         result.candidates.isNotEmpty() -> "📝 错题已录入（OCR识别）\n🔍 疑似题库原题，可在错题本详情「重新匹配」确认"
                         else -> "📝 错题已录入（OCR识别）"
                     }

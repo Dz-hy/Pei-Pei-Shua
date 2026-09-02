@@ -3,9 +3,11 @@ package com.example.aiassistant.shizheng
 import android.app.AlertDialog
 import android.content.Intent
 import android.os.Bundle
+import android.text.Editable
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.view.inputmethod.EditorInfo
 import android.widget.ArrayAdapter
 import android.widget.EditText
 import android.widget.ImageView
@@ -31,6 +33,8 @@ class ShizhengActivity : AppCompatActivity() {
     private lateinit var layoutEmpty: View
 
     private var selectedCategory: String? = null   // null = 全部
+    private var searchKeyword: String = ""         // 搜索关键词（300ms 防抖）
+    private var searchDebounce: Runnable? = null
     private var allNews: List<NewsArticle> = emptyList()
     private var adapter: NewsAdapter? = null
 
@@ -88,6 +92,39 @@ class ShizhengActivity : AppCompatActivity() {
             }
         }
         updateChipStyles(chipIds)
+        setupSearch()
+    }
+
+    // ── 搜索（标题+正文，300ms 防抖，与分类 chips 叠加过滤） ──
+    private fun setupSearch() {
+        val etSearch = findViewById<EditText>(R.id.et_search)
+        val btnClear = findViewById<ImageView>(R.id.btn_clear_search)
+        etSearch.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: Editable?) {
+                searchDebounce?.let { etSearch.removeCallbacks(it) }
+                searchDebounce = Runnable {
+                    searchKeyword = s?.toString()?.trim() ?: ""
+                    btnClear.visibility = if (searchKeyword.isNotEmpty()) View.VISIBLE else View.GONE
+                    loadNews()
+                }
+                etSearch.postDelayed(searchDebounce, 300)
+            }
+        })
+        etSearch.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == EditorInfo.IME_ACTION_SEARCH) {
+                searchDebounce?.let { etSearch.removeCallbacks(it) }
+                searchKeyword = etSearch.text.toString().trim()
+                loadNews()
+                true
+            } else false
+        }
+        btnClear.setOnClickListener {
+            etSearch.setText("")
+            searchKeyword = ""
+            loadNews()
+        }
     }
 
     override fun onResume() {
@@ -116,16 +153,24 @@ class ShizhengActivity : AppCompatActivity() {
     }
 
     private fun loadNews() {
-        allNews = ShizhengManager.getAllNews()
+        // 搜索：标题+正文 LIKE（标题命中优先）；与分类 chips 内存叠加过滤
+        allNews = if (searchKeyword.isNotEmpty()) ShizhengManager.searchNews(searchKeyword)
+        else ShizhengManager.getAllNews()
         val filtered = if (selectedCategory == null) allNews
         else allNews.filter { it.categories.contains(selectedCategory) }
 
         if (filtered.isEmpty()) {
             layoutEmpty.visibility = View.VISIBLE
             rvNews.visibility = View.GONE
+            findViewById<TextView>(R.id.tv_empty_msg).text =
+                if (searchKeyword.isNotEmpty()) "搜索「$searchKeyword」无结果"
+                else "暂无时政新闻\n点击右上角刷新抓取"
         } else {
             layoutEmpty.visibility = View.GONE
             rvNews.visibility = View.VISIBLE
+            findViewById<TextView>(R.id.tv_empty_msg).text =
+                if (searchKeyword.isNotEmpty()) "搜索「$searchKeyword」共 ${filtered.size} 条结果"
+                else "暂无时政新闻\n点击右上角刷新抓取"
         }
         adapter = NewsAdapter(filtered)
         rvNews.adapter = adapter

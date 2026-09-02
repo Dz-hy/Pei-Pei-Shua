@@ -52,213 +52,225 @@
     </androidx.cardview.widget.CardView>
 
     <!-- 内容区域 -->
-    <ScrollView
-        android:id="@+id/sv_content"
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1"
-        android:fillViewport="true">
+        android:orientation="vertical">
 
-        <LinearLayout
+        <!-- 材料区域（一拖多）：固定比例上半区，WebView 独立滚动；无材料时隐藏 -->
+        <androidx.cardview.widget.CardView
+            android:id="@+id/card_material"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:padding="16dp">
+            android:layout_height="0dp"
+            android:layout_weight="4.5"
+            android:layout_marginHorizontal="12dp"
+            android:layout_marginTop="8dp"
+            android:layout_marginBottom="4dp"
+            android:visibility="gone"
+            app:cardCornerRadius="12dp"
+            app:cardElevation="2dp"
+            app:cardBackgroundColor="#FFF8E1">
 
-            <!-- 材料区域（一拖多） -->
-            <androidx.cardview.widget.CardView
-                android:id="@+id/card_material"
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:orientation="vertical"
+                android:padding="12dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="材料"
+                    android:textSize="14sp"
+                    android:textStyle="bold"
+                    android:textColor="#F57F17"
+                    android:layout_marginBottom="6dp" />
+
+                <WebView
+                    android:id="@+id/wv_material"
+                    android:layout_width="match_parent"
+                    android:layout_height="0dp"
+                    android:layout_weight="1"
+                    android:background="@android:color/transparent" />
+            </LinearLayout>
+        </androidx.cardview.widget.CardView>
+
+        <!-- 题目区域：独立滚动 -->
+        <ScrollView
+            android:id="@+id/sv_content"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="5.5"
+            android:fillViewport="true">
+
+            <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginBottom="12dp"
-                android:visibility="gone"
-                app:cardCornerRadius="12dp"
-                app:cardElevation="2dp"
-                app:cardBackgroundColor="#FFF8E1">
+                android:orientation="vertical"
+                android:padding="16dp">
 
-                <LinearLayout
+                <!-- 题目区域 -->
+                <androidx.cardview.widget.CardView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:orientation="vertical"
-                    android:padding="16dp">
+                    android:layout_marginBottom="12dp"
+                    app:cardCornerRadius="12dp"
+                    app:cardElevation="2dp"
+                    app:cardBackgroundColor="#FFFFFF">
 
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="材料"
-                        android:textSize="14sp"
-                        android:textStyle="bold"
-                        android:textColor="#F57F17"
-                        android:layout_marginBottom="8dp" />
-
-                    <WebView
-                        android:id="@+id/wv_material"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:background="@android:color/transparent" />
-                </LinearLayout>
-            </androidx.cardview.widget.CardView>
-
-            <!-- 题目区域 -->
-            <androidx.cardview.widget.CardView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginBottom="12dp"
-                app:cardCornerRadius="12dp"
-                app:cardElevation="2dp"
-                app:cardBackgroundColor="#FFFFFF">
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="vertical"
-                    android:padding="16dp">
-
-                    <!-- 知识点标签 -->
-                    <TextView
-                        android:id="@+id/tv_knowledge_point"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:textSize="12sp"
-                        android:textColor="@color/primary"
-                        android:background="@drawable/bg_knowledge_tag"
-                        android:paddingStart="8dp"
-                        android:paddingEnd="8dp"
-                        android:paddingTop="2dp"
-                        android:paddingBottom="2dp"
-                        android:layout_marginBottom="12dp" />
-
-                    <!-- 题干（WebView 渲染 KaTeX 公式） -->
-                    <WebView
-                        android:id="@+id/wv_stem"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:minHeight="48dp"
-                        android:layout_marginBottom="8dp"
-                        android:background="@android:color/transparent" />
-
-                    <!-- 题干图片（公式+图形） -->
                     <LinearLayout
-                        android:id="@+id/layout_stem_images"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:orientation="vertical"
-                        android:layout_marginBottom="8dp"
-                        android:visibility="gone" />
+                        android:padding="16dp">
 
-                    <!-- 选项列表 -->
-                    <LinearLayout
-                        android:id="@+id/layout_options"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:orientation="vertical" />
+                        <!-- 知识点标签 -->
+                        <TextView
+                            android:id="@+id/tv_knowledge_point"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:textSize="12sp"
+                            android:textColor="@color/primary"
+                            android:background="@drawable/bg_knowledge_tag"
+                            android:paddingStart="8dp"
+                            android:paddingEnd="8dp"
+                            android:paddingTop="2dp"
+                            android:paddingBottom="2dp"
+                            android:layout_marginBottom="12dp" />
 
-                </LinearLayout>
-            </androidx.cardview.widget.CardView>
+                        <!-- 题干（WebView 渲染 KaTeX 公式） -->
+                        <WebView
+                            android:id="@+id/wv_stem"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:minHeight="48dp"
+                            android:layout_marginBottom="8dp"
+                            android:background="@android:color/transparent" />
 
-            <!-- 答案区域（默认隐藏） -->
-            <androidx.cardview.widget.CardView
-                android:id="@+id/card_answer"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginBottom="12dp"
-                android:visibility="gone"
-                app:cardCornerRadius="12dp"
-                app:cardElevation="2dp"
-                app:cardBackgroundColor="#FFFFFF">
+                        <!-- 题干图片（公式+图形） -->
+                        <LinearLayout
+                            android:id="@+id/layout_stem_images"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:orientation="vertical"
+                            android:layout_marginBottom="8dp"
+                            android:visibility="gone" />
 
-                <LinearLayout
+                        <!-- 选项列表 -->
+                        <LinearLayout
+                            android:id="@+id/layout_options"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:orientation="vertical" />
+
+                    </LinearLayout>
+                </androidx.cardview.widget.CardView>
+
+                <!-- 答案区域（默认隐藏） -->
+                <androidx.cardview.widget.CardView
+                    android:id="@+id/card_answer"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:orientation="vertical"
-                    android:padding="16dp">
+                    android:layout_marginBottom="12dp"
+                    android:visibility="gone"
+                    app:cardCornerRadius="12dp"
+                    app:cardElevation="2dp"
+                    app:cardBackgroundColor="#FFFFFF">
 
-                    <!-- 正确答案 -->
                     <LinearLayout
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:orientation="horizontal"
-                        android:gravity="center_vertical"
-                        android:layout_marginBottom="12dp">
+                        android:orientation="vertical"
+                        android:padding="16dp">
 
+                        <!-- 正确答案 -->
+                        <LinearLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:orientation="horizontal"
+                            android:gravity="center_vertical"
+                            android:layout_marginBottom="12dp">
+
+                            <TextView
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="正确答案："
+                                android:textSize="15sp"
+                                android:textStyle="bold"
+                                android:textColor="@color/text_primary" />
+
+                            <TextView
+                                android:id="@+id/tv_answer"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:textSize="18sp"
+                                android:textStyle="bold"
+                                android:textColor="#4CAF50" />
+
+                            <TextView
+                                android:id="@+id/tv_rate"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:layout_marginStart="16dp"
+                                android:textSize="12sp"
+                                android:textColor="@color/text_secondary" />
+                        </LinearLayout>
+
+                        <!-- 来源（完整 key，顶替卷名） -->
+                        <TextView
+                            android:id="@+id/tv_source"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:textSize="12sp"
+                            android:textColor="@color/text_secondary"
+                            android:layout_marginBottom="12dp" />
+
+                        <View
+                            android:layout_width="match_parent"
+                            android:layout_height="1dp"
+                            android:background="#EEEEEE"
+                            android:layout_marginBottom="12dp" />
+
+                        <!-- 解析 -->
                         <TextView
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:text="正确答案："
+                            android:text="解析"
                             android:textSize="15sp"
                             android:textStyle="bold"
-                            android:textColor="@color/text_primary" />
+                            android:textColor="@color/text_primary"
+                            android:layout_marginBottom="8dp" />
 
                         <TextView
-                            android:id="@+id/tv_answer"
-                            android:layout_width="wrap_content"
+                            android:id="@+id/tv_analysis"
+                            android:layout_width="match_parent"
                             android:layout_height="wrap_content"
-                            android:textSize="18sp"
-                            android:textStyle="bold"
-                            android:textColor="#4CAF50" />
+                            android:textSize="14sp"
+                            android:textColor="@color/text_primary"
+                            android:textIsSelectable="true"
+                            android:lineSpacingMultiplier="1.4" />
 
-                        <TextView
-                            android:id="@+id/tv_rate"
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:layout_marginStart="16dp"
-                            android:textSize="12sp"
-                            android:textColor="@color/text_secondary" />
+                        <!-- AI 解析（交卷后可用） -->
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btn_ai_analysis"
+                            android:layout_width="match_parent"
+                            android:layout_height="44dp"
+                            android:layout_marginTop="12dp"
+                            android:text="AI 解析"
+                            android:textSize="14sp"
+                            app:cornerRadius="12dp"
+                            app:icon="@drawable/ic_ai_model"
+                            app:iconGravity="textStart"
+                            app:iconTint="@color/primary"
+                            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                            android:visibility="gone" />
                     </LinearLayout>
+                </androidx.cardview.widget.CardView>
 
-                    <!-- 来源 -->
-                    <TextView
-                        android:id="@+id/tv_source"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:textSize="12sp"
-                        android:textColor="@color/text_secondary"
-                        android:layout_marginBottom="12dp" />
-
-                    <View
-                        android:layout_width="match_parent"
-                        android:layout_height="1dp"
-                        android:background="#EEEEEE"
-                        android:layout_marginBottom="12dp" />
-
-                    <!-- 解析 -->
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="解析"
-                        android:textSize="15sp"
-                        android:textStyle="bold"
-                        android:textColor="@color/text_primary"
-                        android:layout_marginBottom="8dp" />
-
-                    <TextView
-                        android:id="@+id/tv_analysis"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:textSize="14sp"
-                        android:textColor="@color/text_primary"
-                        android:textIsSelectable="true"
-                        android:lineSpacingMultiplier="1.4" />
-
-                    <!-- AI 解析（交卷后可用） -->
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btn_ai_analysis"
-                        android:layout_width="match_parent"
-                        android:layout_height="44dp"
-                        android:layout_marginTop="12dp"
-                        android:text="AI 解析"
-                        android:textSize="14sp"
-                        app:cornerRadius="12dp"
-                        app:icon="@drawable/ic_ai_model"
-                        app:iconGravity="textStart"
-                        app:iconTint="@color/primary"
-                        style="@style/Widget.MaterialComponents.Button.OutlinedButton"
-                        android:visibility="gone" />
-                </LinearLayout>
-            </androidx.cardview.widget.CardView>
-
-        </LinearLayout>
-    </ScrollView>
+            </LinearLayout>
+        </ScrollView>
+    </LinearLayout>
 
     <!-- 底部导航栏 -->
     <androidx.cardview.widget.CardView

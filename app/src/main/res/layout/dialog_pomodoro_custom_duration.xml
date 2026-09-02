@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:background="@drawable/bg_dialog_rounded"
+    android:padding="24dp">
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="预设时长"
+        android:textSize="12sp"
+        android:textColor="@color/text_secondary" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:orientation="horizontal">
+
+        <TextView
+            android:id="@+id/chip_m15"
+            style="@style/PomodoroDurationChip"
+            android:tag="15"
+            android:text="15分钟" />
+
+        <TextView
+            android:id="@+id/chip_m25"
+            style="@style/PomodoroDurationChip"
+            android:layout_marginStart="10dp"
+            android:tag="25"
+            android:text="25分钟" />
+
+        <TextView
+            android:id="@+id/chip_m30"
+            style="@style/PomodoroDurationChip"
+            android:layout_marginStart="10dp"
+            android:tag="30"
+            android:text="30分钟" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:orientation="horizontal">
+
+        <TextView
+            android:id="@+id/chip_m45"
+            style="@style/PomodoroDurationChip"
+            android:tag="45"
+            android:text="45分钟" />
+
+        <TextView
+            android:id="@+id/chip_m60"
+            style="@style/PomodoroDurationChip"
+            android:layout_marginStart="10dp"
+            android:tag="60"
+            android:text="60分钟" />
+
+        <TextView
+            android:id="@+id/chip_m90"
+            style="@style/PomodoroDurationChip"
+            android:layout_marginStart="10dp"
+            android:tag="90"
+            android:text="90分钟" />
+    </LinearLayout>
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="18dp"
+        android:text="自定义"
+        android:textSize="12sp"
+        android:textColor="@color/text_secondary" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <EditText
+            android:id="@+id/et_custom_minutes"
+            android:layout_width="0dp"
+            android:layout_height="44dp"
+            android:layout_weight="1"
+            android:background="@drawable/bg_option_normal"
+            android:hint="输入 1-180"
+            android:inputType="number"
+            android:maxLength="3"
+            android:paddingHorizontal="12dp"
+            android:textSize="14sp"
+            android:textColor="@color/text_primary" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="10dp"
+            android:text="分钟"
+            android:textSize="13.5sp"
+            android:textColor="@color/text_secondary" />
+    </LinearLayout>
+
+</LinearLayout>

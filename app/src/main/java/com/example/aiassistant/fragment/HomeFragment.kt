@@ -74,6 +74,8 @@ class HomeFragment : Fragment() {
 
     private var currentQuestionType = QuestionType.PIAN_DUAN_YUE_DU
     private val bankReadyListener: () -> Unit = { loadModules() }
+    // hide/show 切 tab 不重发 onResume：导入外部题库后靠这个通知重载模块列表
+    private val bankDataChangedListener: () -> Unit = { loadModules() }
 
     override fun onAttach(context: Context) {
         super.onAttach(context)
@@ -92,6 +94,7 @@ class HomeFragment : Fragment() {
         loadModules()
         updateHeaderGreeting()
         showRandomQuote(false)
+        QuestionBankManager.addOnBankDataChangedListener(bankDataChangedListener)
 
         // 开启 staggered 卡片入场动画，营造高级交互体验
         val container = (view as? ViewGroup)?.getChildAt(0) as? ViewGroup
@@ -115,6 +118,11 @@ class HomeFragment : Fragment() {
     override fun onPause() {
         super.onPause()
         QuestionBankManager.removeOnReadyListener(bankReadyListener)
+    }
+
+    override fun onDestroyView() {
+        super.onDestroyView()
+        QuestionBankManager.removeOnBankDataChangedListener(bankDataChangedListener)
     }
 
     private fun updateTeacherDisplay() {
@@ -289,16 +297,20 @@ class HomeFragment : Fragment() {
         }
 
         QuestionBankManager.getModulesAsync { modules ->
-            val totalQuestions = modules.sumOf { module ->
+            // 空分类不占位：预置分类没题时隐藏，导入的自定义分类自然顶上
+            val visibleModules = modules.filter { m ->
+                m.questionCount > 0 || m.children.any { it.questionCount > 0 }
+            }
+            val totalQuestions = visibleModules.sumOf { module ->
                 module.questionCount + module.children.sumOf { it.questionCount }
             }
-            val completedQuestions = modules.sumOf { module ->
+            val completedQuestions = visibleModules.sumOf { module ->
                 module.completedCount + module.children.sumOf { it.completedCount }
             }
             activity?.runOnUiThread {
                 if (!isAdded) return@runOnUiThread
                 tvTotalCount.text = "已做 $completedQuestions / 共 $totalQuestions 题"
-                rvModules.adapter = ModuleAdapter(modules) { module ->
+                rvModules.adapter = ModuleAdapter(visibleModules) { module ->
                     showPracticeSettings(module)
                 }
             }
@@ -366,6 +378,27 @@ class HomeFragment : Fragment() {
                 }
                 // 使用官方的标准局部更新，强制触发 RecyclerView 和外层 ScrollView 的自适应高度重测，完全解决无法展开或底端截断问题
                 notifyItemChanged(position)
+            }
+
+            // 长按父分类：删除该自定义分类（级联子分类与题目）
+            holder.itemView.setOnLongClickListener {
+                val total = module.questionCount + module.children.sumOf { it.questionCount }
+                android.app.AlertDialog.Builder(requireContext())
+                    .setTitle("删除「${module.name}」")
+                    .setMessage("将删除该分类及其子分类下的全部 $total 道题目（含索引、批注与做题记录），不可恢复。确定删除？")
+                    .setPositiveButton("删除") { _, _ ->
+                        Thread {
+                            QuestionBankManager.deleteModule(requireContext(), module.id)
+                            activity?.runOnUiThread {
+                                if (!isAdded) return@runOnUiThread
+                                Toast.makeText(requireContext(), "已删除「${module.name}」", Toast.LENGTH_SHORT).show()
+                                loadModules()
+                            }
+                        }.start()
+                    }
+                    .setNegativeButton("取消", null)
+                    .show()
+                true
             }
         }
 

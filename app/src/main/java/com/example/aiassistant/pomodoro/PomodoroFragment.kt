@@ -11,6 +11,8 @@ import android.os.Bundle
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.PowerManager
+import android.text.Editable
+import android.text.TextWatcher
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -23,7 +25,6 @@ import androidx.fragment.app.Fragment
 import com.example.aiassistant.AppPreferences
 import com.example.aiassistant.R
 import com.example.aiassistant.capDialogWidth
-import com.example.aiassistant.plan.PlanManager
 
 data class PomoTask(var title: String, var minutes: Int, var tag: String = "专注")
 
@@ -45,6 +46,8 @@ class PomodoroFragment : Fragment(), PomodoroTimer.TimerListener {
     private var layoutPauseSkip: View? = null
     private var btnPause: TextView? = null
     private var btnSkip: TextView? = null
+    private var layoutTimerRing: View? = null
+    private var tvDurationHint: TextView? = null
     private var statsFocusTime: TextView? = null
     private var statsTomatoCount: TextView? = null
     private var statsCompletion: TextView? = null
@@ -162,6 +165,7 @@ class PomodoroFragment : Fragment(), PomodoroTimer.TimerListener {
         tvCurrentTask = null; layoutCurrentTask = null; tvTodayProgress = null
         btnSelectTask = null; btnStart = null; layoutPauseSkip = null
         btnPause = null; btnSkip = null
+        layoutTimerRing = null; tvDurationHint = null
         statsFocusTime = null; statsTomatoCount = null; statsCompletion = null
         chipRain = null; chipCafe = null; chipForest = null; seekbarVolume = null
         vibrator = null
@@ -184,6 +188,8 @@ class PomodoroFragment : Fragment(), PomodoroTimer.TimerListener {
         layoutPauseSkip = view.findViewById(R.id.layout_pause_skip)
         btnPause = view.findViewById(R.id.btn_pause)
         btnSkip = view.findViewById(R.id.btn_skip)
+        layoutTimerRing = view.findViewById(R.id.layout_timer_ring)
+        tvDurationHint = view.findViewById(R.id.tv_duration_hint)
         statsFocusTime = view.findViewById(R.id.stats_focus_time)
         statsTomatoCount = view.findViewById(R.id.stats_tomato_count)
         statsCompletion = view.findViewById(R.id.stats_completion)
@@ -198,6 +204,7 @@ class PomodoroFragment : Fragment(), PomodoroTimer.TimerListener {
         btnPause?.setOnClickListener { onPauseClicked() }
         btnSkip?.setOnClickListener { onSkipClicked() }
         btnSelectTask?.setOnClickListener { showTaskSelectDialog() }
+        layoutTimerRing?.setOnClickListener { showCustomDurationDialog() }
         view.findViewById<View>(R.id.btn_settings)?.setOnClickListener {
             startActivity(Intent(requireContext(), PomodoroSettingsActivity::class.java))
         }
@@ -386,6 +393,7 @@ class PomodoroFragment : Fragment(), PomodoroTimer.TimerListener {
 
     private fun updateUI() {
         val t = timer ?: return
+        tvDurationHint?.visibility = View.GONE
         when (t.state) {
             TimerState.IDLE -> {
                 tvStateLabel?.text = "准备开始"
@@ -394,6 +402,7 @@ class PomodoroFragment : Fragment(), PomodoroTimer.TimerListener {
                 btnStart?.visibility = View.VISIBLE
                 layoutPauseSkip?.visibility = View.GONE
                 btnSelectTask?.visibility = View.VISIBLE
+                tvDurationHint?.visibility = View.VISIBLE
                 try { activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) } catch (_: Exception) {}
             }
             TimerState.FOCUS -> {
@@ -451,6 +460,96 @@ class PomodoroFragment : Fragment(), PomodoroTimer.TimerListener {
         val pct = if (dailyTarget > 0) (stats.completedCount * 100 / dailyTarget) else 0
         statsCompletion?.text = "${pct.coerceAtMost(100)}%"
         tvTodayProgress?.text = "今日 ${stats.completedCount}/$dailyTarget 🍅"
+    }
+
+    // ── 自定义专注时长 ──
+
+    private fun showCustomDurationDialog() {
+        if (!isAdded) return
+        val t = timer ?: return
+        if (t.isRunning() || t.state == TimerState.PAUSED) {
+            Toast.makeText(requireContext(), "计时进行中，暂不能调整时长", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val dialogView = LayoutInflater.from(requireContext())
+            .inflate(R.layout.dialog_pomodoro_custom_duration, null)
+        val etMinutes = dialogView.findViewById<android.widget.EditText>(R.id.et_custom_minutes)
+        val chips = listOf(
+            dialogView.findViewById<TextView>(R.id.chip_m15),
+            dialogView.findViewById<TextView>(R.id.chip_m25),
+            dialogView.findViewById<TextView>(R.id.chip_m30),
+            dialogView.findViewById<TextView>(R.id.chip_m45),
+            dialogView.findViewById<TextView>(R.id.chip_m60),
+            dialogView.findViewById<TextView>(R.id.chip_m90)
+        )
+
+        etMinutes.setText(t.config.focusMinutes.toString())
+
+        fun highlight(selected: TextView?) {
+            chips.forEach { chip ->
+                if (chip === selected) {
+                    chip.setBackgroundResource(R.drawable.bg_noise_chip_selected)
+                    chip.setTextColor(resources.getColor(R.color.primary, null))
+                } else {
+                    chip.setBackgroundResource(R.drawable.bg_noise_chip)
+                    chip.setTextColor(resources.getColor(R.color.text_secondary, null))
+                }
+            }
+        }
+
+        // chip 点击写入输入框；手动输入则取消高亮
+        var chipDriven = false
+        chips.forEach { chip ->
+            chip.setOnClickListener {
+                chipDriven = true
+                etMinutes.setText(chip.tag.toString())
+                highlight(chip)
+                etMinutes.setSelection(etMinutes.text.length)
+            }
+        }
+        etMinutes.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: Editable?) {
+                if (chipDriven) {
+                    chipDriven = false
+                } else {
+                    highlight(null)
+                }
+            }
+        })
+
+        val dialog = AlertDialog.Builder(requireContext())
+            .setTitle("自定义专注时长")
+            .setView(dialogView)
+            .setPositiveButton("应用", null)
+            .setNegativeButton("取消", null)
+            .create()
+
+        // 覆盖正向按钮：校验不通过时留在对话框内提示
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val minutes = etMinutes.text.toString().trim().toIntOrNull()
+                if (minutes == null || minutes < 1 || minutes > 180) {
+                    Toast.makeText(requireContext(), "请输入 1-180 之间的分钟数", Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+                applyCustomFocusMinutes(minutes)
+                dialog.dismiss()
+            }
+        }
+        dialog.show()
+        dialog.capDialogWidth()
+    }
+
+    private fun applyCustomFocusMinutes(minutes: Int) {
+        val t = timer ?: return
+        t.configure(t.config.copy(focusMinutes = minutes))
+        if (t.state == TimerState.IDLE) {
+            updateTimerDisplay(minutes * 60L * 1000, minutes * 60L * 1000)
+        }
+        Toast.makeText(requireContext(), "专注时长已设为 ${minutes} 分钟", Toast.LENGTH_SHORT).show()
     }
 
     // ── 任务选择与自定义 ──

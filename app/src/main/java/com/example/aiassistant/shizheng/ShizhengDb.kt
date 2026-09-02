@@ -168,6 +168,18 @@ class ShizhengDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB
         return list
     }
 
+    /** 全文搜索：标题命中优先，其次日期倒序（如 Q4/Q10 时政搜索） */
+    fun searchNews(keyword: String): List<NewsArticle> {
+        val kw = "%${keyword.trim()}%"
+        val list = mutableListOf<NewsArticle>()
+        readableDatabase.rawQuery(
+            "SELECT * FROM $T_NEWS WHERE $COL_TITLE LIKE ? OR $COL_CONTENT LIKE ? " +
+            "ORDER BY CASE WHEN $COL_TITLE LIKE ? THEN 0 ELSE 1 END, $COL_PUBLISH_DATE DESC, $COL_ID DESC",
+            arrayOf(kw, kw, kw)
+        ).use { c -> while (c.moveToNext()) list.add(cursorToNews(c)) }
+        return list
+    }
+
     /** 尚未经 AI 评估的新闻 */
     fun getUnclassifiedNews(source: String): List<NewsArticle> {
         val list = mutableListOf<NewsArticle>()

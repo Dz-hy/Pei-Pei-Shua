@@ -6,7 +6,9 @@ import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.HorizontalScrollView
 import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -31,9 +33,15 @@ class WrongQuestionsActivity : AppCompatActivity() {
     private lateinit var btnWrongPractice: TextView
     private lateinit var btnToggleMastered: TextView
     private lateinit var layoutEmpty: View
+    private lateinit var chipsScroll: HorizontalScrollView
+    private lateinit var chipsRow: LinearLayout
 
     private var currentFilter = SourceFilter.ALL
     private var showMastered = false
+    // 按卷名筛选（来自题库题快照的 source），null = 全部卷
+    private var selectedSource: String? = null
+    private var renderedSources: List<String>? = null
+    private var renderedSelection: String? = null
     private var adapter: WrongQuestionsAdapter? = null
     private val sdf = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
 
@@ -49,6 +57,8 @@ class WrongQuestionsActivity : AppCompatActivity() {
         btnWrongPractice = findViewById(R.id.btn_wrong_practice)
         btnToggleMastered = findViewById(R.id.btn_toggle_mastered)
         layoutEmpty = findViewById(R.id.layout_empty)
+        chipsScroll = findViewById(R.id.chips_scroll)
+        chipsRow = findViewById(R.id.chips_row)
 
         // 手机单列，平板多列网格（列数由 sw600dp/sw840dp 资源决定）
         val columns = resources.getInteger(R.integer.wrong_questions_grid_columns)
@@ -107,6 +117,7 @@ class WrongQuestionsActivity : AppCompatActivity() {
 
     private fun loadWrongQuestions() {
         val allList = WrongQuestionManager.getWrongQuestions(this)
+        refreshSourceChips(allList)
         val filteredList = allList
             .filter { showMastered || !it.mastered }
             .filter {
@@ -116,6 +127,7 @@ class WrongQuestionsActivity : AppCompatActivity() {
                     SourceFilter.OCR -> !it.isFromBank
                 }
             }
+            .filter { selectedSource == null || it.snapshot?.source == selectedSource }
 
         if (filteredList.isEmpty()) {
             layoutEmpty.visibility = View.VISIBLE
@@ -129,7 +141,55 @@ class WrongQuestionsActivity : AppCompatActivity() {
         rvWrongQuestions.adapter = adapter
     }
 
-    /** 错题重练：按当前 tab 筛选、排除已掌握、只抽有结构化题面的错题随机组卷 */
+    /** 按错题快照的卷名生成筛选 chips（全部 + 各卷），与来源 tab 叠加过滤 */
+    private fun refreshSourceChips(allList: List<WrongQuestion>) {
+        val sources = allList
+            .mapNotNull { it.snapshot?.source?.takeIf(String::isNotBlank) }
+            .distinct()
+            .sorted()
+        if (selectedSource != null && selectedSource !in sources) selectedSource = null
+        if (sources.isEmpty()) {
+            chipsScroll.visibility = View.GONE
+            chipsRow.removeAllViews()
+            renderedSources = null
+            return
+        }
+        chipsScroll.visibility = View.VISIBLE
+        if (sources == renderedSources && selectedSource == renderedSelection) return
+        renderedSources = sources
+        renderedSelection = selectedSource
+
+        val density = resources.displayMetrics.density
+        fun chip(label: String, selected: Boolean): TextView = TextView(this).apply {
+            text = label
+            textSize = 13f
+            setPadding(
+                (14 * density).toInt(), (6 * density).toInt(),
+                (14 * density).toInt(), (6 * density).toInt()
+            )
+            if (selected) {
+                setTextColor(0xFFFFFFFF.toInt())
+                setBackgroundResource(R.drawable.bg_primary_chip)
+            } else {
+                setTextColor(getColor(R.color.text_secondary))
+                setBackgroundResource(R.drawable.bg_default_chip)
+            }
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { marginEnd = (10 * density).toInt() }
+            setOnClickListener {
+                selectedSource = if (label == "全部") null else label
+                loadWrongQuestions()
+            }
+        }
+
+        chipsRow.removeAllViews()
+        chipsRow.addView(chip("全部", selectedSource == null))
+        sources.forEach { s -> chipsRow.addView(chip(s, s == selectedSource)) }
+    }
+
+    /** 错题重练：按当前 tab + 卷名筛选、排除已掌握、只抽有结构化题面的错题随机组卷 */
     private fun startWrongPractice() {
         val pool = WrongQuestionManager.getWrongQuestions(this)
             .filter { it.snapshot != null && !it.mastered }
@@ -140,6 +200,7 @@ class WrongQuestionsActivity : AppCompatActivity() {
                     SourceFilter.OCR -> !it.isFromBank
                 }
             }
+            .filter { selectedSource == null || it.snapshot?.source == selectedSource }
         if (pool.isEmpty()) {
             Toast.makeText(this, "当前筛选下没有可重练的错题（纯OCR题无法重做）", Toast.LENGTH_SHORT).show()
             return
@@ -203,9 +264,10 @@ class WrongQuestionsActivity : AppCompatActivity() {
                 holder.ivStatus.alpha = 1.0f
             }
 
-            // 来源标记
+            // 来源标记：题库题展示卷名（快照 source），无卷名回落"题库"
             if (item.isFromBank) {
-                holder.tvSourceBadge.text = "题库"
+                val src = item.snapshot?.source
+                holder.tvSourceBadge.text = if (!src.isNullOrBlank()) src else "题库"
                 holder.tvSourceBadge.setTextColor(getColor(R.color.primary))
             } else {
                 holder.tvSourceBadge.text = "OCR"
@@ -218,13 +280,8 @@ class WrongQuestionsActivity : AppCompatActivity() {
             // 日期
             holder.tvDate.text = sdf.format(Date(item.timestamp))
 
-            // 答案标记（题库题）
-            if (item.isFromBank && item.bankAnswer.isNotEmpty()) {
-                holder.tvAnswerBadge.text = "答案: ${item.bankAnswer}"
-                holder.tvAnswerBadge.visibility = View.VISIBLE
-            } else {
-                holder.tvAnswerBadge.visibility = View.GONE
-            }
+            // 列表不直接展示答案（避免做题前剧透），答案在详情页查看
+            holder.tvAnswerBadge.visibility = View.GONE
 
             // 累计做错次数 / 已掌握标记
             if (item.mastered) {

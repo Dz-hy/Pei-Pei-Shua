@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 框选 OCR 后"题目/材料"确认浮层：材料题先框材料选"材料"暂存，再框题目选"题目"一并匹配 -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:layout_gravity="center_horizontal"
+    android:padding="16dp">
+
+    <androidx.cardview.widget.CardView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        app:cardCornerRadius="18dp"
+        app:cardElevation="8dp"
+        app:cardBackgroundColor="#FFFFFF">
+
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="16dp"
+            android:gravity="center_horizontal">
+
+            <TextView
+                android:id="@+id/tv_confirm_title"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="识别到文字，这框里是："
+                android:textSize="14sp"
+                android:textStyle="bold"
+                android:textColor="@color/text_primary"
+                android:layout_marginBottom="12dp" />
+
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btn_kind_question"
+                    android:layout_width="wrap_content"
+                    android:layout_height="48dp"
+                    android:text="✅ 这是题目"
+                    android:textSize="14sp"
+                    app:cornerRadius="12dp"
+                    android:layout_marginEnd="10dp"
+                    style="@style/Widget.MaterialComponents.Button" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btn_kind_material"
+                    android:layout_width="wrap_content"
+                    android:layout_height="48dp"
+                    android:text="📄 这是材料"
+                    android:textSize="14sp"
+                    app:cornerRadius="12dp"
+                    style="@style/Widget.MaterialComponents.Button.OutlinedButton" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/tv_pending_hint"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text=""
+                android:textSize="12sp"
+                android:textColor="@color/text_secondary"
+                android:layout_marginTop="10dp"
+                android:visibility="gone" />
+        </LinearLayout>
+    </androidx.cardview.widget.CardView>
+</LinearLayout>
