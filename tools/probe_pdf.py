@@ -7,7 +7,8 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="repla
 
 import fitz  # PyMuPDF
 
-PDF = r"历年真题\2021年国家公务员考试《行测》真题（副省级）参考答案及解析...pdf"
+PDF = sys.argv[1] if len(sys.argv) > 1 else \
+    r"历年真题\2021年国家公务员考试《行测》真题（副省级）参考答案及解析...pdf"
 
 doc = fitz.open(PDF)
 print("页数:", doc.page_count)

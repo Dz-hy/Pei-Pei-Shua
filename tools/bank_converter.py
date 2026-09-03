@@ -38,13 +38,19 @@ from pathlib import Path
 RE_QNUM = re.compile(r"^\s*(\d{1,3})\s*[.、．]\s*(?:(?!\d)|(?=(?:19|20)\d{2}(?!\d)))")
 # 题号变体: "【12】解析"（2024/2025 粉笔式解析排版）
 RE_QNUM_BRACKET = re.compile(r"^\s*[【\[](\d{1,3})[】\]]\s*")
+# 解析册题界: "【解析12—正确答案B】…"（2024 广东省考解析册）。只消费到题号为止，
+# 答案字母/√必须留在正文里——判断题的答案只存在于头括号，整体消费会丢答案
+RE_QNUM_JIEXI = re.compile(r"^\s*[【\[]\s*解析\s*(\d{1,3})\s*")
+# 解析册题界: "题目12 解析 …"（2025 广东省考解析册）
+RE_QNUM_TIMU = re.compile(r"^\s*题目\s*(\d{1,3})\s*解析\s*[:：]?\s*")
 # 选项标记: 行首或空白后的 A-H + (. 、 ． :)，前后须有边界避免误切"维生素A."
 RE_OPT = re.compile(r"(?:^|(?<=\s))([A-H])\s*[.、．:：]\s*")
 # 大题标题: 中文数字 + 点 + 纯中文名 + 冒号/句号，后跟套话或行尾
-#（兼容 "一. 政治理论：根据题目要求…" / "一、常识判断。根据题目要求…" / "一. 常识判断：第一部分 常识判断。"）
+#（兼容 "一. 政治理论：根据题目要求…" / "一、常识判断。根据题目要求…" /
+#  "一. 常识判断：第一部分 常识判断。" / "六、科学推理。每道题给出文字或图表信息…"）
 RE_SECTION = re.compile(
     r"^\s*([一二三四五六七八九十]+)\s*[.、．]\s*([\u4e00-\u9fff]{2,12})\s*[：:。]\s*"
-    r"(?:根据题目要求|本部分|在这部分|请根据|第[一二三四五六七八九十]+部分|$)"
+    r"(?:根据题目要求|根据下列|根据所给|本部分|在这部分|请根据|每道题|第[一二三四五六七八九十]+部分|$)"
 )
 # 大题标题变体: "第一部分常识判断"（2021/2022 华图式，独立成行）
 RE_SECTION_PART = re.compile(
@@ -75,6 +81,8 @@ RE_ANSWERS = [
 ]
 RE_MULTI_ANSWER = re.compile(r"答\s*案\s*[:：为是]?\s*([A-Ha-h])\s*[、,，]?\s*([A-Ha-h])")
 RE_JUDGE_ANSWER = re.compile(r"答\s*案\s*[:：为是]?\s*[√×对错TF]")
+# 判断题收尾句式（2025 广东省考解析册："故表述正确。/故表述错误。"独占结尾）
+RE_JUDGE_TAIL = re.compile(r"故表述(?:正确|错误)\s*[。.]?\s*$")
 RE_ANALYSIS_TAG = re.compile(r"【解析】|解析\s*[:：]|^解析\s*$", re.MULTILINE)
 # 页脚/推广噪音行：页码 "第24 页 共64 页"（逗号可有可无）、"- 1 -"、"1 / 46"、
 # 页眉卷名重复、推广语。注意：独立字母行不在此过滤——2024/2025 选项字母是独立行，
@@ -196,6 +204,21 @@ def _pdf_elements(doc):
     return elements
 
 
+def _is_uniform_image(data: bytes) -> bool:
+    """全图单一颜色（全黑/全白/纯透明装饰条，WPS 导出常见）→ True，调用方丢弃。"""
+    import fitz
+    try:
+        with fitz.open(stream=data, filetype="png") as idoc:
+            pix = idoc[0].get_pixmap()
+        if pix.colorspace is None or pix.colorspace.n - pix.alpha > 3:
+            pix = fitz.Pixmap(fitz.csRGB, pix)
+        step = max(1, (pix.width * pix.height) // 64)
+        samples = {pix.pixel(x, y)[:3] for y in range(0, pix.height, step) for x in range(0, pix.width, step)}
+        return len(samples) <= 1
+    except Exception:
+        return False
+
+
 def _image_data_url(doc, xref, page, bbox, cache):
     """PDF 图片 → base64 data URL。优先原图字节（JPEG/PNG 直用，其余转码），失败按区域渲染兜底。"""
     import fitz
@@ -223,6 +246,8 @@ def _image_data_url(doc, xref, page, bbox, cache):
             data = pix.tobytes("png")
         except Exception:
             return None
+    if len(data) < 640 and _is_uniform_image(data):
+        return None  # 单色装饰条/空白块（压缩后 <640B 且全图一色），无信息量
     url = f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
     if xref:
         cache[xref] = url
@@ -475,6 +500,9 @@ def pdf_to_questions(path: str, side: str):
             m = RE_QNUM.match(text)
             if m is None:
                 m = RE_QNUM_BRACKET.match(text)
+            if m is None and side == "analysis":
+                # 解析册专用题界（2024/2025 广东省考"答案及解析"册），题干侧永不启用
+                m = RE_QNUM_JIEXI.match(text) or RE_QNUM_TIMU.match(text)
             if m:
                 start_question(int(m.group(1)), text[m.end():])
                 continue
@@ -578,10 +606,13 @@ def parse_analysis(text: str):
         if m:
             answer = m.group(1).upper()
             break
-    if answer is None and RE_JUDGE_ANSWER.search(text):
+    if answer is None and (RE_JUDGE_ANSWER.search(text) or RE_JUDGE_TAIL.search(text)):
         return None, True, text.strip()
     m = RE_ANALYSIS_TAG.search(text)
     body = text[m.end():].strip() if m else text.strip()
+    # 解析册头部残留："—正确答案B】"（2024 广东【解析N—正确答案X】排版被题界正则
+    # 消费到题号后，答案段留在正文开头，此处剥除）
+    body = re.sub(r"^\s*[—\-–]?\s*正确答案\s*[A-Ha-h√×对错TF]?\s*[】\]]?\s*", "", body, count=1)
     if answer:
         # "68、B" 独行格式：正文开头残留的答案字母去掉（字母后可跟标点/换行/结尾）
         body = re.sub(rf"^\s*{answer}\s*(?:[。.，,：:]|\n|$)\s*", "", body, count=1)
