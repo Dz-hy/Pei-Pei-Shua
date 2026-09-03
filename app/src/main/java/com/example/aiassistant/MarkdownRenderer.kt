@@ -51,7 +51,7 @@ object MarkdownRenderer {
     /** 渲染 Markdown 为带样式的 CharSequence；density 用于缩进类间距换算（applyTo 会自动传入）。 */
     fun render(md: String, density: Float = 2f, linkContext: Context? = null): CharSequence {
         val out = SpannableStringBuilder()
-        val lines = md.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        val lines = mathToPlain(md).replace("\r\n", "\n").replace("\r", "\n").split("\n")
         var i = 0
         while (i < lines.size) {
             val line = lines[i]
@@ -135,6 +135,164 @@ object MarkdownRenderer {
         if (tv.movementMethod !is LinkMovementMethod) {
             tv.movementMethod = LinkMovementMethod.getInstance()
         }
+    }
+
+    /**
+     * Markdown → HTML（供 WebView + KaTeX 渲染；LaTeX 原样保留，由 auto-render 转成公式）。
+     * 与 render() 覆盖同一套块级/行内标记，纯正则转换，无第三方依赖。
+     */
+    fun toHtml(md: String): String {
+        fun esc(s: String) = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        fun inline(s: String): String {
+            var t = esc(s)
+            t = Regex("`([^`\\n]+)`").replace(t) { "<code>${it.groupValues[1]}</code>" }
+            t = Regex("\\*\\*(.+?)\\*\\*|__(.+?)__").replace(t) { "<b>${it.groupValues[1].ifEmpty { it.groupValues[2] }}</b>" }
+            t = Regex("(?<!\\*)\\*([^*\\n]+?)\\*(?!\\*)").replace(t) { "<i>${it.groupValues[1]}</i>" }
+            t = Regex("!\\[([^\\]\\n]*)\\]\\([^)\\n]*\\)").replace(t) { it.groupValues[1].ifEmpty { "[图]" } }
+            t = Regex("\\[([^\\]\\n]+)]\\(([^)\\n]+)\\)").replace(t) {
+                "<a href=\"${it.groupValues[2]}\">${it.groupValues[1]}</a>"
+            }
+            return t
+        }
+        val rxFence = Regex("^```.*$")
+        val rxHr = Regex("^-{3,}$")
+        val rxHead = Regex("^(#{1,6})\\s+(.*)$")
+        val rxUl = Regex("^[-*+]\\s+(.*)$")
+        val rxOl = Regex("^\\d{1,3}[.．)]\\s+(.*)$")
+        val rxQuote = Regex("^>\\s?(.*)$")
+        val rxTable = Regex("^\\s*\\|.*\\|\\s*$")
+        val sb = StringBuilder()
+        val lines = md.replace("\r\n", "\n").split("\n")
+        var i = 0
+        while (i < lines.size) {
+            val t = lines[i]
+            val trimmed = t.trim()
+            when {
+                trimmed.isEmpty() -> i++
+                rxFence.matches(trimmed) -> {
+                    val body = StringBuilder()
+                    i++
+                    while (i < lines.size && !rxFence.matches(lines[i].trim())) {
+                        body.append(esc(lines[i])).append('\n')
+                        i++
+                    }
+                    i++
+                    sb.append("<pre>").append(body).append("</pre>")
+                }
+                rxHr.matches(trimmed) -> { sb.append("<hr>"); i++ }
+                rxHead.matches(trimmed) -> {
+                    val m = rxHead.find(trimmed)!!
+                    val lvl = m.groupValues[1].length
+                    sb.append("<h$lvl>").append(inline(m.groupValues[2])).append("</h$lvl>")
+                    i++
+                }
+                rxQuote.matches(trimmed) -> {
+                    val body = StringBuilder()
+                    while (i < lines.size && rxQuote.matches(lines[i].trim())) {
+                        body.append(inline(rxQuote.find(lines[i].trim())!!.groupValues[1]))
+                        i++
+                    }
+                    sb.append("<blockquote>").append(body).append("</blockquote>")
+                }
+                rxTable.matches(trimmed) -> {
+                    val rows = mutableListOf<String>()
+                    while (i < lines.size && rxTable.matches(lines[i].trim())) {
+                        rows.add(lines[i].trim())
+                        i++
+                    }
+                    val trs = rows.mapNotNull { r ->
+                        val parts = r.trim().trim('|').split('|').map { it.trim() }
+                        if (parts.isNotEmpty() && parts.all { Regex("^:?-{2,}:?$").matches(it) }) null
+                        else "<tr>" + parts.joinToString("") { "<td>${inline(it)}</td>" } + "</tr>"
+                    }
+                    if (trs.isNotEmpty()) sb.append("<table>").append(trs.joinToString("")).append("</table>")
+                }
+                rxUl.matches(trimmed) -> {
+                    sb.append("<ul>")
+                    while (i < lines.size && (rxUl.matches(lines[i].trim()) || rxOl.matches(lines[i].trim()))) {
+                        val m = rxUl.find(lines[i].trim()) ?: rxOl.find(lines[i].trim())!!
+                        sb.append("<li>").append(inline(m.groupValues[1])).append("</li>")
+                        i++
+                    }
+                    sb.append("</ul>")
+                }
+                rxOl.matches(trimmed) -> {
+                    sb.append("<ol>")
+                    while (i < lines.size && rxOl.matches(lines[i].trim())) {
+                        sb.append("<li>").append(inline(rxOl.find(lines[i].trim())!!.groupValues[1])).append("</li>")
+                        i++
+                    }
+                    sb.append("</ol>")
+                }
+                else -> {
+                    sb.append("<p>").append(inline(t)).append("</p>")
+                    i++
+                }
+            }
+        }
+        return sb.toString()
+    }
+
+    // ── LaTeX → 纯文本（AI 输出公式常带 \frac/$x^2$，TextView 无 KaTeX 会出乱码。仅无 KaTeX 的降级路径使用）──
+
+    @Suppress("RegExpRedundantEscape")
+    private val STEP_SUP: Map<Char, Char> = mapOf(
+        '0' to '\u2070', '1' to '\u00B9', '2' to '\u00B2', '3' to '\u00B3', '4' to '\u2074',
+        '5' to '\u2075', '6' to '\u2076', '7' to '\u2077', '8' to '\u2078', '9' to '\u2079',
+        '+' to '\u207A', '-' to '\u207B', '=' to '\u207C', '(' to '\u207D', ')' to '\u207E',
+        'n' to '\u207F', 'N' to '\u207F'
+    )
+    private val STEP_SUB: Map<Char, Char> = mapOf(
+        '0' to '\u2080', '1' to '\u2081', '2' to '\u2082', '3' to '\u2083',
+        '4' to '\u2084', '5' to '\u2085', '6' to '\u2086', '7' to '\u2087',
+        '8' to '\u2088', '9' to '\u2089', '+' to '\u208A', '-' to '\u208B',
+        '=' to '\u208C', '(' to '\u208D', ')' to '\u208E', 'x' to '\u2093'
+    )
+
+    private fun mathToPlain(md: String): String {
+        var s = md
+        // 1) 公式定界符剥壳：$$…$$、\(…\)、\[…\]、$…$
+        s = Regex("""\$\$([\s\S]+?)\$\$""", RegexOption.MULTILINE).replace(s, "$1")
+        s = Regex("""\\\(([\s\S]+?)\\\)""", RegexOption.MULTILINE).replace(s, "$1")
+        s = Regex("""\\\[([\s\S]+?)\\\]""", RegexOption.MULTILINE).replace(s, "$1")
+        s = Regex("""(?<!\$)\$([^$\n]+?)\$(?!\$)""", RegexOption.MULTILINE).replace(s, "$1")
+        // 2) 分数与根式
+        s = Regex("""\\[fd]frac\{([^{}]*)\}\{([^{}]*)\}""").replace(s) { "((${it.groupValues[1]})/(${it.groupValues[2]}))" }
+        s = Regex("""\\sqrt(?:\[([^{}]*)\])?\{([^{}]*)\}""").replace(s) { m ->
+            val deg = m.groupValues[1]
+            val rad = m.groupValues[2]
+            if (deg.isNotEmpty()) "${deg}\u221A($rad)" else "\u221A($rad)"
+        }
+        // 3) 上下标：^{…}/^2 → 上标字符；_{…}/_2 → 下标字符
+        s = Regex("""\^\{([^{}]*)\}""").replace(s) { m -> m.groupValues[1].map { STEP_SUP[it] ?: it }.joinToString("") }
+        s = Regex("""\^([0-9a-zA-Z+\-])""").replace(s) { m -> (STEP_SUP[m.groupValues[1][0]] ?: m.groupValues[1]).toString() }
+        s = Regex("""_\{([^{}]*)\}""").replace(s) { m -> m.groupValues[1].map { STEP_SUB[it] ?: it }.joinToString("") }
+        s = Regex("""_([0-9a-zA-Z+\-])""").replace(s) { m -> (STEP_SUB[m.groupValues[1][0]] ?: m.groupValues[1]).toString() }
+        // 4) 常见命令映射
+        val cmdMap = mapOf(
+            "\\times" to "\u00D7", "\\div" to "\u00F7", "\\cdot" to "\u00B7", "\\pm" to "\u00B1",
+            "\\leq" to "\u2264", "\\le" to "\u2264", "\\geq" to "\u2265", "\\ge" to "\u2265",
+            "\\neq" to "\u2260", "\\ne" to "\u2260", "\\approx" to "\u2248", "\\infty" to "\u221E",
+            "\\rightarrow" to "\u2192", "\\to" to "\u2192", "\\Rightarrow" to "\u21D2",
+            "\\leftarrow" to "\u2190", "\\leftrightarrow" to "\u2194",
+            "\\because" to "\u2235", "\\therefore" to "\u2234", "\\partial" to "\u2202",
+            "\\Delta" to "\u0394", "\\alpha" to "\u03B1", "\\beta" to "\u03B2", "\\pi" to "\u03C0",
+            "\\theta" to "\u03B8", "\\mu" to "\u03BC", "\\sigma" to "\u03C3", "\\% " to "%"
+        )
+        cmdMap.forEach { (cmd, plain) -> s = s.replace(cmd, plain) }
+        // 5) \text{}/\mathrm{}/\mathbf{} 等花体命令 → 内容
+        s = Regex("""\\(?:text|mathrm|mathbf|mathit|textbf|textit)\{([^{}]*)\}""").replace(s, "$1")
+        // 6) \left( \right) 与 \quad、\, 等间距控制符
+        s = Regex("""\\[lLrR]eft""").replace(s, "")
+        Regex("""\\[lr]ight""").replace(s, "")
+        s = Regex("""\\[lr]ight""").replace(s, "")
+        s = Regex("""\\quad|\\qquad|\\;|\\,|\\!|\\, """).replace(s, " ")
+        s = s.replace("\\\\", "\n")
+        // 7) 残余 \cmd{…} → 内容；残余 \cmd → 去反斜杠（公式残留如 \frac 已被2步处理）
+        s = Regex("""\\([a-zA-Z]+)\{([^{}]*)\}""").replace(s, "$2")
+        s = Regex("""\\([a-zA-Z]+)\b""").replace(s, "$1")
+        s = Regex("""\\([{}_%&])""").replace(s, "$1")
+        return s
     }
 
     // ── 块级构造 ──

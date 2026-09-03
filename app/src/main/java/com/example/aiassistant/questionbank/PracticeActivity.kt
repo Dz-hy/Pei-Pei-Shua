@@ -121,7 +121,8 @@ class PracticeActivity : AppCompatActivity() {
         private val AI_ANALYSIS_PROMPT =
             "你是一名经验丰富的公务员考试辅导老师。用户会给你一道完整题目（题干、选项、正确答案、我的作答、官方解析）。" +
             "请用简洁清晰的中文讲解：1) 本题考点；2) 正确解题思路；3) 若我的作答有误，指出错因与易错点；" +
-            "4) 给一条实用的记忆技巧或秒杀技巧。不要复述题目，直接开讲。"
+            "4) 给一条实用的记忆技巧或秒杀技巧。不要复述题目，直接开讲。" +
+            "数学公式用 LaTeX 写在 $...$ 或 \\(...\\) 里（会被渲染成公式），不要输出纯文本化的乱码公式。"
 
         private val trustAllCerts = arrayOf<javax.net.ssl.X509TrustManager>(object : javax.net.ssl.X509TrustManager {
             override fun checkClientTrusted(chain: Array<java.security.cert.X509Certificate>, authType: String) {}
@@ -466,9 +467,14 @@ try {
         // 题干 - 有 HTML 时用 WebView 渲染，纯文本 + 图片也用 WebView
         layoutStemImages.removeAllViews()
         layoutStemImages.visibility = View.GONE
+        // 多选题角标：答案长度>1 即多选（判断题 A正确/B错误 是单选不标）
+        val multiBadge = if (question.answer.length > 1)
+            "<span style=\"background:#F8E8C8;color:#8A6D3B;border-radius:4px;" +
+                "padding:2px 8px;font-size:12px;font-weight:bold;display:inline-block;margin-bottom:6px;\">多选题</span><br>"
+            else ""
         if (question.stemHtml.isNotEmpty()) {
             wvStem.visibility = View.VISIBLE
-            renderInWebView(wvStem, question.stemHtml)
+            renderInWebView(wvStem, multiBadge + question.stemHtml)
         } else {
             // 纯文本 + 图片：构建简单 HTML，不用 KaTeX
             val stemText = formatBlanks(question.stem)
@@ -480,7 +486,7 @@ try {
                 <meta name="viewport" content="width=device-width, initial-scale=1.0">
                 <style>body{font-family:sans-serif;font-size:16px;color:#212121;line-height:1.6;margin:0;padding:8px;}
                 img{max-width:100%;height:auto;display:block;margin:8px 0;}</style>
-                </head><body><p>$stemText</p>$imageHtml</body></html>
+                </head><body>$multiBadge<p>$stemText</p>$imageHtml</body></html>
             """.trimIndent()
             wvStem.visibility = View.VISIBLE
             wvStem.loadDataWithBaseURL("https://fb.fenbike.cn/", simpleHtml, "text/html", "UTF-8", null)
@@ -1106,7 +1112,8 @@ try {
 
         val dialogView = LayoutInflater.from(this).inflate(R.layout.dialog_ai_analysis, null)
         val spinner = dialogView.findViewById<Spinner>(R.id.spinner_ai_model)
-        val tvContent = dialogView.findViewById<TextView>(R.id.tv_ai_content)
+        val wvContent = dialogView.findViewById<WebView>(R.id.wv_ai_content)
+        setupWebView(wvContent)
         val layoutProgress = dialogView.findViewById<View>(R.id.layout_ai_progress)
         val btnRetry = dialogView.findViewById<MaterialButton>(R.id.btn_ai_retry)
 
@@ -1136,7 +1143,7 @@ try {
             val config = models[spinner.selectedItemPosition]
             com.example.aiassistant.AppPreferences.setPracticeAiModelId(this, config.id)
             layoutProgress.visibility = View.VISIBLE
-            tvContent.visibility = View.GONE
+            wvContent.visibility = View.GONE
             btnRetry.visibility = View.GONE
 
             // 故障转移：手动选择的模型优先，失败（网络/服务端错误）后自动轮询其余模型
@@ -1163,16 +1170,18 @@ try {
                     runOnUiThread {
                         if (destroyed || !dialog.isShowing) return@runOnUiThread
                         layoutProgress.visibility = View.GONE
-                        tvContent.visibility = View.VISIBLE
-                        com.example.aiassistant.MarkdownRenderer.applyTo(tvContent, text)
+                        wvContent.visibility = View.VISIBLE
+                        // WebView + KaTeX：AI 输出里的 LaTeX 公式原样渲染，不再乱码
+                        renderInWebView(wvContent, com.example.aiassistant.MarkdownRenderer.toHtml(text))
                     }
                 },
                 onError = { error ->
                     runOnUiThread {
                         if (destroyed || !dialog.isShowing) return@runOnUiThread
                         layoutProgress.visibility = View.GONE
-                        tvContent.visibility = View.VISIBLE
-                        tvContent.text = "AI 解析失败：$error"
+                        wvContent.visibility = View.VISIBLE
+                        val errHtml = error.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                        renderInWebView(wvContent, "<p>AI 解析失败：$errHtml</p>")
                         btnRetry.visibility = View.VISIBLE
                     }
                 },
@@ -1194,6 +1203,9 @@ try {
     /** 整题打包发给 AI：题干 + 选项 + 正确答案 + 我的作答 + 官方解析 */
     private fun buildAiUserMessage(q: Question): String {
         val labels = listOf("A", "B", "C", "D", "E", "F", "G", "H")
+        val hasFormulaImg = q.titleImages.isNotEmpty() ||
+            q.options.any { it.images.isNotEmpty() } ||
+            q.analysis.contains("<img")
         return buildString {
             append("题目：").append(q.stem).append("\n\n")
             q.options.forEachIndexed { i, op ->
@@ -1212,6 +1224,11 @@ try {
                 }
             )
             if (q.analysis.isNotBlank()) append("\n官方解析：").append(HtmlAnalysis.toPlainText(q.analysis))
+            if (hasFormulaImg) {
+                append("\n\n【提示】本题含数学公式/图表（以图片形式存在，无法随文字传入）。")
+                append("如涉及图中数据，请用文字描述或给出推导方法；若其内容直接影响解答，请说明缺图无法定价，")
+                append("并给出通用解题步骤。")
+            }
         }
     }
 

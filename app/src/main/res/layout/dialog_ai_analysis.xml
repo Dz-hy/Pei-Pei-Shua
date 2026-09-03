@@ -34,14 +34,10 @@
         android:layout_height="wrap_content"
         android:minHeight="160dp">
 
-        <TextView
-            android:id="@+id/tv_ai_content"
+        <WebView
+            android:id="@+id/wv_ai_content"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:textSize="14sp"
-            android:textColor="@color/text_primary"
-            android:lineSpacingMultiplier="1.4"
-            android:textIsSelectable="true"
+            android:layout_height="420dp"
             android:visibility="gone" />
 
         <LinearLayout
