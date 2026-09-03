@@ -59,6 +59,14 @@ RE_SECTION_PART = re.compile(
 # 材料组分组标记 "（一）~（十）" 或 "(材料1)/(材料2)"（任意大题：资料分析、判断推理综合
 # 材料等都有此排版），标记后的行/图暂存为材料；(材料N) 是显式标记无需字数门槛
 RE_MATERIAL = re.compile(r"^\s*(?:[（(][一二三四五六七八九十]+[)）]|[（(]?\s*材料\s*\d+\s*[）)]?\s*$)")
+# 材料组标题行："一、根据下列资料，回答71~75题。"（木棉式合并排版，无（一）标号、
+# 无大题标题行）——同样按显式材料标记处理
+RE_MATERIAL_INTRO = re.compile(
+    r"^\s*(?:[一二三四五六七八九十]+\s*[、.．]\s*)?根据(?:下列|下述|所给|上述)?(?:资料|材料)\s*[，,]?\s*回答")
+# 无标号材料开头（源文件缺材料头行，如木棉卷材料三直接从"截至2024 年末…"起）：
+# 在上一题答案解析段（in_answer）里出现这类行 → 开启新材料组。只认两个强特征，
+# 避免把解析正文里的普通年份句（"2025 年11 月7 日…"）误判
+RE_MATERIAL_TEXT = re.compile(r"^\s*(?:截至\s*20\d{2}|据\s*(?:最新|有关|相关|公开|国家|省)?统计)")
 # 材料头部的大题说明套话（"根据题目要求…"/"根据所给材料，回答106-110 题"/"(材料)"占位），
 # 材料成形时剥掉
 RE_INTRO = re.compile(
@@ -79,10 +87,18 @@ RE_ANSWERS = [
     re.compile(r"^\s*([A-Ha-h])(?![A-Ha-h])\s*[。.，,：:]"),  # "1. B。解析…" 题号后裸答案
     re.compile(r"^\s*([A-Ha-h])(?![A-Ha-h])\s*$", re.MULTILINE),  # "68、B" 独占一行的裸答案
 ]
-RE_MULTI_ANSWER = re.compile(r"答\s*案\s*[:：为是]?\s*([A-Ha-h])\s*[、,，]?\s*([A-Ha-h])")
 RE_JUDGE_ANSWER = re.compile(r"答\s*案\s*[:：为是]?\s*[√×对错TF]")
 # 判断题收尾句式（2025 广东省考解析册："故表述正确。/故表述错误。"独占结尾）
 RE_JUDGE_TAIL = re.compile(r"故表述(?:正确|错误)\s*[。.]?\s*$")
+# 多选答案：答案后紧跟 ≥2 个连续字母（"答案：ABD"/"正确答案为BD"）。
+# 必须先于单字母模式尝试——否则 "ABD" 会被单字母模式的兜底分支取成最后一个字母
+RE_ANSWER_MULTI = re.compile(r"答\s*案\s*[:：为是]?\s*([A-Ha-h]{2,4})(?![A-Ha-h])")
+# 多选答案变体：顿号/逗号分隔（"答案：A、B"）
+RE_ANSWER_MULTI_SEP = re.compile(r"答\s*案\s*[:：为是]?\s*([A-Ha-h](?:\s*[、,，]\s*[A-Ha-h])+)(?![A-Ha-h])")
+# 合并排版（"题干+选项+答案：X+解析：…"同文件）的答案段起始标记
+RE_ANSWER_SECTION = re.compile(r"^\s*(答案\s*[:：为是]|【答案】|解析\s*[:：]|【解析】)")
+# 选项/题干段内联的答案解析尾巴截除（解析段起始处切断）
+RE_TAIL_ANS = re.compile(r"答案\s*[:：为是]|【答案】|解析\s*[:：]|【解析】")
 RE_ANALYSIS_TAG = re.compile(r"【解析】|解析\s*[:：]|^解析\s*$", re.MULTILINE)
 # 页脚/推广噪音行：页码 "第24 页 共64 页"（逗号可有可无）、"- 1 -"、"1 / 46"、
 # 页眉卷名重复、推广语。注意：独立字母行不在此过滤——2024/2025 选项字母是独立行，
@@ -94,6 +110,7 @@ RE_NOISE = re.compile(
     r"|^\s*20\d{2}\s*年国家公务员"
     r"|^\s*20\d{2}\s*年国考"
     r"|淘宝店铺|微信号|微信公众号|扫码关注|快速对答案"
+    r"|专注本土考编|机构广告|考编报班"  # 木棉卷页眉/页脚推广语
 )
 # 分类名仅允许字母/数字/中文/下划线/连字符，杜绝路径穿越与非法文件名字符
 RE_SAFE_NAME = re.compile(r"^[\w\u4e00-\u9fff-]+$")
@@ -174,6 +191,15 @@ def _pdf_elements(doc):
     """全文档元素流 [(页, y, x, kind, payload, size)]。text=payload 行文本；img=payload (xref, bbox)。
     size 为该行首 span 字号（图片元素恒为 0），供裸数字题号与页码区分用。"""
     import fitz
+    # 同一 xref 出现在 ≥3 个不同页 = 每页重复的广告/水印图（木棉卷页中广告位
+    # 73 页同一位置），一律丢弃——正文题图/材料图不会跨 3+ 页重复
+    xref_pages = {}
+    for pno in range(len(doc)):
+        for info in doc[pno].get_image_info(xrefs=True):
+            xr = info.get("xref") or 0
+            if xr:
+                xref_pages.setdefault(xr, set()).add(pno)
+    ad_xrefs = {xr for xr, pp in xref_pages.items() if len(pp) >= 3}
     elements = []
     for pno in range(len(doc)):
         page = doc[pno]
@@ -188,12 +214,19 @@ def _pdf_elements(doc):
                     rows.append((line["bbox"][1], line["bbox"][0], len(rows), text, size))
         elements.extend(_merge_fragment_rows(rows, pno))
         for info in page.get_image_info(xrefs=True):
-            x0, y0, x1, y1 = info["bbox"]
-            # 整页背景/水印图：bbox 越出页面边界（y<0 或 y>页高），跳过——这类图每页重复，
-            # 既不属题也不属材料，放行会污染题图与材料组
-            pr = page.rect
-            if x0 < -1 or y0 < -1 or x1 > pr.x1 + 1 or y1 > pr.y1 + 1:
+            xref = info.get("xref") or 0
+            if xref in ad_xrefs:
                 continue
+            x0, y0, x1, y1 = info["bbox"]
+            # 整页背景/水印图：bbox 大幅越出页面边界，跳过——这类图每页重复，
+            # 既不属题也不属材料，放行会污染题图与材料组。
+            # ≤6pt 的轻微出血不算（WPS 导出的解析截图常见右缘溢出 2-3pt，是真内容）
+            pr = page.rect
+            TOL = 6
+            if x0 < -TOL or y0 < -TOL or x1 > pr.x1 + TOL or y1 > pr.y1 + TOL:
+                continue
+            x0, y0 = max(x0, 0.0), max(y0, 0.0)
+            x1, y1 = min(x1, pr.x1), min(y1, pr.y1)
             short = min(x1 - x0, y1 - y0)
             if short < 5:
                 continue  # 杂点
@@ -394,9 +427,10 @@ def pdf_to_questions(path: str, side: str):
     page_seen = -1
     expected = 1  # 下一题预期题号（裸数字题号防误切用）
     pre_buffer = []  # 解析侧正文开始前的行（卷名/快速对答案表）
+    in_answer = False  # 题干侧：已进入合并排版的答案解析段（"答案：X/解析：…"），行图一律跳过
 
     def start_question(num: int, rest: str):
-        nonlocal current, expected, preamble, material_anchor
+        nonlocal current, expected, preamble, material_anchor, in_answer
         # 无标号材料回吸：上一题最后一行选项标记之后的游离行归新材料组——
         # 文本≥120 字，或带图（2022 资料表格图、2021 篇章阅读整页图，可能无尾随文本行）
         if side == "stem" and current is not None and current != num and current in questions:
@@ -408,7 +442,8 @@ def pdf_to_questions(path: str, side: str):
                 material_anchor = _material_html(tail, tail_imgs)
         if num in questions:
             stats["dup_nums"].append(num)
-            return
+            return  # in_answer 保持不变：解析里行首编号的误切仍按答案段跳过
+        in_answer = False
         if (side == "analysis" and current is not None
                 and not _has_body(questions[current])
                 and not questions[current]["images"]):
@@ -436,6 +471,8 @@ def pdf_to_questions(path: str, side: str):
                 pending.clear()  # 配图按页就近配对
             if kind in ("img", "micro"):
                 xref, bbox = payload
+                if side == "stem" and in_answer:
+                    continue  # 合并排版的答案解析段配图，不进题干
                 if kind == "micro":
                     # 小图（公式条等）：题干侧挂到当前题/材料前言备用；解析侧不保留
                     if side == "stem":
@@ -489,6 +526,7 @@ def pdf_to_questions(path: str, side: str):
                 section = m_sec.group(2).strip()
                 preamble = {"text": [], "images": []}
                 material_anchor = None  # 新大题不继承上一大题的材料
+                in_answer = False
                 continue
             if side == "stem":
                 m_part = RE_SECTION_PART.match(text)
@@ -496,7 +534,20 @@ def pdf_to_questions(path: str, side: str):
                     section = m_part.group(1).strip()
                     preamble = {"text": [], "images": []}
                     material_anchor = None
+                    in_answer = False
                     continue
+            # 材料组标题行（"一、根据下列资料，回答71~75题。"）：显式材料标记，
+            # 同时终结上一题的答案解析段
+            if side == "stem" and RE_MATERIAL_INTRO.match(text):
+                in_answer = False
+                preamble = {"text": [text], "images": [], "marked": True}
+                continue
+            # 无标号材料开头（源缺材料头行）：出现在上一题答案解析段里的
+            # "截至2024 年末…"/"据统计…"类行视为新材料开始
+            if side == "stem" and in_answer and RE_MATERIAL_TEXT.match(text):
+                in_answer = False
+                preamble = {"text": [text], "images": [], "marked": True}
+                continue
             m = RE_QNUM.match(text)
             if m is None:
                 m = RE_QNUM_BRACKET.match(text)
@@ -515,6 +566,15 @@ def pdf_to_questions(path: str, side: str):
                 start_question(int(m2.group(1)), text[m2.end():])
                 questions[int(m2.group(1))]["soft"] = True
                 continue
+            # 合并排版：题干侧一旦进入答案解析段（"答案：X/解析：…"起），其中的行
+            # 全部跳过，直到下一题题号（start_question 复位）。段内行首编号的误切
+            # 会命中已有题号被 dup 保护丢弃，不产生新题
+            if side == "stem":
+                if RE_ANSWER_SECTION.match(text):
+                    in_answer = True
+                    continue
+                if in_answer:
+                    continue
             # 材料组标记（一）~（十）/(材料N)：任意大题下都成立（资料分析/判断推理综合
             # 材料/篇章阅读）；当前题未出全选项时视为题干内枚举，不打断。
             # 显式标记行后即是材料正文，无需字数门槛
@@ -577,19 +637,28 @@ def lines_to_questions(lines: list) -> dict:
 
 # ---------------------------------------------------------------- 解析/选项
 
+def _cut_answer_tail(s: str) -> str:
+    """合并排版（题干+选项后紧跟"答案：X/解析：…"）的段内尾巴截除。"""
+    m = RE_TAIL_ANS.search(s)
+    return (s[:m.start()] if m else s).strip()
+
+
+RE_TYPE_TAG = re.compile(r"^[（(【\[]\s*(?:单选|多选|判断)题\s*[）)】\]]\s*")
+
+
 def parse_stem(text: str, has_images: bool = False) -> dict:
     """题干侧: 切出题干与选项。有图时空选项段保留占位（选项即图的题），不足 4 个补空。"""
     marks = list(RE_OPT.finditer(text))
     if len(marks) < 2:
-        stem = re.sub(r"^[（(]\s*(?:单选|多选|判断)题\s*[)）]\s*", "", text.strip())
+        stem = _cut_answer_tail(re.sub(RE_TYPE_TAG, "", text.strip()))
         options = ["", "", "", ""] if has_images else []
         return {"stem": stem, "options": options}
-    stem = text[: marks[0].start()].strip()
-    stem = re.sub(r"^[（(]\s*(?:单选|多选|判断)题\s*[)）]\s*", "", stem)
+    stem = _cut_answer_tail(text[: marks[0].start()].strip())
+    stem = re.sub(RE_TYPE_TAG, "", stem)
     options = []
     for i, m in enumerate(marks):
         seg_end = marks[i + 1].start() if i + 1 < len(marks) else len(text)
-        seg = text[m.end(): seg_end].strip()
+        seg = _cut_answer_tail(text[m.end(): seg_end])
         if not seg and not has_images:  # 无图题丢弃空段（"A、B两地" 这类误切）
             continue
         options.append(seg)
@@ -598,16 +667,38 @@ def parse_stem(text: str, has_images: bool = False) -> dict:
     return {"stem": stem, "options": options}
 
 
+def _judge_answer(text: str):
+    """判断题判定 → "A"(正确) / "B"(错误)。√/对/T/表述正确 → A；×/错/F/表述错误 → B。"""
+    m = RE_JUDGE_ANSWER.search(text)
+    if m:
+        return "A" if m.group(0)[-1] in "√对Tt" else "B"
+    m = RE_JUDGE_TAIL.search(text)
+    if m:
+        return "A" if "正确" in m.group(0) else "B"
+    return None
+
+
 def parse_analysis(text: str):
-    """解析侧: 提取 (答案字母 or None, 是否判断题, 解析正文)。"""
-    answer = None
-    for rx in RE_ANSWERS:
-        m = rx.search(text)
-        if m:
-            answer = m.group(1).upper()
-            break
-    if answer is None and (RE_JUDGE_ANSWER.search(text) or RE_JUDGE_TAIL.search(text)):
-        return None, True, text.strip()
+    """解析侧: 提取 (答案字母或串, 是否判断题, 解析正文)。
+
+    答案提取顺序：多字母（多选）→ 单字母 → 判断题。判断题答案统一映射为
+    A(正确)/B(错误)，转换时不足两个选项的补 ["正确","错误"]。
+    """
+    answer, is_judge = None, False
+    m = RE_ANSWER_MULTI.search(text) or RE_ANSWER_MULTI_SEP.search(text)
+    if m:
+        answer = re.sub(r"[、,，\s]+", "", m.group(1)).upper()
+    else:
+        answer = None
+        for rx in RE_ANSWERS:
+            mm = rx.search(text)
+            if mm:
+                answer = mm.group(1).upper()
+                break
+        if answer is None:
+            ja = _judge_answer(text)
+            if ja:
+                answer, is_judge = ja, True
     m = RE_ANALYSIS_TAG.search(text)
     body = text[m.end():].strip() if m else text.strip()
     # 解析册头部残留："—正确答案B】"（2024 广东【解析N—正确答案X】排版被题界正则
@@ -616,7 +707,7 @@ def parse_analysis(text: str):
     if answer:
         # "68、B" 独行格式：正文开头残留的答案字母去掉（字母后可跟标点/换行/结尾）
         body = re.sub(rf"^\s*{answer}\s*(?:[。.，,：:]|\n|$)\s*", "", body, count=1)
-    return answer, False, body
+    return answer, is_judge, body
 
 
 def compose_analysis(body: str, images: list) -> str:
@@ -657,8 +748,25 @@ def _merge_bare_extras(qs: dict, anchors: set):
         del qs[num]
 
 
+def _parse_module_map(spec: str) -> dict:
+    """--module-map "1-10=政治理论,11-25=常识判断" → {题号: 模块名}。
+    用于源 PDF 完全没有大题标题行的卷（如木棉牌考生回忆版）。"""
+    out = {}
+    for part in (spec or "").split(","):
+        if "=" not in part:
+            continue
+        rng, name = part.split("=", 1)
+        if "-" in rng:
+            a, b = rng.split("-", 1)
+            for n in range(int(a), int(b) + 1):
+                out[n] = name
+        elif rng.isdigit():
+            out[int(rng)] = name
+    return {k: v.strip() for k, v in out.items() if v.strip()}
+
+
 def convert(stem_path: str, analysis_path: str, name: str, out_dir: Path,
-            answer_overrides: dict = None):
+            answer_overrides: dict = None, module_map: dict = None):
     if Path(stem_path).suffix.lower() == ".pdf":
         stems, sections, stem_stats = pdf_to_questions(stem_path, "stem")
     else:
@@ -695,18 +803,15 @@ def convert(stem_path: str, analysis_path: str, name: str, out_dir: Path,
                 answer = batch[num]  # 兜底：正文无答案句时取"快速对答案"表
         if answer is not None and num in batch and batch[num] != answer:
             batch_mismatch.append((num, answer, batch[num]))
-        if is_judge:
-            skipped.append((num, "判断题（√×/对错），不支持"))
-            continue
         if answer is None:
-            if RE_MULTI_ANSWER.search(analyses[num]["text"]):
-                skipped.append((num, "多选题，不支持"))
-            else:
-                skipped.append((num, "未提取到答案字母"))
+            skipped.append((num, "未提取到答案字母"))
             continue
         stem_imgs = stems[num]["images"]
         ana_imgs = analyses[num]["images"]
         p = parse_stem(stems[num]["text"], bool(stem_imgs))
+        if is_judge and len(p["options"]) < 2:
+            # 判断题题干无选项行（√/×或"表述正确"判定）：统一补 A=正确/B=错误
+            p["options"] = ["正确", "错误"]
         if len(p["options"]) < 2:  # 有图的题在 parse_stem 内已补足空选项
             skipped.append((num, f"仅识别到 {len(p['options'])} 个选项，需≥2"))
             continue
@@ -722,7 +827,7 @@ def convert(stem_path: str, analysis_path: str, name: str, out_dir: Path,
             "rate": 50,
             "title_images": stem_imgs,
             "material": stems[num].get("material", ""),
-            "module": sections.get(num, "") or name,
+            "module": (module_map or {}).get(num) or sections.get(num, "") or name,
         })
         answers_view.append((num, answer, len(p["options"]), p["stem"][:30]))
         if stem_imgs or ana_imgs:
@@ -834,6 +939,8 @@ def main():
     ap.add_argument("--name", required=True, help="卷名（写入每题 source，导入后错题按卷分类）")
     ap.add_argument("--answer", action="append", default=[], metavar="题号=字母",
                     help="答案人工补录（源文件答案字母缺失时人工确认后补，如 --answer 42=A，可多次）")
+    ap.add_argument("--module-map", default="", metavar="区间=大题,…",
+                    help="源文件无大题标题时按题号区间指定 module（如 1-10=政治理论,11-25=常识判断）")
     ap.add_argument("--out-dir", default=".", help="输出目录，默认当前目录")
     args = ap.parse_args()
 
@@ -849,7 +956,8 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     json_path, report_path, ok, skip = convert(args.stem, args.analysis, name, out_dir,
-                                               answer_overrides)
+                                               answer_overrides,
+                                               _parse_module_map(args.module_map))
     print(f"✅ 导入文件: {json_path}（{ok} 题）")
     print(f"📋 核对报告: {report_path}（跳过 {skip} 题，请人工核对）")
 
