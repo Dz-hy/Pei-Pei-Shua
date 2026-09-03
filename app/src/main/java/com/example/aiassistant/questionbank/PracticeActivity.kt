@@ -84,6 +84,8 @@ class PracticeActivity : AppCompatActivity() {
     private var lastElapsedMs = 0L
     private var answerCardDialog: AlertDialog? = null
     private var aiDialog: AlertDialog? = null
+    // AI 解析故障转移句柄：对话框关闭时取消，重开/重试前重置
+    private var aiFailover: com.example.aiassistant.AiFailoverExecutor? = null
     // 当前材料区渲染的 materialId：同组子题共用，切换子题不重载材料（滚动位置保持）
     private var lastMaterialKey: String? = null
 
@@ -140,6 +142,8 @@ class PracticeActivity : AppCompatActivity() {
     }
 
     private var destroyed = false
+    // 题库数据就绪前屏蔽翻题/答题卡操作（查库已异步化，期间 questions 为空）
+    private var dataReady = false
     private val readyListener: () -> Unit = { loadData() }
     private val reviewReadyListener: () -> Unit = { loadReviewSession() }
 
@@ -294,48 +298,14 @@ try {
         }
 
         if (isWrongPractice) {
-            val items = WrongQuestionManager.getWrongQuestions(this).filter { it.id in wrongPracticeIds }
-            wrongIdByQuestionId.clear()
-            // 整组重做：快照题的 materialId 非空 → 从题库拉同材料全部子题（组内按题号序），
-            // 错题快照优先；组内非错题照常判分（答对不动，答错 recordBankWrong 入错题本）。
-            // 微大题（材料+多子题）在错题重练时整组还原，避免单题断裂
-            val snapshots = items.mapNotNull { wq ->
-                wq.snapshot?.also { wrongIdByQuestionId[it.id] = wq.id }
-            }
-            val snapshotById = snapshots.associateBy { it.id }
-            val expanded = mutableListOf<Question>()
-            val seen = HashSet<String>()
-            // 先放带材料的错题所在组（整组），再放无材料错题
-            val groupSnapshots = snapshots.filter { it.materialId.isNotEmpty() }
-            val singleSnapshots = snapshots.filter { it.materialId.isEmpty() }
-            for (s in groupSnapshots) {
-                if (!seen.add(s.materialId)) continue
-                val group = if (QuestionBankManager.isLoaded()) {
-                    QuestionBankManager.getMaterialQuestions(s.materialId)
-                } else emptyList()
-                if (group.isNotEmpty()) {
-                    // 组内保留错题快照优先（题面不一定与题库一致），其余用题库题
-                    expanded.addAll(group.map { g -> snapshotById[g.id] ?: g })
-                } else {
-                    expanded.add(s)  // 题库无此组（已删），落单题
+            // 错题快照展开 + 材料整组拉取走后台线程，避免开卷时主线程查库卡顿
+            Thread {
+                val expanded = buildWrongPracticeQuestions()
+                runOnUiThread {
+                    if (destroyed || isFinishing) return@runOnUiThread
+                    applyLoadedQuestions(expanded, "这些错题没有可重做的题面（纯OCR题无法重做）")
                 }
-            }
-            for (s in singleSnapshots) {
-                if (seen.add(s.id)) expanded.add(s)
-            }
-            questions = expanded
-            selectedOptions = IntArray(questions.size) { -1 }
-            results = arrayOfNulls(questions.size)
-            submitted = false
-            practiceStartTime = System.currentTimeMillis()
-            lastElapsedMs = 0
-
-            if (questions.isEmpty()) {
-                Toast.makeText(this, "这些错题没有可重做的题面（纯OCR题无法重做）", Toast.LENGTH_SHORT).show()
-                finish()
-                return
-            }
-            showQuestion(0)
+            }.start()
             return
         }
 
@@ -345,7 +315,52 @@ try {
             return
         }
 
-        questions = QuestionBankManager.getQuestionsByRateRange(moduleId, rateMin, rateMax, questionCount)
+        Thread {
+            val loaded = QuestionBankManager.getQuestionsByRateRange(moduleId, rateMin, rateMax, questionCount)
+            runOnUiThread {
+                if (destroyed || isFinishing) return@runOnUiThread
+                applyLoadedQuestions(loaded, "没有符合条件的题目")
+            }
+        }.start()
+    }
+
+    /** 错题重练抽题：快照展开 + 材料整组拉取（后台线程执行，结果带回主线程） */
+    private fun buildWrongPracticeQuestions(): List<Question> {
+        val items = WrongQuestionManager.getWrongQuestions(this).filter { it.id in wrongPracticeIds }
+        wrongIdByQuestionId.clear()
+        // 整组重做：快照题的 materialId 非空 → 从题库拉同材料全部子题（组内按题号序），
+        // 错题快照优先；组内非错题照常判分（答对不动，答错 recordBankWrong 入错题本）。
+        // 微大题（材料+多子题）在错题重练时整组还原，避免单题断裂
+        val snapshots = items.mapNotNull { wq ->
+            wq.snapshot?.also { wrongIdByQuestionId[it.id] = wq.id }
+        }
+        val snapshotById = snapshots.associateBy { it.id }
+        val expanded = mutableListOf<Question>()
+        val seen = HashSet<String>()
+        // 先放带材料的错题所在组（整组），再放无材料错题
+        val groupSnapshots = snapshots.filter { it.materialId.isNotEmpty() }
+        val singleSnapshots = snapshots.filter { it.materialId.isEmpty() }
+        for (s in groupSnapshots) {
+            if (!seen.add(s.materialId)) continue
+            val group = if (QuestionBankManager.isLoaded()) {
+                QuestionBankManager.getMaterialQuestions(s.materialId)
+            } else emptyList()
+            if (group.isNotEmpty()) {
+                // 组内保留错题快照优先（题面不一定与题库一致），其余用题库题
+                expanded.addAll(group.map { g -> snapshotById[g.id] ?: g })
+            } else {
+                expanded.add(s)  // 题库无此组（已删），落单题
+            }
+        }
+        for (s in singleSnapshots) {
+            if (seen.add(s.id)) expanded.add(s)
+        }
+        return expanded
+    }
+
+    /** 主线程应用加载结果：空集提示并退出，非空开始练习 */
+    private fun applyLoadedQuestions(loaded: List<Question>, emptyToast: String) {
+        questions = loaded
         selectedOptions = IntArray(questions.size) { -1 }
         results = arrayOfNulls(questions.size)
         submitted = false
@@ -353,11 +368,12 @@ try {
         lastElapsedMs = 0
 
         if (questions.isEmpty()) {
-            Toast.makeText(this, "没有符合条件的题目", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, emptyToast, Toast.LENGTH_SHORT).show()
             finish()
             return
         }
 
+        dataReady = true
         showQuestion(0)
     }
 
@@ -389,6 +405,7 @@ try {
         wrongCount = rec.wrongCount
         lastElapsedMs = rec.elapsedMs
         submitted = true
+        dataReady = true
 
         showQuestion(0)
         showAnswerCard()
@@ -396,16 +413,21 @@ try {
 
     private fun setupListeners() {
         btnPrev.setOnClickListener {
+            if (!dataReady) return@setOnClickListener
             if (currentIndex > 0) showQuestion(currentIndex - 1)
         }
         btnNext.setOnClickListener {
+            if (!dataReady) return@setOnClickListener
             if (currentIndex < questions.size - 1) {
                 showQuestion(currentIndex + 1)
             } else {
                 finishTraining()
             }
         }
-        btnAnswerCard.setOnClickListener { showAnswerCard() }
+        btnAnswerCard.setOnClickListener {
+            if (!dataReady) return@setOnClickListener
+            showAnswerCard()
+        }
         btnAiAnalysis.setOnClickListener { showAiAnalysisDialog() }
     }
 
@@ -486,20 +508,34 @@ try {
         }
 
         // 切题：自动保存上一题批注；交卷前不显示旧批注（防剧透），交卷后回看显示
-        hw.onQuestionChanged(
-            question.id,
-            if (submitted) QuestionBankManager.getAnnotation(question.id) else null
-        )
+        // 批注 JSON 读取走后台线程，避免切题时主线程查库卡顿；读回且仍停在本题再挂载
+        hw.onQuestionChanged(question.id, null)
+        if (submitted) {
+            val qid = question.id
+            val targetIndex = index
+            Thread {
+                val json = QuestionBankManager.getAnnotation(qid)
+                if (!json.isNullOrBlank()) {
+                    runOnUiThread {
+                        if (!destroyed && !isFinishing && currentIndex == targetIndex) {
+                            hw.onQuestionChanged(qid, json)
+                        }
+                    }
+                }
+            }.start()
+        }
     }
 
     /** 恢复当前题已选中的选项高亮（切题/重建选项后整体刷新一次） */
     private fun restoreSelection() {
         val sel = selectedOptions[currentIndex]
+        val isMulti = questions.getOrNull(currentIndex)?.answer?.length ?: 1 > 1
         for (i in 0 until layoutOptions.childCount) {
             val optionView = layoutOptions.getChildAt(i)
             val tvLabel = optionView.findViewById<TextView>(R.id.tv_option_label)
+            val chosen = if (isMulti) sel > 0 && (sel shr i) and 1 == 1 else i == sel
             optionView.setBackgroundResource(
-                if (i == sel) R.drawable.bg_option_selected else R.drawable.bg_option_normal
+                if (chosen) R.drawable.bg_option_selected else R.drawable.bg_option_normal
             )
             tvLabel.setBackgroundResource(R.drawable.bg_option_label)
         }
@@ -684,10 +720,20 @@ try {
     private fun selectOption(index: Int) {
         if (submitted) return
         val old = selectedOptions[currentIndex]
-        if (old == index) return
-        selectedOptions[currentIndex] = index
-        paintOptionBackground(old, selected = false)
-        paintOptionBackground(index, selected = true)
+        if (questions[currentIndex].answer.length > 1) {
+            // 多选题（答案长度>1）：位掩码，点同一项=取消；未作答存 -1
+            val cur = if (old < 0) 0 else old
+            val bit = 1 shl index
+            val next = cur xor bit
+            if (next == cur) return
+            selectedOptions[currentIndex] = if (next == 0) -1 else next
+            paintOptionBackground(index, next and bit != 0)
+        } else {
+            if (old == index) return
+            selectedOptions[currentIndex] = index
+            paintOptionBackground(old, selected = false)
+            paintOptionBackground(index, selected = true)
+        }
     }
 
     private fun paintOptionBackground(position: Int, selected: Boolean) {
@@ -708,8 +754,15 @@ try {
             if (sel >= 0) {
                 // 错题重练不算题库做题记录
                 if (!isWrongPractice) QuestionBankManager.markQuestionCompleted(q.id)
-                val correctIndex = q.answer.firstOrNull()?.minus('A') ?: -1
-                val correct = sel == correctIndex
+                val correct = if (q.answer.length > 1) {
+                    // 多选题：选择掩码必须恰好等于答案掩码（全对才得分）
+                    var mask = 0
+                    q.answer.forEach { c -> mask = mask or (1 shl (c - 'A')) }
+                    sel == mask
+                } else {
+                    val correctIndex = q.answer.firstOrNull()?.minus('A') ?: -1
+                    sel == correctIndex
+                }
                 results[i] = correct
                 if (correct) {
                     correctCount++
@@ -771,6 +824,25 @@ try {
 
     /** 交卷后回看：按记录的选择给选项着色并展示答案解析 */
     private fun applyResult(question: Question, sel: Int) {
+        if (question.answer.length > 1) {
+            // 多选题回看：所有正确选项点绿，选错的标红
+            var ansMask = 0
+            question.answer.forEach { c -> ansMask = ansMask or (1 shl (c - 'A')) }
+            for (i in 0 until layoutOptions.childCount) {
+                val optionView = layoutOptions.getChildAt(i)
+                val tvLabel = optionView.findViewById<TextView>(R.id.tv_option_label)
+                val isCorrectOption = (ansMask shr i) and 1 == 1
+                val isChosen = sel > 0 && (sel shr i) and 1 == 1
+                optionView.setBackgroundResource(
+                    when {
+                        isCorrectOption -> R.drawable.bg_option_correct
+                        isChosen -> R.drawable.bg_option_wrong
+                        else -> R.drawable.bg_option_normal
+                    }
+                )
+                tvLabel.setBackgroundResource(R.drawable.bg_option_label)
+            }
+        } else {
         val correctIndex = question.answer.firstOrNull()?.minus('A') ?: return
 
         for (i in 0 until layoutOptions.childCount) {
@@ -791,6 +863,7 @@ try {
                     tvLabel.setBackgroundResource(R.drawable.bg_option_label)
                 }
             }
+        }
         }
 
         cardAnswer.visibility = View.VISIBLE
@@ -1054,6 +1127,10 @@ try {
             .create()
         dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
         aiDialog = dialog
+        dialog.setOnDismissListener {
+            aiFailover?.cancel()
+            aiFailover = null
+        }
 
         fun startRequest() {
             val config = models[spinner.selectedItemPosition]
@@ -1061,16 +1138,27 @@ try {
             layoutProgress.visibility = View.VISIBLE
             tvContent.visibility = View.GONE
             btnRetry.visibility = View.GONE
-            com.example.aiassistant.OpenAIApiService.analyzeText(
-                ocrText = "",
-                baseUrl = config.baseUrl,
-                apiKey = config.apiKey,
-                model = config.model,
-                prompt = AI_ANALYSIS_PROMPT,
-                thinking = config.thinkingDefault,
-                userMessage = buildAiUserMessage(question),
-                apiType = config.apiType,
-                thinkingBudget = config.thinkingBudget,
+
+            // 故障转移：手动选择的模型优先，失败（网络/服务端错误）后自动轮询其余模型
+            aiFailover?.cancel()
+            aiFailover = com.example.aiassistant.AiFailoverExecutor.execute(
+                candidates = com.example.aiassistant.AiFailoverExecutor.buildChain(config.id),
+                request = { cfg, onComplete, onError ->
+                    com.example.aiassistant.OpenAIApiService.analyzeText(
+                        ocrText = "",
+                        baseUrl = cfg.baseUrl,
+                        apiKey = cfg.apiKey,
+                        model = cfg.model,
+                        prompt = AI_ANALYSIS_PROMPT,
+                        thinking = cfg.thinkingDefault,
+                        userMessage = buildAiUserMessage(question),
+                        apiType = cfg.apiType,
+                        thinkingBudget = cfg.thinkingBudget,
+                        onComplete = onComplete,
+                        onError = { /* 已由 onStructuredError 接管 */ },
+                        onStructuredError = onError
+                    )
+                },
                 onComplete = { text ->
                     runOnUiThread {
                         if (destroyed || !dialog.isShowing) return@runOnUiThread
@@ -1086,6 +1174,12 @@ try {
                         tvContent.visibility = View.VISIBLE
                         tvContent.text = "AI 解析失败：$error"
                         btnRetry.visibility = View.VISIBLE
+                    }
+                },
+                onModelSwitched = { failed, _, next ->
+                    runOnUiThread {
+                        if (destroyed || !dialog.isShowing) return@runOnUiThread
+                        Toast.makeText(this, "「${failed.name}」请求失败，已切换「${next.name}」", Toast.LENGTH_SHORT).show()
                     }
                 }
             )
@@ -1109,7 +1203,14 @@ try {
             }
             append("\n正确答案：").append(q.answer)
             val sel = selectedOptions.getOrNull(currentIndex) ?: -1
-            append("\n我的作答：").append(if (sel >= 0) labels.getOrElse(sel) { "?" } else "未作答")
+            append("\n我的作答：").append(
+                when {
+                    q.answer.length > 1 && sel > 0 -> labels.indices.filter { i -> (sel shr i) and 1 == 1 }
+                        .joinToString("").ifEmpty { "未作答" }
+                    q.answer.length > 1 -> "未作答"
+                    else -> if (sel >= 0) labels.getOrElse(sel) { "?" } else "未作答"
+                }
+            )
             if (q.analysis.isNotBlank()) append("\n官方解析：").append(HtmlAnalysis.toPlainText(q.analysis))
         }
     }
@@ -1117,28 +1218,34 @@ try {
     private fun restartTraining() {
         reviewRecord = null
         currentIndex = 0
-        selectedOptions = IntArray(questions.size) { -1 }
-        results = arrayOfNulls(questions.size)
         submitted = false
         correctCount = 0
         wrongCount = 0
         practiceStartTime = System.currentTimeMillis()
         lastElapsedMs = 0
-        
+
         Toast.makeText(this, "正在为您加载下一组题目...", Toast.LENGTH_SHORT).show()
-        
-        // 重新查询新的一组题目！
-        questions = com.example.aiassistant.questionbank.QuestionBankManager.getQuestionsByRateRange(
-            moduleId, rateMin, rateMax, questionCount
-        )
-        
-        if (questions.isEmpty()) {
-            Toast.makeText(this, "没有符合条件的题目", Toast.LENGTH_SHORT).show()
-            finish()
-            return
-        }
-        
-        showQuestion(0)
+
+        // 重新查询新的一组题目（后台线程，避免主线程查库卡顿）；选项/判分数组按新题数重建
+        dataReady = false
+        Thread {
+            val loaded = QuestionBankManager.getQuestionsByRateRange(moduleId, rateMin, rateMax, questionCount)
+            runOnUiThread {
+                if (destroyed || isFinishing) return@runOnUiThread
+                questions = loaded
+                selectedOptions = IntArray(questions.size) { -1 }
+                results = arrayOfNulls(questions.size)
+                dataReady = true
+
+                if (questions.isEmpty()) {
+                    Toast.makeText(this, "没有符合条件的题目", Toast.LENGTH_SHORT).show()
+                    finish()
+                    return@runOnUiThread
+                }
+
+                showQuestion(0)
+            }
+        }.start()
     }
 
     override fun onPause() {
@@ -1149,6 +1256,8 @@ try {
     override fun onDestroy() {
         destroyed = true
         super.onDestroy()
+        aiFailover?.cancel()
+        aiFailover = null
         try { answerCardDialog?.dismiss() } catch (_: Exception) {}
         try { aiDialog?.dismiss() } catch (_: Exception) {}
         handler.removeCallbacksAndMessages(null)
