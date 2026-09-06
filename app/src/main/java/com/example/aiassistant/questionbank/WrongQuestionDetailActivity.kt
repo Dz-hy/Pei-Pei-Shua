@@ -299,7 +299,7 @@ class WrongQuestionDetailActivity : AppCompatActivity() {
             layoutOptions.removeAllViews()
             for ((i, opt) in item.bankOptions.withIndex()) {
                 val label = "${'A' + i}. $opt"
-                val isCorrect = item.bankAnswer.isNotEmpty() && item.bankAnswer.first() == ('A' + i)
+                val isCorrect = ('A' + i) in item.bankAnswer
 
                 val tv = TextView(this).apply {
                     text = label
@@ -1331,7 +1331,7 @@ class WrongQuestionDetailActivity : AppCompatActivity() {
             y += 24 * density
             for ((i, opt) in item.bankOptions.withIndex()) {
                 val label = "${'A' + i}. $opt"
-                val isCorrect = item.bankAnswer.isNotEmpty() && item.bankAnswer.first() == ('A' + i)
+                val isCorrect = ('A' + i) in item.bankAnswer
                 val optPaint = Paint(textPaint).apply {
                     if (isCorrect) {
                         color = Color.parseColor("#2E7D32")
