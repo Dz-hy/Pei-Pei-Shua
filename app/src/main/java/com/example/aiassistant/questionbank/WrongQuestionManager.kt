@@ -174,7 +174,8 @@ object WrongQuestionManager {
     /** 从题库数据录入错题（存完整快照；OCR 文本不保存，只存截图） */
     @Synchronized
     fun addFromBank(context: Context, question: Question, bitmap: Bitmap?): WrongQuestion {
-        val id = System.currentTimeMillis().toString()
+        // UUID 而非毫秒时间戳：交卷后循环连续收录多题，同毫秒 id 会触发 REPLACE 静默覆盖丢题
+        val id = java.util.UUID.randomUUID().toString()
         val imagePath = saveBitmap(context, id, bitmap)
         val newQuestion = WrongQuestion(
             id = id,
@@ -194,7 +195,8 @@ object WrongQuestionManager {
     /** 从 OCR 文本录入错题（题库未命中时；保留原文供重新匹配） */
     @Synchronized
     fun addFromOcr(context: Context, questionText: String, bitmap: Bitmap?): WrongQuestion {
-        val id = System.currentTimeMillis().toString()
+        // 同 addFromBank：避免同毫秒 id 冲突
+        val id = java.util.UUID.randomUUID().toString()
         val imagePath = saveBitmap(context, id, bitmap)
         val newQuestion = WrongQuestion(
             id = id,
@@ -232,10 +234,10 @@ object WrongQuestionManager {
             val dir = File(context.filesDir, "wrong_questions")
             if (!dir.exists()) dir.mkdirs()
             val file = File(dir, "wq_$id.png")
-            val fos = FileOutputStream(file)
-            bitmap.compress(Bitmap.CompressFormat.PNG, 100, fos)
-            fos.flush()
-            fos.close()
+            FileOutputStream(file).use { fos ->
+                bitmap.compress(Bitmap.CompressFormat.PNG, 100, fos)
+                fos.flush()
+            }
             file.absolutePath
         } catch (e: Exception) {
             e.printStackTrace()

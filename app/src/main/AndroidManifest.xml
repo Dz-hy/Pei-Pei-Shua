@@ -17,9 +17,6 @@
     <!-- 应用使用统计权限（番茄钟应用拦截） -->
     <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
         tools:ignore="ProtectedPermissions" />
-    <!-- 查询所有已安装应用（Android 11+ 包可见性） -->
-    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
-        tools:ignore="QueryAllPackagesPermission" />
     <!-- 忽略电池优化，防止后台应用拦截线程被冻结或强杀 -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
@@ -137,11 +134,22 @@
             android:exported="false"
             android:theme="@style/Theme.AIAssistant" />
 
+        <!-- 功能指引（全功能速查手册） -->
+        <activity
+            android:name=".GuideActivity"
+            android:exported="false"
+            android:theme="@style/Theme.AIAssistant" />
+
         <!-- 番茄钟应用拦截服务 -->
         <service
             android:name=".pomodoro.AppBlockerService"
             android:exported="false"
-            android:foregroundServiceType="specialUse" />
+            android:foregroundServiceType="specialUse">
+            <!-- Android 14+ specialUse 前台服务必须声明子类型说明 -->
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="pomodoro_app_blocking" />
+        </service>
 
 
 

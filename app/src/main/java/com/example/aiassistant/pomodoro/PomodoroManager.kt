@@ -83,7 +83,9 @@ object PomodoroManager {
             if (!s.isCompleted && s.finishedAt == 0L && s.startedAt > 0) {
                 val elapsed = ((System.currentTimeMillis() - s.startedAt) / 60000).toInt()
                 if (elapsed > s.targetMinutes + 5) {
-                    db.updateSession(s.copy(durationMinutes = elapsed, isCompleted = false, finishedAt = s.startedAt + elapsed * 60000L))
+                    // 进程被杀后隔天才触发清理时，elapsed 是无意义的墙钟时长，封顶到目标时长
+                    val duration = minOf(elapsed, s.targetMinutes)
+                    db.updateSession(s.copy(durationMinutes = duration, isCompleted = false, finishedAt = s.startedAt + duration * 60000L))
                 }
             }
         }

@@ -177,6 +177,9 @@ class PlanFragment : Fragment() {
                 tvHistoryTitle.text = "做题历史 · ${showFormat.format(dateFormat.parse(selectedDate) ?: Date())}"
                 tvEmpty.visibility = if (sessions.isEmpty()) View.VISIBLE else View.GONE
                 rvHistory.visibility = if (sessions.isEmpty()) View.GONE else View.VISIBLE
+                // 自愈：以当天列表实查结果校准日历绿点，杜绝"有点无记录"的幽灵打点
+                // （打点走 DISTINCT 月度前缀查询，列表走精确等值查询，异常/脏行时两者可能分裂）
+                calendarAdapter.updateDaySession(selectedDate, sessions.isNotEmpty())
             }
         }
     }
@@ -220,6 +223,13 @@ class PlanFragment : Fragment() {
 
         fun setData(data: List<CalendarDay>) {
             items = data
+            notifyDataSetChanged()
+        }
+
+        /** 自愈校准：把某天的打点对齐到当天列表实查结果（日期不在当前月则无操作） */
+        fun updateDaySession(dateStr: String, hasSession: Boolean) {
+            if (items.none { it.dateStr == dateStr && it.hasSession != hasSession }) return
+            items = items.map { if (it.dateStr == dateStr) it.copy(hasSession = hasSession) else it }
             notifyDataSetChanged()
         }
 

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 题目图片加载占位：浅灰圆角骨架（替代系统相册图标） -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android">
+    <solid android:color="#ECE9E2" />
+    <corners android:radius="8dp" />
+</shape>

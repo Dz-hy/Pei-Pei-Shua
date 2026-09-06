@@ -52,22 +52,28 @@ class ShizhengPracticeActivity : AppCompatActivity() {
 
         findViewById<ImageView>(R.id.btn_back).setOnClickListener { finish() }
 
-        // 支持从错题详情"重做本题"传入单题，默认取未做过的题
+        // 支持从错题详情"重做本题"传入单题，默认取未做过的题。
+        // 逐题查库/未做题查询挪后台，进页不再卡主线程
         val ids = intent.getLongArrayExtra(EXTRA_QUESTION_IDS)
-        questions = if (ids != null && ids.isNotEmpty()) {
-            ids.map { ShizhengManager.getQuestion(it) }.filterNotNull()
-        } else {
-            ShizhengManager.getUnansweredQuestions(DEFAULT_COUNT)
-        }
-
-        if (questions.isEmpty()) {
-            Toast.makeText(this, "暂无待练习的时政题，先去抓取最新时政吧", Toast.LENGTH_LONG).show()
-            finish()
-            return
-        }
+        Thread {
+            val loaded = if (ids != null && ids.isNotEmpty()) {
+                ids.map { ShizhengManager.getQuestion(it) }.filterNotNull()
+            } else {
+                ShizhengManager.getUnansweredQuestions(DEFAULT_COUNT)
+            }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                if (loaded.isEmpty()) {
+                    Toast.makeText(this, "暂无待练习的时政题，先去抓取最新时政吧", Toast.LENGTH_LONG).show()
+                    finish()
+                    return@runOnUiThread
+                }
+                questions = loaded
+                renderQuestion()
+            }
+        }.start()
 
         btnSubmit.setOnClickListener { onSubmit() }
-        renderQuestion()
     }
 
     private fun renderQuestion() {
@@ -119,6 +125,7 @@ class ShizhengPracticeActivity : AppCompatActivity() {
     }
 
     private fun onSubmit() {
+        if (questions.isEmpty()) return  // 题目还在后台加载
         val q = questions[index]
         if (!submitted) {
             if (selected < 0) {
@@ -130,10 +137,9 @@ class ShizhengPracticeActivity : AppCompatActivity() {
             val isCorrect = selected == answerIndex
             if (isCorrect) correctCount++
 
-            // 对错都记入时政错题库
-            ShizhengManager.insertWrongRecord(
-                ShizhengWrongRecord(questionId = q.id, selected = selected, isCorrect = isCorrect)
-            )
+            // 对错都记入时政错题库（异步落库，不卡提交反馈）
+            val record = ShizhengWrongRecord(questionId = q.id, selected = selected, isCorrect = isCorrect)
+            Thread { ShizhengManager.insertWrongRecord(record) }.start()
 
             optionViews.forEachIndexed { j, tv ->
                 when (j) {

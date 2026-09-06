@@ -123,18 +123,21 @@ class AppBlockerService : Service() {
         try {
             val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
             wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "AIAssistant:AppBlockerWakeLock").apply {
-                acquire(30 * 60 * 1000L) // 每次申请 30 分钟锁定
+                setReferenceCounted(false)
+                acquire(30 * 60 * 1000L) // 初始 30 分钟；轮询线程内周期续期
             }
             Log.d(TAG, "WakeLock acquired successfully.")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to acquire WakeLock", e)
         }
-        
+
         isRunning = true
         blockerThread = Thread {
             Log.d(TAG, "Blocker background thread started.")
             while (isRunning) {
                 try {
+                    // 非引用计数锁：重复 acquire 即续期，防止专注时长超 30 分钟后锁过期、线程被冻结导致拦截静默失效
+                    try { wakeLock?.acquire(30 * 60 * 1000L) } catch (_: Exception) {}
                     checkForegroundApp()
                     Thread.sleep(POLL_INTERVAL_MS)
                 } catch (e: InterruptedException) {

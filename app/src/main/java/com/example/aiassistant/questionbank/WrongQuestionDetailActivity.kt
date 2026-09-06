@@ -60,10 +60,18 @@ class WrongQuestionDetailActivity : AppCompatActivity() {
     private var cachedItem: WrongQuestion? = null  // 缓存当前错题，避免重复反序列化
     private var imageExpanded = false
     private lateinit var hw: HandwritingController
+    // AI 解析故障转移句柄：页面销毁时取消
+    private var aiFailover: com.example.aiassistant.AiFailoverExecutor? = null
+
+    override fun onDestroy() {
+        aiFailover?.cancel()
+        aiFailover = null
+        super.onDestroy()
+    }
 
     private fun getCurrentItem(): WrongQuestion? {
         if (cachedItem?.id == currentId) return cachedItem
-        cachedItem = WrongQuestionManager.getWrongQuestions(this).find { it.id == currentId }
+        cachedItem = WrongQuestionManager.getWrongQuestion(this, currentId)  // 单条查询，不再遍历全部错题
         return cachedItem
     }
 
@@ -96,6 +104,8 @@ class WrongQuestionDetailActivity : AppCompatActivity() {
             saver = { id, json -> WrongQuestionManager.updateAnnotation(this, id, json) }
         )
         hw.install()
+        // 复习页无剧透顾虑：查看态点笔迹直接进编辑
+        hw.setTapToEditEnabled(true)
         findViewById<TextView>(R.id.btn_handwriting).setOnClickListener {
             expandImageSection() // 先展开截图，避免批注层高度随内容变化错位
             hw.enterEditing()
@@ -252,7 +262,7 @@ class WrongQuestionDetailActivity : AppCompatActivity() {
 
         // 题干
         val tvStem = findViewById<TextView>(R.id.tv_stem)
-        tvStem.text = if (item.isFromBank) item.bankStem else item.questionText
+        tvStem.text = TextFlow.normalize(if (item.isFromBank) item.bankStem else item.questionText)
 
         // 截图（默认折叠）
         val layoutImageSection = findViewById<View>(R.id.layout_image_section)
@@ -262,12 +272,14 @@ class WrongQuestionDetailActivity : AppCompatActivity() {
 
         if (item.imagePath.isNotEmpty() && File(item.imagePath).exists()) {
             layoutImageSection.visibility = View.VISIBLE
-            try {
-                val bmp = BitmapFactory.decodeFile(item.imagePath)
-                ivImage.setImageBitmap(bmp)
-                ivImage.setOnClickListener { showImageZoomDialog(item.imagePath) }
-            } catch (_: Exception) {
-                layoutImageSection.visibility = View.GONE
+            // 大图解码放后台线程并按需采样降分辨率，避免 UI 线程解码原图卡顿/OOM
+            loadImageThumbnailAsync(item.imagePath, maxSide = 1280) { bmp ->
+                if (bmp != null) {
+                    ivImage.setImageBitmap(bmp)
+                    ivImage.setOnClickListener { showImageZoomDialog(item.imagePath) }
+                } else {
+                    layoutImageSection.visibility = View.GONE
+                }
             }
 
             headerImage.setOnClickListener {
@@ -437,18 +449,65 @@ class WrongQuestionDetailActivity : AppCompatActivity() {
     private fun showImageZoomDialog(imagePath: String) {
         try {
             val dialog = AlertDialog.Builder(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen).create()
-            val imgView = ImageView(this).apply {
-                layoutParams = ViewGroup.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT
+            val container = android.widget.FrameLayout(this)
+            val progress = ProgressBar(this).apply {
+                layoutParams = android.widget.FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    Gravity.CENTER
                 )
-                scaleType = ImageView.ScaleType.FIT_CENTER
-                setImageBitmap(BitmapFactory.decodeFile(imagePath))
-                setOnClickListener { dialog.dismiss() }
             }
-            dialog.setView(imgView)
+            container.addView(progress)
+            dialog.setView(container)
             dialog.show()
+
+            // 放大图后台解码 + 采样（边长上限 2560，足够全屏放大查看），防止主线程解码 4K 截图卡顿/OOM
+            loadImageThumbnailAsync(imagePath, maxSide = 2560) { bmp ->
+                if (!dialog.isShowing) return@loadImageThumbnailAsync
+                if (bmp == null) {
+                    dialog.dismiss()
+                    Toast.makeText(this, "图片加载失败", Toast.LENGTH_SHORT).show()
+                    return@loadImageThumbnailAsync
+                }
+                val imgView = ImageView(this).apply {
+                    layoutParams = ViewGroup.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT
+                    )
+                    scaleType = ImageView.ScaleType.FIT_CENTER
+                    setImageBitmap(bmp)
+                    setOnClickListener { dialog.dismiss() }
+                }
+                container.removeAllViews()
+                container.addView(imgView)
+            }
         } catch (_: Exception) {}
+    }
+
+    /** 后台线程解码图片（按最长边采样降分辨率），完成回调已切回主线程 */
+    private fun loadImageThumbnailAsync(path: String, maxSide: Int, onLoaded: (Bitmap?) -> Unit) {
+        Thread {
+            val bmp = try {
+                val opts = BitmapFactory.Options()
+                opts.inJustDecodeBounds = true
+                BitmapFactory.decodeFile(path, opts)
+                if (opts.outWidth <= 0 || opts.outHeight <= 0) {
+                    null
+                } else {
+                    var sample = 1
+                    val longer = maxOf(opts.outWidth, opts.outHeight)
+                    while (longer / (sample * 2) > maxSide) sample *= 2
+                    opts.inJustDecodeBounds = false
+                    opts.inSampleSize = sample
+                    BitmapFactory.decodeFile(path, opts)
+                }
+            } catch (t: Throwable) {  // 含 OutOfMemoryError
+                null
+            }
+            runOnUiThread {
+                if (!isDestroyed && !isFinishing) onLoaded(bmp)
+            }
+        }.start()
     }
 
     private fun dpToPx(dp: Int): Int = (dp * resources.displayMetrics.density).toInt()
@@ -465,17 +524,16 @@ class WrongQuestionDetailActivity : AppCompatActivity() {
         layoutAiLoading.visibility = View.VISIBLE
         layoutAiResult.removeAllViews()
 
-        // 初始化模型管理器并获取当前活跃模型配置
+        // 初始化模型管理器并构建故障转移候选链：活跃模型优先，其余依次兜底
         ModelManager.init(this)
-        val activeModelId = AppPreferences.getActiveModelId(this)
-        val activeModel = ModelManager.get(activeModelId) ?: ModelManager.allModels.firstOrNull()
-
-        val baseUrl = activeModel?.baseUrl ?: AppPreferences.getApiBaseUrl(this)
-        val apiKey = activeModel?.apiKey ?: AppPreferences.getApiKey(this)
-        val model = activeModel?.model ?: AppPreferences.getApiModel(this)
-        val apiType = activeModel?.apiType ?: "openai"
-        val thinking = activeModel?.thinkingDefault ?: false
-        val thinkingBudget = activeModel?.thinkingBudget ?: 4096
+        val chain = com.example.aiassistant.AiFailoverExecutor.buildChain(AppPreferences.getActiveModelId(this))
+        if (chain.isEmpty()) {
+            tvAiPlaceholder.visibility = View.VISIBLE
+            btnStartAi.visibility = View.VISIBLE
+            layoutAiLoading.visibility = View.GONE
+            Toast.makeText(this, "请先在「AI 模型」设置中配置模型", Toast.LENGTH_SHORT).show()
+            return
+        }
 
         val useTools = AppPreferences.isToolCallingEnabled(this) && ToolRegistry.hasTools() && questionType != null
 
@@ -538,41 +596,60 @@ class WrongQuestionDetailActivity : AppCompatActivity() {
             }
         }
 
-        if (useTools) {
-            val toolsArray = ToolRegistry.toOpenAiToolsArrayForType(questionType)
-            OpenAIApiService.analyzeWithTools(
-                context = this,
-                ocrText = userMessage,
-                baseUrl = baseUrl,
-                apiKey = apiKey,
-                model = model,
-                prompt = prompt,
-                thinking = thinking,
-                userMessage = userMessage,
-                apiType = apiType,
-                thinkingBudget = thinkingBudget,
-                tools = toolsArray,
-                onToolCall = { toolName ->
-                    android.util.Log.d("WrongQuestionAI", "AI 正在调用工具：$toolName")
-                },
-                onComplete = onCompleteCallback,
-                onError = onErrorCallback
-            )
-        } else {
-            OpenAIApiService.analyzeText(
-                ocrText = userMessage,
-                baseUrl = baseUrl,
-                apiKey = apiKey,
-                model = model,
-                prompt = prompt,
-                thinking = thinking,
-                userMessage = userMessage,
-                apiType = apiType,
-                thinkingBudget = thinkingBudget,
-                onComplete = onCompleteCallback,
-                onError = onErrorCallback
-            )
-        }
+        // 统一故障转移：网络/服务端错误自动轮询备选模型，鉴权类错误直接报错终止
+        aiFailover?.cancel()
+        aiFailover = com.example.aiassistant.AiFailoverExecutor.execute(
+            candidates = chain,
+            request = { cfg, onComplete, onError ->
+                runOnUiThread {
+                    layoutAiLoading.visibility = View.VISIBLE
+                }
+                if (useTools) {
+                    val toolsArray = ToolRegistry.toOpenAiToolsArrayForType(questionType)
+                    OpenAIApiService.analyzeWithTools(
+                        context = this,
+                        ocrText = userMessage,
+                        baseUrl = cfg.baseUrl,
+                        apiKey = cfg.apiKey,
+                        model = cfg.model,
+                        prompt = prompt,
+                        thinking = cfg.thinkingDefault,
+                        userMessage = userMessage,
+                        apiType = cfg.apiType,
+                        thinkingBudget = cfg.thinkingBudget,
+                        tools = toolsArray,
+                        onToolCall = { toolName ->
+                            android.util.Log.d("WrongQuestionAI", "AI 正在调用工具：$toolName")
+                        },
+                        onComplete = onComplete,
+                        onError = { /* 已由 onStructuredError 接管 */ },
+                        onStructuredError = onError
+                    )
+                } else {
+                    OpenAIApiService.analyzeText(
+                        ocrText = userMessage,
+                        baseUrl = cfg.baseUrl,
+                        apiKey = cfg.apiKey,
+                        model = cfg.model,
+                        prompt = prompt,
+                        thinking = cfg.thinkingDefault,
+                        userMessage = userMessage,
+                        apiType = cfg.apiType,
+                        thinkingBudget = cfg.thinkingBudget,
+                        onComplete = onComplete,
+                        onError = { /* 已由 onStructuredError 接管 */ },
+                        onStructuredError = onError
+                    )
+                }
+            },
+            onComplete = onCompleteCallback,
+            onError = onErrorCallback,
+            onModelSwitched = { failed, _, next ->
+                runOnUiThread {
+                    Toast.makeText(this, "「${failed.name}」请求失败，已切换「${next.name}」", Toast.LENGTH_SHORT).show()
+                }
+            }
+        )
     }
 
     private fun getUniversalAgentPrompt(): String {

@@ -18,8 +18,10 @@ object HtmlAnalysis {
     private val IMG_TAG = Regex("<img[^>]*>", RegexOption.IGNORE_CASE)
 
     fun render(text: String, host: TextView): CharSequence {
-        if (!text.contains("<img", ignoreCase = true)) return text
-        val html = text.replace("\n", "<br>")
+        if (!text.contains("<img", ignoreCase = true)) return TextFlow.normalize(text)
+        // 带图解析是转换器生成的 HTML（每个 PDF 行一个 <br>）：先还原成纯文本归一，再转回 HTML
+        val html = TextFlow.normalize(text.replace(Regex("<br\\s*/?>", RegexOption.IGNORE_CASE), "\n"))
+            .replace("\n", "<br>")
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             Html.fromHtml(html, Html.FROM_HTML_MODE_LEGACY, ImageGetter(host), null)
         } else {
@@ -30,13 +32,14 @@ object HtmlAnalysis {
 
     /** AI 提示词 / 长图导出等纯文本场景：剥掉图片标签，避免 base64 撑爆内容 */
     fun toPlainText(text: String): String {
-        if (!text.contains("<img", ignoreCase = true)) return text
+        if (!text.contains("<img", ignoreCase = true)) return TextFlow.normalize(text)
         return IMG_TAG.replace(text, "")
             .replace("&lt;", "<").replace("&gt;", ">")
             .replace("&amp;", "&").replace("&nbsp;", " ")
             .replace(Regex("<br\\s*/?>", RegexOption.IGNORE_CASE), "\n")
             .replace(Regex("\n{3,}"), "\n\n")
             .trim()
+            .let { TextFlow.normalize(it) }
     }
 
     private class ImageGetter(private val host: TextView) : Html.ImageGetter {
@@ -50,13 +53,28 @@ object HtmlAnalysis {
             } catch (e: IllegalArgumentException) {
                 return null
             }
-            val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
+            // 同步解码（保证图一定显示）；仅按最大边降采样控制内存与耗时，
+            // 有的题目解析就是纯图，图必须可靠渲染——不做异步替换
+            val bmp = decodeSampled(bytes, 1200) ?: return null
             val padH = host.paddingLeft + host.paddingRight
             val maxW = if (host.width > 0) host.width - padH
             else (host.resources.displayMetrics.widthPixels * 9 / 10) - padH
             val w = if (maxW > 0 && bmp.width > maxW) maxW else bmp.width
             val h = (bmp.height.toLong() * w / bmp.width).toInt()
             return BitmapDrawable(host.resources, bmp).apply { setBounds(0, 0, w, h) }
+        }
+
+        /** 解码并按最大边采样（原图可达数百 KB、2000px+，直接解会撑内存） */
+        private fun decodeSampled(bytes: ByteArray, maxDim: Int): android.graphics.Bitmap? {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+            var sample = 1
+            while (bounds.outWidth / sample > maxDim || bounds.outHeight / sample > maxDim) sample *= 2
+            return BitmapFactory.decodeByteArray(
+                bytes, 0, bytes.size,
+                BitmapFactory.Options().apply { inSampleSize = sample }
+            )
         }
     }
 }

@@ -37,15 +37,21 @@ object CloudOcrClient {
         onSuccess: (markdownText: String) -> Unit,
         onError: (String) -> Unit
     ) {
-        val requestJson = buildBaseRequest(bitmap).apply {
-            put("useLayoutDetection", true)
-            put("useChartRecognition", false)
-            put("useSealRecognition", false)
-            put("useOcrForImageBlock", false)
-            put("mergeTables", false)
-            put("relevelTitles", false)
-            put("layoutShapeMode", "auto")
-            put("promptLabel", "ocr")
+        val requestJson = try {
+            buildBaseRequest(bitmap).apply {
+                put("useLayoutDetection", true)
+                put("useChartRecognition", false)
+                put("useSealRecognition", false)
+                put("useOcrForImageBlock", false)
+                put("mergeTables", false)
+                put("relevelTitles", false)
+                put("layoutShapeMode", "auto")
+                put("promptLabel", "ocr")
+            }
+        } catch (e: Exception) {
+            // 编码/构包失败不能把异常抛回调用方的 HandlerThread（会崩进程），统一走 onError
+            onError("云端 OCR 图片处理失败：${e.message}")
+            return
         }
         executeRequest(url, token, requestJson, onSuccess = { json ->
             val result = json.optJSONObject("result")
@@ -88,7 +94,12 @@ object CloudOcrClient {
         onSuccess: (text: String) -> Unit,
         onError: (String) -> Unit
     ) {
-        val requestJson = buildBaseRequest(bitmap)
+        val requestJson = try {
+            buildBaseRequest(bitmap)
+        } catch (e: Exception) {
+            onError("云端 OCR 图片处理失败：${e.message}")
+            return
+        }
         executeRequest(url, token, requestJson, onSuccess = { json ->
             val result = json.optJSONObject("result")
                 ?: run { onError("云端 OCR 响应缺少 result 字段"); return@executeRequest }

@@ -82,7 +82,32 @@ class PomodoroStatsActivity : AppCompatActivity() {
         cal.add(Calendar.DAY_OF_MONTH, 7)
         val weekEndMs = cal.timeInMillis
 
-        val weekStats = PomodoroManager.getStatsByDateRange(weekStartMs, weekEndMs)
+        // 三个聚合查询放后台，回主线程渲染
+        Thread {
+            val weekStats = PomodoroManager.getStatsByDateRange(weekStartMs, weekEndMs)
+            val dailyStats = PomodoroManager.getDailyStatsForWeek()
+            val tagDist = PomodoroManager.getTagDistribution(weekStartMs, weekEndMs)
+            runOnUiThread {
+                if (isDestroyed || isFinishing) return@runOnUiThread
+                renderWeekStats(
+                    statsWeekTime, statsWeekCount, statsWeekAvg, layoutChart, layoutTags,
+                    weekStartMs, weekStats, dailyStats, tagDist
+                )
+            }
+        }.start()
+    }
+
+    private fun renderWeekStats(
+        statsWeekTime: TextView,
+        statsWeekCount: TextView,
+        statsWeekAvg: TextView,
+        layoutChart: LinearLayout,
+        layoutTags: LinearLayout,
+        weekStartMs: Long,
+        weekStats: DailyStats,
+        dailyStats: List<DailyStats>,
+        tagDist: List<Pair<String, Int>>
+    ) {
         val weekTimeH = weekStats.totalFocusMinutes / 60
         val weekTimeM = weekStats.totalFocusMinutes % 60
         statsWeekTime.text = if (weekTimeH > 0) "${weekTimeH}h${weekTimeM}m" else "${weekTimeM}m"
@@ -91,7 +116,6 @@ class PomodoroStatsActivity : AppCompatActivity() {
         statsWeekAvg.text = String.format("%.1f", weekStats.completedCount.toFloat() / daysPassed)
 
         // 柱状图
-        val dailyStats = PomodoroManager.getDailyStatsForWeek()
         val maxCount = dailyStats.maxOfOrNull { it.tomatoCount }?.coerceAtLeast(1) ?: 1
         layoutChart.removeAllViews()
         for (stat in dailyStats) {
@@ -111,7 +135,6 @@ class PomodoroStatsActivity : AppCompatActivity() {
         }
 
         // 标签分布
-        val tagDist = PomodoroManager.getTagDistribution(weekStartMs, weekEndMs)
         val totalTags = tagDist.sumOf { it.second }.coerceAtLeast(1)
         // 清除已有的标签条目（保留标题）
         while (layoutTags.childCount > 1) {
@@ -182,7 +205,16 @@ class PomodoroStatsActivity : AppCompatActivity() {
         val rvHistory = view.findViewById<RecyclerView>(R.id.rv_history)
         val tvEmpty = view.findViewById<TextView>(R.id.tv_empty)
 
-        val sessions = PomodoroManager.getRecentSessions(100)
+        Thread {
+            val sessions = PomodoroManager.getRecentSessions(100)
+            runOnUiThread {
+                if (isDestroyed || isFinishing) return@runOnUiThread
+                renderHistory(rvHistory, tvEmpty, sessions)
+            }
+        }.start()
+    }
+
+    private fun renderHistory(rvHistory: RecyclerView, tvEmpty: TextView, sessions: List<FocusSession>) {
         if (sessions.isEmpty()) {
             rvHistory.visibility = View.GONE
             tvEmpty.visibility = View.VISIBLE

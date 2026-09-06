@@ -400,14 +400,14 @@ class HomeFragment : Fragment() {
                     .setTitle("删除「${module.name}」")
                     .setMessage("将删除该分类及其子分类下的全部 $total 道题目（含索引、批注与做题记录），不可恢复。确定删除？")
                     .setPositiveButton("删除") { _, _ ->
-                        Thread {
-                            QuestionBankManager.deleteModule(requireContext(), module.id)
+                        // 写库在 QuestionBankManager 单线程 executor 上串行执行，无需再起裸线程
+                        QuestionBankManager.deleteModule(module.id) {
                             activity?.runOnUiThread {
                                 if (!isAdded) return@runOnUiThread
                                 Toast.makeText(requireContext(), "已删除「${module.name}」", Toast.LENGTH_SHORT).show()
                                 loadModules()
                             }
-                        }.start()
+                        }
                     }
                     .setNegativeButton("取消", null)
                     .show()

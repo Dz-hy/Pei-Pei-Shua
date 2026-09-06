@@ -150,7 +150,13 @@ object MarkdownRenderer {
             t = Regex("(?<!\\*)\\*([^*\\n]+?)\\*(?!\\*)").replace(t) { "<i>${it.groupValues[1]}</i>" }
             t = Regex("!\\[([^\\]\\n]*)\\]\\([^)\\n]*\\)").replace(t) { it.groupValues[1].ifEmpty { "[图]" } }
             t = Regex("\\[([^\\]\\n]+)]\\(([^)\\n]+)\\)").replace(t) {
-                "<a href=\"${it.groupValues[2]}\">${it.groupValues[1]}</a>"
+                val url = it.groupValues[2]
+                // 与 render() 的 LinkSpan 一致只放行 http/https，并转义引号防止逃逸 href 属性
+                if (url.startsWith("http://") || url.startsWith("https://")) {
+                    "<a href=\"${url.replace("\"", "%22")}\">${it.groupValues[1]}</a>"
+                } else {
+                    it.groupValues[1]
+                }
             }
             return t
         }

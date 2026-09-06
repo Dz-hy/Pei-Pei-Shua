@@ -43,6 +43,21 @@ object ShizhengManager {
         }
     }
 
+    // ── 文章手写批注（SharedPreferences，key=newsId，笔迹 JSON 与题库批注同格式） ──────
+
+    fun getArticleAnnotation(newsId: String): String? {
+        if (!::appContext.isInitialized) return null
+        return articlePrefs().getString("article_$newsId", null)?.takeIf { it.isNotBlank() }
+    }
+
+    fun saveArticleAnnotation(newsId: String, json: String) {
+        if (!::appContext.isInitialized) return
+        articlePrefs().edit().putString("article_$newsId", json).apply()
+    }
+
+    private fun articlePrefs() =
+        appContext.getSharedPreferences("shizheng_hw_annotations", Context.MODE_PRIVATE)
+
     // ── 同步进度通知（回调到主线程） ─────────────────────────────────
 
     fun addSyncListener(listener: (String) -> Unit) { syncListeners.add(listener) }
@@ -106,13 +121,22 @@ object ShizhengManager {
                 return
             }
             var newCount = 0
+            var failedCount = 0
             for (c in candidates) {
                 if (db.newsExists(NewsSources.QIUSHI, c.url)) continue
-                val article = QiushiFetcher.fetchArticle(c, issue) ?: continue
+                val article = QiushiFetcher.fetchArticle(c, issue)
+                if (article == null) {
+                    failedCount++
+                    continue
+                }
                 if (db.insertNews(article) > 0) newCount++
             }
-            notifySync("求是网 ${issue.label} 目录共 ${candidates.size} 篇，新入库 $newCount 篇")
-            db.setMeta(KEY_QIUSHI_ISSUE, issue.tocUrl)
+            notifySync(
+                "求是网 ${issue.label} 目录共 ${candidates.size} 篇，新入库 $newCount 篇" +
+                    if (failedCount > 0) "，失败 $failedCount 篇" else ""
+            )
+            // 单篇失败不推进水位：否则该篇在本期内永远不会重试，下次同步补抓
+            if (failedCount == 0) db.setMeta(KEY_QIUSHI_ISSUE, issue.tocUrl)
         }
 
         aiProcessPending(NewsSources.QIUSHI, QIUSHI_QUOTA)
@@ -146,13 +170,22 @@ object ShizhengManager {
                 return
             }
             var newCount = 0
+            var failedCount = 0
             for (c in candidates) {
                 if (db.newsExists(NewsSources.ORG, c.id)) continue
-                val article = OrgPaperFetcher.fetchArticle(c, stage) ?: continue
+                val article = OrgPaperFetcher.fetchArticle(c, stage)
+                if (article == null) {
+                    failedCount++
+                    continue
+                }
                 if (db.insertNews(article) > 0) newCount++
             }
-            notifySync("组织人事报 ${stage.releaseDate} 要闻版共 ${candidates.size} 篇，新入库 $newCount 篇")
-            db.setMeta(KEY_ORG_ISSUE, stage.releaseDate)
+            notifySync(
+                "组织人事报 ${stage.releaseDate} 要闻版共 ${candidates.size} 篇，新入库 $newCount 篇" +
+                    if (failedCount > 0) "，失败 $failedCount 篇" else ""
+            )
+            // 同求是网：有失败不推进水位，下次同步补抓
+            if (failedCount == 0) db.setMeta(KEY_ORG_ISSUE, stage.releaseDate)
         }
 
         aiProcessPending(NewsSources.ORG, ORG_QUOTA)

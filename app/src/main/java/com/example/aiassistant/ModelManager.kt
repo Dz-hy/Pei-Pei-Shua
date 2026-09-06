@@ -53,6 +53,13 @@ object ModelManager {
         save(context)
     }
 
+    /** 调整模型顺序（备用模型切换优先级；主模型由 activeModelId 决定，仍最优先）。 */
+    fun move(context: Context, fromIndex: Int, toIndex: Int) {
+        if (fromIndex !in models.indices || toIndex !in models.indices || fromIndex == toIndex) return
+        models.add(toIndex, models.removeAt(fromIndex))
+        save(context)
+    }
+
     private fun save(context: Context) {
         val arr = JSONArray()
         for (m in models) arr.put(m.toJson())

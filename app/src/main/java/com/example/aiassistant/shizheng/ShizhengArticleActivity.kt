@@ -12,10 +12,12 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import com.example.aiassistant.R
+import com.example.aiassistant.handwriting.HandwritingController
 
 /**
  * 时政新闻全文阅读：WebView 渲染主题化排版（首行缩进、行距、分类标签），离线可读。
  * 组织人事报文章可在页内手动触发 AI 总结（+自动出 1 道挖空题）。
+ * 支持手写批注：批注绑文章 id，存 SharedPreferences，打开页面即显示、点笔迹可继续编辑。
  */
 class ShizhengArticleActivity : AppCompatActivity() {
 
@@ -25,14 +27,14 @@ class ShizhengArticleActivity : AppCompatActivity() {
 
     private var article: NewsArticle? = null
     private var summarizing = false
+    private lateinit var hw: HandwritingController
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_shizheng_article)
 
-        val newsId = intent.getLongExtra(EXTRA_NEWS_ID, -1)
-        article = ShizhengManager.getNews(newsId)
+        val newsId = intent.getLongExtra(EXTRA_NEWS_ID, -1L)
 
         findViewById<ImageView>(R.id.btn_back).setOnClickListener { finish() }
         findViewById<TextView>(R.id.btn_open_original).setOnClickListener {
@@ -42,14 +44,58 @@ class ShizhengArticleActivity : AppCompatActivity() {
             } else {
                 try {
                     startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
-                } catch (e: Exception) {
+                } catch (_: Exception) {
                     Toast.makeText(this, "无法打开浏览器", Toast.LENGTH_SHORT).show()
                 }
             }
         }
         findViewById<TextView>(R.id.btn_summary).setOnClickListener { onSummarizeClicked() }
 
-        render()
+        // WebView 底色与淡入动画只装一次：正文加载完成前保持透明底色，onPageFinished 后淡入，消除白屏空壳感
+        val webView = findViewById<WebView>(R.id.web_content)
+        webView.setBackgroundColor(Color.parseColor("#FAF7F2"))
+        webView.webViewClient = object : android.webkit.WebViewClient() {
+            override fun onPageFinished(view: WebView, url: String?) {
+                view.animate().alpha(1f).setDuration(180).start()
+            }
+        }
+
+        setupHandwriting()
+
+        // 全文 content 列较大：挪后台读库，读回后再渲染（消除进页主线程查库卡顿）
+        Thread {
+            val loaded = ShizhengManager.getNews(newsId)
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                article = loaded
+                loaded?.let { hw.revealAnnotation(it.id.toString()) }
+                render()
+            }
+        }.start()
+    }
+
+    /** 手写批注：批注绑文章 id；内容高度由 HandwritingController 的宿主容器无视口约束测量 */
+    private fun setupHandwriting() {
+        val webView = findViewById<WebView>(R.id.web_content)
+        webView.isVerticalScrollBarEnabled = false
+        webView.isNestedScrollingEnabled = false
+
+        hw = HandwritingController(
+            this,
+            findViewById(R.id.sv_article_content),
+            idProvider = { article?.id?.toString() },
+            loader = { ShizhengManager.getArticleAnnotation(it) },
+            saver = { id, json -> ShizhengManager.saveArticleAnnotation(id, json) },
+            toolbarBottomMarginDp = 24
+        )
+        hw.install()
+        hw.setTapToEditEnabled(true)
+        findViewById<TextView>(R.id.btn_handwriting).setOnClickListener { hw.enterEditing() }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        hw.onPause()
     }
 
     /** 组织人事报文章：手动触发 AI 总结（+自动出 1 道挖空题） */
@@ -89,6 +135,8 @@ class ShizhengArticleActivity : AppCompatActivity() {
 
         val webView = findViewById<WebView>(R.id.web_content)
         webView.setBackgroundColor(Color.parseColor("#FAF7F2"))
+        // 淡入：onCreate 装的 WebViewClient 在 onPageFinished 后恢复 alpha
+        webView.alpha = 0f
         webView.loadDataWithBaseURL(null, buildHtml(a), "text/html", "UTF-8", null)
     }
 
@@ -108,7 +156,7 @@ class ShizhengArticleActivity : AppCompatActivity() {
             .filter { it.isNotEmpty() }
             .joinToString("") { "<p>${esc(it)}</p>" }
 
-        // AI 总结块（组织人事报文章处理后展示）
+        // AI 总结块（组织人事报文章处理后展示）：放文末——顶部插入会把正文整体顶下去，导致已保存的批注笔迹错位
         val summaryBlock = if (a.summary.isNotBlank()) {
             val body = esc(a.summary).replace("\n", "<br>")
             "<div class=\"ai-summary\"><div class=\"ai-summary-title\">✨ AI 总结</div><p class=\"noindent\">$body</p></div>"
@@ -141,8 +189,8 @@ class ShizhengArticleActivity : AppCompatActivity() {
               <div class="meta">$meta</div>
               ${if (tags.isNotEmpty()) "<div class=\"tags\">$tags</div>" else ""}
               <div class="divider"></div>
-              $summaryBlock
               $paragraphs
+              $summaryBlock
               <div class="footer">— 陪陪刷 · 时政热点 —</div>
             </body></html>
         """.trimIndent()

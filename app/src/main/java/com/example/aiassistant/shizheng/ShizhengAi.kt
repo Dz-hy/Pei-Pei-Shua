@@ -2,6 +2,7 @@ package com.example.aiassistant.shizheng
 
 import android.content.Context
 import android.util.Log
+import com.example.aiassistant.AiErrorKind
 import com.example.aiassistant.AppPreferences
 import com.example.aiassistant.OpenAIApiService
 import org.json.JSONArray
@@ -63,23 +64,36 @@ object ShizhengAi {
     private fun activeConfig(context: Context): com.example.aiassistant.AiModelConfig? =
         getShizhengModelConfig(context)
 
-    /** 阻塞式 AI 文本调用，失败/超时返回 null（原因记入 lastError） */
+    /** 阻塞式 AI 文本调用，失败/超时返回 null（原因记入 lastError）。
+     *  走 AiFailoverExecutor 单模型链：网络/服务端错误先退避重试，绝不回退到主体 AI。 */
     private fun callAi(context: Context, systemPrompt: String, userMessage: String): String? {
         val config = activeConfig(context) ?: return fail("时政 AI 未配置")
         val latch = CountDownLatch(1)
         var result: String? = null
         var error: String? = null
         try {
-            OpenAIApiService.analyzeText(
-                ocrText = "",
-                baseUrl = config.baseUrl,
-                apiKey = config.apiKey,
-                model = config.model,
-                prompt = systemPrompt,
-                thinking = false,
-                userMessage = userMessage,
-                apiType = config.apiType,
-                thinkingBudget = config.thinkingBudget,
+            com.example.aiassistant.AiFailoverExecutor.execute(
+                candidates = listOf(config),
+                request = { cfg, onComplete, onError ->
+                    OpenAIApiService.analyzeText(
+                        ocrText = "",
+                        baseUrl = cfg.baseUrl,
+                        apiKey = cfg.apiKey,
+                        model = cfg.model,
+                        prompt = systemPrompt,
+                        thinking = false,
+                        userMessage = userMessage,
+                        apiType = cfg.apiType,
+                        thinkingBudget = cfg.thinkingBudget,
+                        onComplete = onComplete,
+                        onError = { msg ->
+                            // 未分类错误兜底：按 PARSE 转发给 executor（同模型不重试、无备用即终止），
+                            // 避免 analyzeText 走非结构化错误通道时 executor 收不到回调、latch 挂到超时
+                            onError(AiErrorKind.PARSE, msg)
+                        },
+                        onStructuredError = onError
+                    )
+                },
                 onComplete = { fullText -> result = fullText; latch.countDown() },
                 onError = { msg -> error = msg; latch.countDown() }
             )

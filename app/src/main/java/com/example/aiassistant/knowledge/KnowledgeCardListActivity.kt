@@ -46,6 +46,7 @@ class KnowledgeCardListActivity : AppCompatActivity() {
     private var currentPage = 0
     private var hasMore = true
     private var isLoading = false
+    private var loadGeneration = 0  // 重置后丢弃在途分页结果，防止旧页数据追加进已清空的列表
     private val pageSize = 20
 
     // 网格/列表切换
@@ -194,6 +195,7 @@ class KnowledgeCardListActivity : AppCompatActivity() {
     private fun resetAndLoad() {
         currentPage = 0
         hasMore = true
+        loadGeneration++
         adapter.clearData()
         loadPage()
     }
@@ -208,36 +210,45 @@ class KnowledgeCardListActivity : AppCompatActivity() {
         isLoading = true
         pbLoadMore.visibility = View.VISIBLE
 
-        val result = if (searchKeyword.isNotEmpty()) {
-            KnowledgeCardManager.searchCards(categoryId, searchKeyword, currentPage, pageSize)
-        } else {
-            KnowledgeCardManager.getCardsPaged(categoryId, currentPage, pageSize)
-        }
+        val gen = loadGeneration
+        val page = currentPage
+        val keyword = searchKeyword
+        val catId = categoryId
 
-        val cards = result.first
-        hasMore = result.second
+        Thread {
+            val result = if (keyword.isNotEmpty()) {
+                KnowledgeCardManager.searchCards(catId, keyword, page, pageSize)
+            } else {
+                KnowledgeCardManager.getCardsPaged(catId, page, pageSize)
+            }
+            val totalCount = KnowledgeCardManager.getCardCount(catId)
 
-        if (currentPage == 0) {
-            adapter.setData(cards)
-        } else {
-            adapter.appendData(cards)
-        }
+            runOnUiThread {
+                if (isDestroyed || isFinishing || gen != loadGeneration) return@runOnUiThread
+                hasMore = result.second
 
-        isLoading = false
-        pbLoadMore.visibility = View.GONE
+                if (page == 0) {
+                    adapter.setData(result.first)
+                } else {
+                    adapter.appendData(result.first)
+                }
 
-        // 更新统计
-        val totalCount = KnowledgeCardManager.getCardCount(categoryId)
-        tvCount.text = if (searchKeyword.isNotEmpty()) {
-            "搜索「$searchKeyword」 ${adapter.itemCount}条结果"
-        } else {
-            "共${totalCount}条"
-        }
+                isLoading = false
+                pbLoadMore.visibility = View.GONE
 
-        // 空状态
-        val isEmpty = adapter.itemCount == 0
-        tvEmpty.visibility = if (isEmpty) View.VISIBLE else View.GONE
-        rvCards.visibility = if (isEmpty) View.GONE else View.VISIBLE
+                // 更新统计
+                tvCount.text = if (keyword.isNotEmpty()) {
+                    "搜索「$keyword」 ${adapter.itemCount}条结果"
+                } else {
+                    "共${totalCount}条"
+                }
+
+                // 空状态
+                val isEmpty = adapter.itemCount == 0
+                tvEmpty.visibility = if (isEmpty) View.VISIBLE else View.GONE
+                rvCards.visibility = if (isEmpty) View.GONE else View.VISIBLE
+            }
+        }.start()
     }
 
     // ── 选中模式 ──────────────────────────────────────────────────────

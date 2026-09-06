@@ -85,11 +85,14 @@ private class PromptAdapter(
                 val t = holder.currentType ?: return
                 val text = s?.toString()?.trim() ?: ""
                 val teacher = TeacherManager.activeTeacher
-                if (text.isNotEmpty()) {
-                    saveRunnable?.let { saveHandler.removeCallbacks(it) }
-                    saveRunnable = Runnable { TeacherManager.setOverlay(ctx, teacher.id, t, text) }
-                    saveHandler.postDelayed(saveRunnable!!, 300)
+                saveRunnable?.let { saveHandler.removeCallbacks(it) }
+                // 清空 = 移除覆盖层恢复默认，否则旧 prompt 会一直残留
+                saveRunnable = if (text.isNotEmpty()) {
+                    Runnable { TeacherManager.setOverlay(ctx, teacher.id, t, text) }
+                } else {
+                    Runnable { TeacherManager.removeOverlay(ctx, teacher.id, t) }
                 }
+                saveHandler.postDelayed(saveRunnable!!, 300)
             }
         }
         holder.currentWatcher = watcher

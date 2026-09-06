@@ -72,20 +72,34 @@ class TextSelectionCallback(
             .create()
         dialog.show()
 
-        val baseUrl = AppPreferences.getApiBaseUrl(context)
-        val apiKey = AppPreferences.getApiKey(context)
-        val model = try {
-            val models = com.example.aiassistant.ModelManager.allModels
-            models.firstOrNull()?.model ?: "deepseek-chat"
-        } catch (_: Exception) { "deepseek-chat" }
+        // 使用当前活跃模型 + 故障转移链（此前仍读 api_base_url/api_key 旧遗留字段，与新模型列表脱节）
+        com.example.aiassistant.ModelManager.init(context)
+        val chain = com.example.aiassistant.AiFailoverExecutor.buildChain(
+            AppPreferences.getActiveModelId(context)
+        )
+        if (chain.isEmpty()) {
+            dialog.setMessage("请先在「AI 模型」设置中配置模型")
+            return
+        }
 
-        OpenAIApiService.analyzeWithSystemPrompt(
-            ocrText = "",
-            systemPrompt = "你是一个公务员考试辅导助手。请用简洁的中文回答用户的问题。如果用户粘贴了一道题目，请分析题目并给出答案和解析。",
-            baseUrl = baseUrl,
-            apiKey = apiKey,
-            model = model,
-            userMessage = "请回答以下问题：\n$selectedText",
+        com.example.aiassistant.AiFailoverExecutor.execute(
+            candidates = chain,
+            request = { cfg, onComplete, onError ->
+                OpenAIApiService.analyzeText(
+                    ocrText = "",
+                    baseUrl = cfg.baseUrl,
+                    apiKey = cfg.apiKey,
+                    model = cfg.model,
+                    prompt = "你是一个公务员考试辅导助手。请用简洁的中文回答用户的问题。如果用户粘贴了一道题目，请分析题目并给出答案和解析。",
+                    thinking = false,
+                    userMessage = "请回答以下问题：\n$selectedText",
+                    apiType = cfg.apiType,
+                    thinkingBudget = cfg.thinkingBudget,
+                    onComplete = onComplete,
+                    onError = { /* 已由 onStructuredError 接管 */ },
+                    onStructuredError = onError
+                )
+            },
             onComplete = { response ->
                 (context as? android.app.Activity)?.runOnUiThread {
                     try {

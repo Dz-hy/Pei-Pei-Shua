@@ -1,6 +1,7 @@
 package com.example.aiassistant.questionbank
 
 import android.app.Dialog
+import android.content.Intent
 import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
@@ -13,19 +14,26 @@ import com.google.android.material.slider.RangeSlider
 
 class PracticeSettingsDialog : DialogFragment() {
 
-    private var moduleId: String = ""
-    private var moduleName: String = ""
     private var onSettingsConfirmed: ((questionCount: Int, rateMin: Int, rateMax: Int) -> Unit)? = null
 
+    // moduleId/moduleName 走 arguments：旋转/进程重建走无参构造后字段会被清空
+    private val moduleId: String get() = arguments?.getString(EXTRA_MODULE_ID) ?: ""
+    private val moduleName: String get() = arguments?.getString(EXTRA_MODULE_NAME) ?: ""
+
     companion object {
+        private const val EXTRA_MODULE_ID = "module_id"
+        private const val EXTRA_MODULE_NAME = "module_name"
+
         fun newInstance(
             moduleId: String,
             moduleName: String,
-            onSettingsConfirmed: (questionCount: Int, rateMin: Int, rateMax: Int) -> Unit
+            onSettingsConfirmed: ((questionCount: Int, rateMin: Int, rateMax: Int) -> Unit)? = null
         ): PracticeSettingsDialog {
             return PracticeSettingsDialog().apply {
-                this.moduleId = moduleId
-                this.moduleName = moduleName
+                arguments = Bundle().apply {
+                    putString(EXTRA_MODULE_ID, moduleId)
+                    putString(EXTRA_MODULE_NAME, moduleName)
+                }
                 this.onSettingsConfirmed = onSettingsConfirmed
             }
         }
@@ -92,7 +100,19 @@ class PracticeSettingsDialog : DialogFragment() {
             val values = sliderRateRange.values
             val rateMin = values[0].toInt()
             val rateMax = values[1].toInt()
-            onSettingsConfirmed?.invoke(questionCount, rateMin, rateMax)
+            val cb = onSettingsConfirmed
+            if (cb != null) {
+                cb(questionCount, rateMin, rateMax)
+            } else {
+                // 重建后 lambda 丢失：凭 arguments 直接拉起做题页，按钮不再静默失效
+                val intent = Intent(requireContext(), PracticeActivity::class.java)
+                intent.putExtra("module_id", moduleId)
+                intent.putExtra("module_name", moduleName)
+                intent.putExtra("question_count", questionCount)
+                intent.putExtra("rate_min", rateMin)
+                intent.putExtra("rate_max", rateMax)
+                startActivity(intent)
+            }
             dismiss()
         }
 

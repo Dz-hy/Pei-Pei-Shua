@@ -40,8 +40,9 @@ object VectorIndexer {
         Thread {
             var paused = false
             var error = ""
+            var db: QuestionBankDb? = null
             try {
-                val db = QuestionBankDb(appCtx)
+                db = QuestionBankDb(appCtx)
                 if (force) db.clearAllVectors()
                 val total = db.countAllQuestions()
                 val baseUrl = AppPreferences.getEmbBaseUrl(appCtx)
@@ -71,6 +72,7 @@ object VectorIndexer {
                 e.printStackTrace()
                 error = e.message ?: "索引构建失败"
             } finally {
+                try { db?.close() } catch (_: Exception) {}
                 isRunning = false
                 VectorCache.invalidate()
                 val msg = when {

@@ -32,16 +32,23 @@ class HandwritingController(
     private val scrollView: ScrollView,
     private val idProvider: () -> String?,
     private val loader: (id: String) -> String?,
-    private val saver: (id: String, json: String) -> Unit
+    private val saver: (id: String, json: String) -> Unit,
+    // 工具栏悬浮高度：做题页要避开底部操作栏(78)，文章页等无底栏页面可传小值
+    private val toolbarBottomMarginDp: Int = 78
 ) {
 
     private val overlay = HandwritingOverlayView(activity).apply {
         id = View.generateViewId() // 便于 uiautomator dump 定位批注层状态
+        onEditRequested = { // 查看态点笔迹直接进编辑
+            android.util.Log.d("HWDebug", "tap-to-edit triggered")
+            enterEditing()
+        }
     }
     private var toolbar: LinearLayout? = null
     private val brushButtons = mutableListOf<Pair<View, Int>>()
     private var currentId: String? = null
     private var editing = false
+    private var tapEditHintShown = false
 
     /** 幂等安装：包装 ScrollView 内容、叠加批注层与工具栏 */
     fun install() {
@@ -52,7 +59,7 @@ class HandwritingController(
         if (content.parent !== scrollView) return // 已包装过
 
         scrollView.removeView(content)
-        val frame = FrameLayout(activity).apply {
+        val frame = ContentHostFrameLayout(activity).apply {
             layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
@@ -71,12 +78,6 @@ class HandwritingController(
         overlay.visibility = View.GONE
         frame.addView(overlay)
         scrollView.addView(frame)
-
-        // 内容高度变化（WebView 异步撑高、卡片展开等）时同步批注层高度，保证笔迹覆盖整个内容区
-        content.addOnLayoutChangeListener { _, _, top, _, bottom, _, _, _, _ ->
-            val h = bottom - top
-            if (overlay.minimumHeight != h) overlay.minimumHeight = h
-        }
 
         installToolbar()
     }
@@ -99,11 +100,21 @@ class HandwritingController(
         if (editing) return
         currentId = id
         val json = loader(id)
+        android.util.Log.d("HWDebug", "revealAnnotation id=$id jsonLen=${json?.length ?: -1}")
         if (!json.isNullOrBlank()) {
             overlay.clearStrokes()
             overlay.loadFromJson(json)
             showOverlay(interactive = false)
+            if (overlay.tapToEditEnabled && overlay.hasStrokes() && !tapEditHintShown) {
+                tapEditHintShown = true
+                Toast.makeText(activity, "点击手写笔迹可直接继续编辑", Toast.LENGTH_SHORT).show()
+            }
         }
+    }
+
+    /** 查看态"点笔迹直接进编辑"开关：交卷回看/复习页/文章页开启；做题中必须关闭（点击要穿透到选项） */
+    fun setTapToEditEnabled(enabled: Boolean) {
+        overlay.tapToEditEnabled = enabled
     }
 
     /** 手写按钮：进入编辑态；若查看态已有笔迹则在其上继续编辑（可撤销历史笔画） */
@@ -151,7 +162,9 @@ class HandwritingController(
 
     private fun saveNow() {
         val id = currentId ?: return
-        saver(id, overlay.toJson())
+        val json = overlay.toJson()
+        android.util.Log.d("HWDebug", "saveNow id=$id jsonLen=${json.length}")
+        saver(id, json)
     }
 
     // ── 工具栏 ─────────────────────────────────────────────────────────
@@ -221,7 +234,7 @@ class HandwritingController(
             ViewGroup.LayoutParams.WRAP_CONTENT,
             Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
         )
-        lp.bottomMargin = dp(78) // 悬浮在页面底部操作栏之上
+        lp.bottomMargin = dp(toolbarBottomMarginDp) // 悬浮在页面底部操作栏之上
         bar.visibility = View.GONE
         content.addView(bar, lp)
         toolbar = bar
@@ -256,4 +269,35 @@ class HandwritingController(
 
     private fun dp(v: Int): Int = (v * activity.resources.displayMetrics.density).toInt()
     private fun dp(v: Float): Float = v * activity.resources.displayMetrics.density
+}
+
+/**
+ * 批注层宿主容器：无视口约束测量内容。
+ * 普通 FrameLayout 会把 AT_MOST(视口高) 约束传给 wrap_content 的子 view——长 WebView 会被
+ * 截断成视口高度、内容转为内部滚动，批注层高度随之不足（滚动后画不出笔迹、笔迹错位消失，
+ * 短内容页面无感）。这里用 UNSPECIFIED 高度测内容子 view 取真实内容高度；ScrollView 传
+ * EXACTLY 时（fillViewport 拉伸短内容）取 max(内容高, 视口高)。
+ * 批注层高度直接跟随内容高度（两段式测量），替代时序脆弱的布局监听同步
+ * （WebView 首次布局可能早于监听器注册，导致批注层高度停在 0、触摸全穿透）。
+ */
+private class ContentHostFrameLayout(activity: Activity) : FrameLayout(activity) {
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        val wSpec = View.MeasureSpec.makeMeasureSpec(View.MeasureSpec.getSize(widthMeasureSpec), View.MeasureSpec.EXACTLY)
+        var contentH = 0
+        for (i in 0 until childCount) {
+            val c = getChildAt(i)
+            if (c is HandwritingOverlayView) continue
+            c.measure(wSpec, View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED))
+            if (c.measuredHeight > contentH) contentH = c.measuredHeight
+        }
+        for (i in 0 until childCount) {
+            val c = getChildAt(i)
+            if (c is HandwritingOverlayView) {
+                c.measure(wSpec, View.MeasureSpec.makeMeasureSpec(contentH, View.MeasureSpec.EXACTLY))
+            }
+        }
+        val specH = View.MeasureSpec.getSize(heightMeasureSpec)
+        if (View.MeasureSpec.getMode(heightMeasureSpec) == View.MeasureSpec.EXACTLY && contentH < specH) contentH = specH
+        setMeasuredDimension(View.MeasureSpec.getSize(widthMeasureSpec), contentH)
+    }
 }

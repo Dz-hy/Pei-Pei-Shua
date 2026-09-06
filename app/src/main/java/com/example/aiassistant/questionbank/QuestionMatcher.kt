@@ -2,7 +2,8 @@ package com.example.aiassistant.questionbank
 
 import android.content.Context
 import com.example.aiassistant.AppPreferences
-import com.example.aiassistant.AiModelConfig
+import com.example.aiassistant.AiErrorKind
+import com.example.aiassistant.AiFailoverExecutor
 import com.example.aiassistant.ModelManager
 import com.example.aiassistant.OpenAIApiService
 import org.json.JSONObject
@@ -45,15 +46,15 @@ object QuestionMatcher {
         val cleaned = ocrText.trim().take(OCR_MAX_LEN)
         if (cleaned.isBlank()) return MatchResult(null, CONF_NONE)
 
-        // 本次匹配共用一个连接（材料比对 + 向量候选两段都要读库）
-        val db by lazy { QuestionBankDb(context) }
+        // 所有库读取统一走 QuestionBankManager 共享连接（材料比对/快筛/向量候选/取题），
+        // 不再每次匹配另开一条连接（旧写法从不关闭，会泄漏并引发同库多连接争锁）
 
         // 材料单独匹配先行：用户框到了材料段 → 先与题库 materials 表比对，命中则该组
         // 候选题限定在材料组内再走题干匹配；未命中 → 提示可能未转换成功、回退原链
         var materialGroupId: String? = null
         var materialMatched = false
         if (!materialText.isNullOrBlank()) {
-            materialGroupId = db.findMaterialByText(materialText)
+            materialGroupId = QuestionBankManager.findMaterialByText(materialText)
             materialMatched = materialGroupId != null
         }
 
@@ -82,14 +83,14 @@ object QuestionMatcher {
             ).first()
 
             val minThreshold = AppPreferences.getMatchVectorMinThreshold(context)
-            val sims = VectorCache.get(context)
+            val sims = VectorCache.get()
                 .map { (id, vec) -> id to cosine(queryVec, vec) }
                 .filter { it.second >= minThreshold }
                 .sortedByDescending { it.second }
                 .take(VECTOR_TOP_K)
             if (sims.isEmpty()) return MatchResult(null, CONF_NONE, materialMatched = materialMatched)
 
-            var candidates = sims.mapNotNull { db.getQuestionById(it.first) }
+            var candidates = sims.mapNotNull { QuestionBankManager.getQuestionById(it.first) }
             // 材料段框到了：候选过滤到同一材料组（题干选项再像、材料不同判非）
             if (materialGroupId != null) {
                 candidates = candidates.filter { it.materialId == materialGroupId }
@@ -156,37 +157,38 @@ object QuestionMatcher {
                     "只输出 JSON：{\"match\": <编号或null>, \"confidence\": \"high\"|\"medium\"|\"low\"}")
         }
 
-        for (model in buildModelChain(context)) {
-            val latch = CountDownLatch(1)
-            var result: Pair<Int, String>? = null
-            var failed = false
-            try {
+        // 故障转移链由 AiFailoverExecutor 统一驱动：瞬时错误同模型重试、稳定错误逐个切换，
+        // 鉴权等客户端错误直接终止；最多消耗 3 个模型，避免截图匹配拖太久
+        val chain = AiFailoverExecutor.buildChain(AppPreferences.getActiveModelId(context)).take(3)
+        if (chain.isEmpty()) return null
+        val latch = CountDownLatch(1)
+        var result: Pair<Int, String>? = null
+        AiFailoverExecutor.execute(
+            candidates = chain,
+            request = { cfg, onComplete, onError ->
                 OpenAIApiService.analyzeText(
                     ocrText = ocrText,
-                    baseUrl = model.baseUrl,
-                    apiKey = model.apiKey,
-                    model = model.model,
+                    baseUrl = cfg.baseUrl,
+                    apiKey = cfg.apiKey,
+                    model = cfg.model,
                     prompt = "你是题目匹配裁判。OCR 文本与题库原题可能有轻微字词差异，但考点、选项设置、题干结构一致的是同一题。严格区分相似但不同的题（数字、设问方向不同即为不同题）。材料题必须以材料一致为前提：材料不符即非同一题。",
                     thinking = false,
                     userMessage = userMessage,
-                    apiType = model.apiType,
-                    thinkingBudget = model.thinkingBudget,
-                    onComplete = { text ->
-                        result = parseRerank(text)
-                        latch.countDown()
+                    apiType = cfg.apiType,
+                    thinkingBudget = cfg.thinkingBudget,
+                    onComplete = onComplete,
+                    onError = { msg ->
+                        // 未分类错误兜底：按 PARSE 转发给 executor，避免其收不到回调、latch 挂到超时
+                        onError(AiErrorKind.PARSE, msg)
                     },
-                    onError = {
-                        failed = true
-                        latch.countDown()
-                    }
+                    onStructuredError = onError
                 )
-            } catch (e: Exception) {
-                failed = true
-            }
-            latch.await(90, TimeUnit.SECONDS)
-            if (!failed && result != null) return result
-        }
-        return null
+            },
+            onComplete = { text -> result = parseRerank(text); latch.countDown() },
+            onError = { latch.countDown() }
+        )
+        latch.await(90L * chain.size.coerceAtMost(3), TimeUnit.SECONDS)
+        return result
     }
 
     /** 解析 {"match": n|null, "confidence": "..."}，宽容处理代码块包裹 */
@@ -202,14 +204,5 @@ object QuestionMatcher {
         } catch (e: Exception) {
             null
         }
-    }
-
-    /** 模型故障转移链：活跃模型优先，其后备用模型，最多取 3 个 */
-    private fun buildModelChain(context: Context): List<AiModelConfig> {
-        val all = ModelManager.allModels
-        if (all.isEmpty()) return emptyList()
-        val activeId = AppPreferences.getActiveModelId(context)
-        val active = ModelManager.get(activeId)
-        return (listOfNotNull(active) + all.filter { it.id != activeId }).take(3)
     }
 }

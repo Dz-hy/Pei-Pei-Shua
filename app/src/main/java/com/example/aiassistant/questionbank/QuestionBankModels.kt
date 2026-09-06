@@ -58,8 +58,11 @@ data class PracticeProgress(
 
 /**
  * 一次完整做题训练的会话快照（计划表-做题历史）。
- * questionsJson 每题携带完整题面（题干/选项/答案/解析）与作答判分，
- * 回看时从快照重建，不依赖题库现状（改题/删题不影响历史）。
+ * questionsJson 两种格式：
+ * - v1 全量（'[' 开头）：每题携带完整题面与作答判分，回看不依赖题库。错题重练专用
+ *   （OCR 题源不在题库，必须随快照走）。解析里的 base64 配图会让单场快照达数 MB。
+ * - v2 极简（'{' 开头）：题库来源的训练只存 {id, selected, result}，回看时按 id 从题库
+ *   现取题目内容——单场快照从数 MB 降到几 KB。
  */
 data class PracticeSessionRecord(
     val id: Long = 0,
@@ -76,13 +79,32 @@ data class PracticeSessionRecord(
     val rateMax: Int = 100,
     val questionsJson: String
 ) {
+    /** v2 极简快照的单题条目 */
+    data class SlimItem(val id: String, val selected: Int, val result: Boolean?)
+
     companion object {
-        /** 整场训练打包为 JSON：题面快照 + 我的作答(selected) + 判分(result，null=未答) */
+        /** 整场训练打包为 JSON。slim=true（题库来源）只存题 id+作答+判分；false（错题重练）存全量题面 */
         fun snapshotToJson(
             questions: List<Question>,
             selectedOptions: IntArray,
-            results: Array<Boolean?>
+            results: Array<Boolean?>,
+            slim: Boolean = false
         ): String {
+            if (slim) {
+                val items = org.json.JSONArray()
+                questions.forEachIndexed { i, q ->
+                    items.put(org.json.JSONObject().apply {
+                        put("id", q.id)
+                        put("selected", selectedOptions.getOrElse(i) { -1 })
+                        put("result", results.getOrElse(i) { null } ?: org.json.JSONObject.NULL)
+                    })
+                }
+                return org.json.JSONObject().apply {
+                    put("v", 2)
+                    put("items", items)
+                }.toString()
+            }
+
             val arr = org.json.JSONArray()
             questions.forEachIndexed { i, q ->
                 arr.put(org.json.JSONObject().apply {
@@ -112,6 +134,24 @@ data class PracticeSessionRecord(
                 })
             }
             return arr.toString()
+        }
+
+        /** v2 极简快照以 '{' 开头（v1 全量为 JSONArray，以 '[' 开头） */
+        fun isSlimSnapshot(json: String): Boolean = json.trimStart().startsWith("{")
+
+        /** v2 极简条目解析（id + 作答 + 判分）；题目内容由调用方按 id 从题库现取 */
+        fun parseSlimItems(json: String): List<SlimItem> {
+            return try {
+                val items = org.json.JSONObject(json).getJSONArray("items")
+                List(items.length()) { i ->
+                    val o = items.getJSONObject(i)
+                    SlimItem(
+                        id = o.optString("id"),
+                        selected = o.optInt("selected", -1),
+                        result = if (o.isNull("result")) null else o.optBoolean("result")
+                    )
+                }
+            } catch (_: Exception) { emptyList() }
         }
 
         fun parseQuestions(json: String): List<Question> {
@@ -151,6 +191,7 @@ data class PracticeSessionRecord(
             } catch (_: Exception) { emptyList() }
         }
 
+        /** v1 全量快照专用；v2 极简走 parseSlimItems */
         fun parseSelected(json: String): IntArray {
             return try {
                 val arr = org.json.JSONArray(json)
@@ -158,6 +199,7 @@ data class PracticeSessionRecord(
             } catch (_: Exception) { IntArray(0) }
         }
 
+        /** v1 全量快照专用；v2 极简走 parseSlimItems */
         fun parseResults(json: String): Array<Boolean?> {
             return try {
                 val arr = org.json.JSONArray(json)

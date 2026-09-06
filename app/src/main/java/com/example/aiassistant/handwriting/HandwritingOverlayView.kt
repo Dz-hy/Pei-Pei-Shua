@@ -7,11 +7,14 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
+import kotlin.math.hypot
 
 /**
  * 手写批注层：在内容区坐标系上直接绘制笔画列表（无离屏 bitmap）。
  * 触摸规则：单指画画；检测到第二根手指时丢弃当前未完成笔画并放行给父级 ScrollView 滚动。
- * 查看态把 isEnabled 置 false，触摸穿透到下层内容。
+ * 查看态把 isEnabled 置 false，触摸穿透到下层内容；
+ * 开启 tapToEditEnabled 后，按在笔迹上的单击会上报 [onEditRequested]（其余仍穿透）。
  */
 class HandwritingOverlayView(context: Context) : View(context) {
 
@@ -21,10 +24,20 @@ class HandwritingOverlayView(context: Context) : View(context) {
         const val BRUSH_HIGHLIGHT = 2
     }
 
+    /** 查看态"点笔迹进编辑"开关：交卷回看/复习页/文章页开启；做题中必须关闭（点击要穿透到选项行） */
+    var tapToEditEnabled = false
+
+    /** 查看态下单击命中笔迹时回调 */
+    var onEditRequested: (() -> Unit)? = null
+
     private val strokes = mutableListOf<Stroke>()
     private val currentPoints = mutableListOf<Float>()
     private var currentBrush = BRUSH_BLACK
     private var activePointerId = -1
+
+    private var viewDownX = 0f
+    private var viewDownY = 0f
+    private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
 
     private val strokePaints: List<Paint> = listOf(
         Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -118,7 +131,27 @@ class HandwritingOverlayView(context: Context) : View(context) {
 
     @SuppressLint("ClickableViewAccessibility")
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        if (!isEnabled) return super.onTouchEvent(event)
+        if (!isEnabled) {
+            if (!tapToEditEnabled) return super.onTouchEvent(event)
+            // 查看态：只认领落在笔迹上的触摸，其余照旧穿透（AI解析按钮、文字选择不受影响）。
+            // 认领后不申请 disallow，拖动仍由父级 ScrollView 拦截滚动。
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    if (!hitStroke(event.x, event.y)) return super.onTouchEvent(event)
+                    viewDownX = event.x
+                    viewDownY = event.y
+                    return true
+                }
+                MotionEvent.ACTION_MOVE -> return true
+                MotionEvent.ACTION_UP -> {
+                    val moved = hypot(event.x - viewDownX, event.y - viewDownY) > touchSlop
+                    if (!moved) onEditRequested?.invoke()
+                    return true
+                }
+                MotionEvent.ACTION_CANCEL -> return true
+            }
+            return super.onTouchEvent(event)
+        }
 
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
@@ -177,6 +210,44 @@ class HandwritingOverlayView(context: Context) : View(context) {
     private fun cancelCurrentStroke() {
         currentPoints.clear()
         invalidate()
+    }
+
+    /** 命中测试：点是否落在任一笔迹（折线段）附近 */
+    private fun hitStroke(x: Float, y: Float): Boolean {
+        val threshold = dp(20f)
+        val thresholdSq = threshold * threshold
+        for (s in strokes) {
+            val p = s.points
+            if (p.size < 2) continue
+            if (p.size == 2) {
+                if (distSq(x, y, p[0], p[1]) <= thresholdSq) return true
+                continue
+            }
+            var i = 0
+            while (i + 3 < p.size) {
+                if (distToSegmentSq(x, y, p[i], p[i + 1], p[i + 2], p[i + 3]) <= thresholdSq) return true
+                i += 2
+            }
+        }
+        return false
+    }
+
+    private fun distSq(x1: Float, y1: Float, x2: Float, y2: Float): Float {
+        val dx = x1 - x2
+        val dy = y1 - y2
+        return dx * dx + dy * dy
+    }
+
+    /** 点 (px,py) 到线段 (x1,y1)-(x2,y2) 的距离平方 */
+    private fun distToSegmentSq(px: Float, py: Float, x1: Float, y1: Float, x2: Float, y2: Float): Float {
+        val dx = x2 - x1
+        val dy = y2 - y1
+        val lenSq = dx * dx + dy * dy
+        if (lenSq <= 0f) return distSq(px, py, x1, y1)
+        var t = ((px - x1) * dx + (py - y1) * dy) / lenSq
+        if (t < 0f) t = 0f
+        if (t > 1f) t = 1f
+        return distSq(px, py, x1 + t * dx, y1 + t * dy)
     }
 
     private fun dp(v: Float): Float = v * resources.displayMetrics.density

@@ -10,6 +10,22 @@ import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 /**
+ * AI 请求错误分类：决定故障转移时是否切换下一个模型。
+ * 仅 NETWORK/SERVER/RATE_LIMIT/EMPTY/PARSE/TOOL_LIMIT 可切换；
+ * CLIENT（鉴权/参数错误）与 BUILD（请求构建失败）换模型也救不了，直接终止。
+ */
+enum class AiErrorKind {
+    NETWORK,     // 网络失败/超时（IOException）
+    SERVER,      // HTTP 5xx 服务端错误
+    RATE_LIMIT,  // HTTP 429 限流（服务层已重试 2 次）
+    EMPTY,       // 响应为空 / 解析结果为空
+    PARSE,       // 响应 JSON 解析异常
+    CLIENT,      // HTTP 4xx（除 429）：鉴权/参数等客户端错误
+    BUILD,       // 请求构建失败
+    TOOL_LIMIT   // 工具调用轮次超限
+}
+
+/**
  * 通用 AI 接口引擎：支持 OpenAI、Anthropic 和 Google Gemini 协议
  * 兼容：OpenAI / Anthropic Claude / Google Gemini REST API 及自定义中转
  * 使用非流式（一次性）请求，支持自动重试与高可用模型链式容错
@@ -25,7 +41,15 @@ object OpenAIApiService {
     private var currentCall: Call? = null
     private val retryHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
+    /**
+     * 请求代际标记：每次取消/发起新请求时自增。
+     * 工具循环等多轮回调在继续执行前必须校验代际，避免取消后旧链路仍发请求、触发回调。
+     */
+    @Volatile
+    private var requestGeneration = 0
+
     fun cancelCurrentRequest() {
+        requestGeneration++
         retryHandler.removeCallbacksAndMessages(null)
         val call = synchronized(this) {
             val c = currentCall
@@ -60,7 +84,8 @@ object OpenAIApiService {
         apiType: String = "openai",
         thinkingBudget: Int = 4096,
         onComplete: (fullText: String) -> Unit,
-        onError: (String) -> Unit
+        onError: (String) -> Unit,
+        onStructuredError: ((AiErrorKind, String) -> Unit)? = null
     ) {
         val systemPrompt = prompt
         val userContent = userMessage ?: "以下是从图片中识别出的文字内容：\n$ocrText"
@@ -68,11 +93,12 @@ object OpenAIApiService {
         val request = try {
             buildTextRequest(baseUrl, apiKey, model, systemPrompt, userContent, thinking, apiType, thinkingBudget)
         } catch (e: Exception) {
-            onError("构建请求失败：${e.message}")
+            if (onStructuredError != null) onStructuredError(AiErrorKind.BUILD, "构建请求失败：${e.message}")
+            else onError("构建请求失败：${e.message}")
             return
         }
 
-        executeRequest(request, apiType, 0, onComplete, onError)
+        executeRequest(request, apiType, 0, onComplete, onError, onStructuredError)
     }
 
     /** 统一 System Prompt 模式接口（向下兼容） */
@@ -87,9 +113,10 @@ object OpenAIApiService {
         apiType: String = "openai",
         thinkingBudget: Int = 4096,
         onComplete: (fullText: String) -> Unit,
-        onError: (String) -> Unit
+        onError: (String) -> Unit,
+        onStructuredError: ((AiErrorKind, String) -> Unit)? = null
     ) {
-        analyzeText(ocrText, baseUrl, apiKey, model, systemPrompt, thinking, userMessage, apiType, thinkingBudget, onComplete, onError)
+        analyzeText(ocrText, baseUrl, apiKey, model, systemPrompt, thinking, userMessage, apiType, thinkingBudget, onComplete, onError, onStructuredError)
     }
 
     /** 统一视觉/多模态请求核心：完美路由至 OpenAI / Anthropic / Gemini */
@@ -103,16 +130,18 @@ object OpenAIApiService {
         apiType: String = "openai",
         thinkingBudget: Int = 4096,
         onComplete: (fullText: String) -> Unit,
-        onError: (String) -> Unit
+        onError: (String) -> Unit,
+        onStructuredError: ((AiErrorKind, String) -> Unit)? = null
     ) {
         val request = try {
             buildImageRequest(baseUrl, apiKey, model, systemPrompt, imageBase64, thinking, apiType, thinkingBudget)
         } catch (e: Exception) {
-            onError("构建视觉请求失败：${e.message}")
+            if (onStructuredError != null) onStructuredError(AiErrorKind.BUILD, "构建视觉请求失败：${e.message}")
+            else onError("构建视觉请求失败：${e.message}")
             return
         }
 
-        executeRequest(request, apiType, 0, onComplete, onError)
+        executeRequest(request, apiType, 0, onComplete, onError, onStructuredError)
     }
 
     // ── 内部请求构造引擎 ───────────────────────────────────────────────
@@ -418,25 +447,32 @@ object OpenAIApiService {
         apiType: String,
         retryCount: Int,
         onComplete: (fullText: String) -> Unit,
-        onError: (String) -> Unit
+        onError: (String) -> Unit,
+        onStructuredError: ((AiErrorKind, String) -> Unit)? = null
     ) {
+        // onStructuredError 非空时接管全部错误上报（供故障转移执行器按错误分类处理）
+        fun report(kind: AiErrorKind, msg: String) {
+            if (onStructuredError != null) onStructuredError.invoke(kind, msg) else onError(msg)
+        }
         cancelCurrentRequest()
-        android.util.Log.d("AIAssistantAPI", "executeRequest: Launching request. Type: $apiType, URL: ${request.url}, Method: ${request.method}")
+        val gen = requestGeneration
+        // 只打 host+path：Gemini 等协议把 key 放在 URL query 里，不能整条 URL 落日志
+        android.util.Log.d("AIAssistantAPI", "executeRequest: Launching request. Type: $apiType, URL: ${request.url.host}${request.url.encodedPath}, Method: ${request.method}")
         val call = client.newCall(request)
         synchronized(this) { currentCall = call }
 
         call.enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
-                if (call.isCanceled()) {
+                if (call.isCanceled() || gen != requestGeneration) {
                     android.util.Log.d("AIAssistantAPI", "onFailure: Request was canceled.")
                     return
                 }
                 android.util.Log.e("AIAssistantAPI", "onFailure: Network request failed!", e)
-                onError("网络请求失败：${e.message}")
+                report(AiErrorKind.NETWORK, "网络请求失败：${e.message}")
             }
 
             override fun onResponse(call: Call, response: Response) {
-                if (call.isCanceled()) {
+                if (call.isCanceled() || gen != requestGeneration) {
                     android.util.Log.d("AIAssistantAPI", "onResponse: Request was canceled after response received.")
                     response.close()
                     return
@@ -454,38 +490,47 @@ object OpenAIApiService {
                         val delayMs = (retryCount + 1) * 2000L
                         android.util.Log.w("AIAssistantAPI", "onResponse: Too Many Requests (429). Retrying in ${delayMs}ms...")
                         retryHandler.postDelayed({
-                            executeRequest(request, apiType, retryCount + 1, onComplete, onError)
+                            if (gen == requestGeneration) {
+                                executeRequest(request, apiType, retryCount + 1, onComplete, onError, onStructuredError)
+                            }
                         }, delayMs)
                         return
                     }
 
-                    onError("API 响应错误 ${statusCode}：$bodyStr")
+                    val kind = when {
+                        statusCode == 429 -> AiErrorKind.RATE_LIMIT
+                        statusCode in 400..499 -> AiErrorKind.CLIENT
+                        statusCode >= 500 -> AiErrorKind.SERVER
+                        else -> AiErrorKind.CLIENT
+                    }
+                    report(kind, "API 响应错误 ${statusCode}：$bodyStr")
                     return
                 }
 
                 val body = response.body
                 if (body == null) {
                     android.util.Log.e("AIAssistantAPI", "onResponse: Response body is null!")
-                    onError("API 响应为空")
+                    report(AiErrorKind.EMPTY, "API 响应为空")
                     return
                 }
 
                 try {
                     val responseStr = body.string()
-                    android.util.Log.i("AIAssistantAPI", "onResponse: Raw API JSON Response: $responseStr")
-                    
+                    android.util.Log.d("AIAssistantAPI", "onResponse: Raw API JSON Response length: ${responseStr.length}, preview: ${responseStr.take(200)}")
+
                     val parsedText = parseResponseStr(responseStr, apiType)
                     android.util.Log.d("AIAssistantAPI", "onResponse: Parsed output length: ${parsedText.length}, preview: ${parsedText.take(150)}")
-                    
+
+                    if (gen != requestGeneration) return
                     if (parsedText.isEmpty()) {
                         android.util.Log.e("AIAssistantAPI", "onResponse: Parsed text is empty!")
-                        onError("解析响应内容为空")
+                        report(AiErrorKind.EMPTY, "解析响应内容为空")
                     } else {
                         onComplete(parsedText)
                     }
                 } catch (e: Exception) {
                     android.util.Log.e("AIAssistantAPI", "onResponse: Parse exception!", e)
-                    onError("解析响应失败：${e.message}")
+                    if (gen == requestGeneration) report(AiErrorKind.PARSE, "解析响应失败：${e.message}")
                 } finally {
                     try { body.close() } catch (_: Exception) {}
                 }
@@ -642,7 +687,8 @@ object OpenAIApiService {
         imageBase64: String? = null,  // 新增多模态识图图片数据
         onToolCall: ((String) -> Unit)? = null,  // 通知 UI 正在调用哪个工具
         onComplete: (fullText: String) -> Unit,
-        onError: (String) -> Unit
+        onError: (String) -> Unit,
+        onStructuredError: ((AiErrorKind, String) -> Unit)? = null
     ) {
         val messages = JSONArray().apply {
             put(JSONObject().apply { put("role", "system"); put("content", prompt) })
@@ -693,7 +739,8 @@ object OpenAIApiService {
             apiType = apiType, thinking = thinking, thinkingBudget = thinkingBudget,
             messages = messages, tools = tools,
             round = 0, maxRounds = maxToolRounds,
-            onToolCall = onToolCall, onComplete = onComplete, onError = onError
+            onToolCall = onToolCall, onComplete = onComplete, onError = onError,
+            onStructuredError = onStructuredError
         )
     }
 
@@ -706,38 +753,52 @@ object OpenAIApiService {
         round: Int, maxRounds: Int,
         onToolCall: ((String) -> Unit)?,
         onComplete: (String) -> Unit,
-        onError: (String) -> Unit
+        onError: (String) -> Unit,
+        onStructuredError: ((AiErrorKind, String) -> Unit)? = null
     ) {
+        // onStructuredError 非空时接管全部错误上报（供故障转移执行器按错误分类处理）
+        fun report(kind: AiErrorKind, msg: String) {
+            if (onStructuredError != null) onStructuredError.invoke(kind, msg) else onError(msg)
+        }
         if (round >= maxRounds) {
-            onError("工具调用轮次超限（最多 $maxRounds 轮），已终止")
+            report(AiErrorKind.TOOL_LIMIT, "工具调用轮次超限（最多 $maxRounds 轮），已终止")
             return
         }
-        
+
         val request = try {
             buildToolRequest(baseUrl, apiKey, model, apiType, thinking, thinkingBudget, messages, tools)
         } catch (e: Exception) {
-            onError("构建带有工具的请求失败：${e.message}")
+            report(AiErrorKind.BUILD, "构建带有工具的请求失败：${e.message}")
             return
         }
-        
+
         if (round == 0) {
             cancelCurrentRequest()
         }
+        val gen = requestGeneration
         val call = client.newCall(request)
         synchronized(this) { currentCall = call }
-        
+
         call.enqueue(object : okhttp3.Callback {
             override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
-                if (call.isCanceled()) return
-                onError("网络请求失败：${e.message}")
+                if (call.isCanceled() || gen != requestGeneration) return
+                report(AiErrorKind.NETWORK, "网络请求失败：${e.message}")
             }
-            
+
             override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
-                if (call.isCanceled()) { response.close(); return }
+                if (call.isCanceled() || gen != requestGeneration) { response.close(); return }
                 if (!response.isSuccessful) {
                     val body = try { response.body?.string() } catch (_: Exception) { null } ?: ""
                     response.close()
-                    onError("API 响应错误 ${response.code}：$body")
+                    if (gen != requestGeneration) return
+                    val statusCode = response.code
+                    val kind = when {
+                        statusCode == 429 -> AiErrorKind.RATE_LIMIT
+                        statusCode in 400..499 -> AiErrorKind.CLIENT
+                        statusCode >= 500 -> AiErrorKind.SERVER
+                        else -> AiErrorKind.CLIENT
+                    }
+                    report(kind, "API 响应错误 ${response.code}：$body")
                     return
                 }
                 
@@ -750,6 +811,7 @@ object OpenAIApiService {
                     val toolCalls = parseToolCalls(json, apiType)
                     
                     if (toolCalls.isNotEmpty()) {
+                        if (gen != requestGeneration) return
                         // AI 请求调用工具 → 执行工具 → 追加结果到 messages → 重新请求
                         android.util.Log.d("AIAssistantAPI", "AI 请求调用 ${toolCalls.size} 个工具")
                         
@@ -797,21 +859,25 @@ object OpenAIApiService {
                                 }
                             }
 
+                            // 取消/换模型后旧链路不得继续
+                            if (gen != requestGeneration) return@Thread
                             // 递归下一轮
                             executeToolLoop(
                                 context, baseUrl, apiKey, model, apiType,
                                 thinking, thinkingBudget, messages, tools,
-                                round + 1, maxRounds, onToolCall, onComplete, onError
+                                round + 1, maxRounds, onToolCall, onComplete, onError,
+                                onStructuredError
                             )
                         }.start()
                     } else {
                         // 最终文本回答
+                        if (gen != requestGeneration) return
                         val text = parseResponseStr(responseStr, apiType)
-                        if (text.isEmpty()) onError("解析响应内容为空")
+                        if (text.isEmpty()) report(AiErrorKind.EMPTY, "解析响应内容为空")
                         else onComplete(text)
                     }
                 } catch (e: Exception) {
-                    onError("解析响应失败：${e.message}")
+                    if (gen == requestGeneration) report(AiErrorKind.PARSE, "解析响应失败：${e.message}")
                 }
             }
         })

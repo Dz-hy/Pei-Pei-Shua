@@ -38,20 +38,29 @@ class ShizhengWrongActivity : AppCompatActivity() {
     }
 
     private fun loadWrongQuestions() {
-        val wrongList = ShizhengManager.getWrongQuestionIds()
-            .mapNotNull { ShizhengManager.getQuestion(it) }
-
-        if (wrongList.isEmpty()) {
-            layoutEmpty.visibility = View.VISIBLE
-            rvWrong.visibility = View.GONE
-        } else {
-            layoutEmpty.visibility = View.GONE
-            rvWrong.visibility = View.VISIBLE
-        }
-        rvWrong.adapter = WrongAdapter(wrongList)
+        Thread {
+            val wrongList = ShizhengManager.getWrongQuestionIds()
+                .mapNotNull { ShizhengManager.getQuestion(it) }
+            // 预取每题最近作答记录，避免滚动绑定时逐条查库（N+1）
+            val latestByQuestion = wrongList.associate { it.id to ShizhengManager.getLatestRecord(it.id) }
+            runOnUiThread {
+                if (isDestroyed || isFinishing) return@runOnUiThread
+                if (wrongList.isEmpty()) {
+                    layoutEmpty.visibility = View.VISIBLE
+                    rvWrong.visibility = View.GONE
+                } else {
+                    layoutEmpty.visibility = View.GONE
+                    rvWrong.visibility = View.VISIBLE
+                }
+                rvWrong.adapter = WrongAdapter(wrongList, latestByQuestion)
+            }
+        }.start()
     }
 
-    inner class WrongAdapter(private val list: List<ShizhengQuestion>) :
+    inner class WrongAdapter(
+        private val list: List<ShizhengQuestion>,
+        private val latestByQuestion: Map<Long, ShizhengWrongRecord?>
+    ) :
         RecyclerView.Adapter<WrongAdapter.ViewHolder>() {
 
         inner class ViewHolder(view: View) : RecyclerView.ViewHolder(view) {
@@ -70,7 +79,7 @@ class ShizhengWrongActivity : AppCompatActivity() {
             val item = list[position]
             holder.tvTypeBadge.text = ShizhengQuestionType.label(item.type)
             holder.tvStem.text = item.stem
-            val latest = ShizhengManager.getLatestRecord(item.id)
+            val latest = latestByQuestion[item.id]
             val timeText = latest?.let {
                 SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(it.answeredAt))
             } ?: ""

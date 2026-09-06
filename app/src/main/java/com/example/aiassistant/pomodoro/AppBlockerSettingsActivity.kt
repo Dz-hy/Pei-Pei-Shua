@@ -73,12 +73,24 @@ class AppBlockerSettingsActivity : AppCompatActivity() {
         // 加载该任务的白名单（首次为系统默认，之后为用户实际选择）
         selectedPackages = AppPreferences.getTaskWhitelist(this, taskTitle).toMutableSet()
 
-        allApps = loadInstalledApps()
-        filteredApps = allApps
-
+        // 应用列表与图标解码放后台，数百应用时主线程会明显卡顿
         adapter = AppAdapter()
         rvApps.layoutManager = LinearLayoutManager(this)
         rvApps.adapter = adapter
+
+        Thread {
+            val loaded = loadInstalledApps()
+            runOnUiThread {
+                if (isDestroyed || isFinishing) return@runOnUiThread
+                allApps = loaded
+                val query = etSearch.text?.toString()?.trim()?.lowercase() ?: ""
+                filteredApps = if (query.isEmpty()) allApps
+                else allApps.filter {
+                    it.appName.lowercase().contains(query) || it.packageName.lowercase().contains(query)
+                }
+                adapter.notifyDataSetChanged()
+            }
+        }.start()
 
         etSearch.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}

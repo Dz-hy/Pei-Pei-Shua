@@ -33,10 +33,12 @@ class ShizhengActivity : AppCompatActivity() {
     private lateinit var layoutEmpty: View
 
     private var selectedCategory: String? = null   // null = 全部
+    private var selectedSource: String? = null     // null = 全部来源（求是/组织人事报分开浏览）
     private var searchKeyword: String = ""         // 搜索关键词（300ms 防抖）
     private var searchDebounce: Runnable? = null
     private var allNews: List<NewsArticle> = emptyList()
     private var adapter: NewsAdapter? = null
+    private var loadSeq = 0   // 列表异步加载序号：旧查询后到不覆盖新结果
 
     // 同步进度回调（主线程），onResume 注册 / onPause 注销
     private val syncListener: (String) -> Unit = { updateStatusText(it) }
@@ -75,6 +77,21 @@ class ShizhengActivity : AppCompatActivity() {
         }
 
         rvNews.layoutManager = LinearLayoutManager(this)
+
+        // 来源筛选 chips（求是 / 组织人事报分开）
+        val sourceChipIds = listOf(
+            R.id.chip_src_all to null,
+            R.id.chip_src_qiushi to NewsSources.QIUSHI,
+            R.id.chip_src_org to NewsSources.ORG
+        )
+        for ((id, source) in sourceChipIds) {
+            findViewById<TextView>(id).setOnClickListener {
+                selectedSource = source
+                updateChipStyles(sourceChipIds, selectedSource)
+                loadNews()
+            }
+        }
+        updateChipStyles(sourceChipIds)
 
         // 四大体系筛选 chips
         val chipIds = listOf(
@@ -139,10 +156,10 @@ class ShizhengActivity : AppCompatActivity() {
         ShizhengManager.removeSyncListener(syncListener)
     }
 
-    private fun updateChipStyles(chipIds: List<Pair<Int, String?>>) {
+    private fun updateChipStyles(chipIds: List<Pair<Int, String?>>, selected: String? = selectedCategory) {
         for ((id, category) in chipIds) {
             val chip = findViewById<TextView>(id)
-            if (category == selectedCategory) {
+            if (category == selected) {
                 chip.setTextColor(0xFFFFFFFF.toInt())
                 chip.setBackgroundResource(R.drawable.bg_primary_chip)
             } else {
@@ -153,11 +170,27 @@ class ShizhengActivity : AppCompatActivity() {
     }
 
     private fun loadNews() {
-        // 搜索：标题+正文 LIKE（标题命中优先）；与分类 chips 内存叠加过滤
-        allNews = if (searchKeyword.isNotEmpty()) ShizhengManager.searchNews(searchKeyword)
-        else ShizhengManager.getAllNews()
-        val filtered = if (selectedCategory == null) allNews
-        else allNews.filter { it.categories.contains(selectedCategory) }
+        // 全表读（SELECT * 含全文正文列）与搜索 LIKE 全文扫描都挪后台线程，文章多时筛选/搜索不再卡主线程；
+        // seq 防乱序：连续快速切换筛选时，旧查询后到不覆盖新结果
+        val keyword = searchKeyword
+        val seq = ++loadSeq
+        Thread {
+            val loaded = if (keyword.isNotEmpty()) ShizhengManager.searchNews(keyword)
+            else ShizhengManager.getAllNews()
+            runOnUiThread {
+                if (isFinishing || isDestroyed || seq != loadSeq) return@runOnUiThread
+                applyNews(loaded)
+            }
+        }.start()
+    }
+
+    /** 内存过滤（来源/分类）+ 列表渲染；Adapter 复用而非重建，保留滚动位置 */
+    private fun applyNews(loaded: List<NewsArticle>) {
+        allNews = loaded
+        var filtered = if (selectedSource == null) allNews
+        else allNews.filter { it.source == selectedSource }
+        filtered = if (selectedCategory == null) filtered
+        else filtered.filter { it.categories.contains(selectedCategory) }
 
         if (filtered.isEmpty()) {
             layoutEmpty.visibility = View.VISIBLE
@@ -172,14 +205,38 @@ class ShizhengActivity : AppCompatActivity() {
                 if (searchKeyword.isNotEmpty()) "搜索「$searchKeyword」共 ${filtered.size} 条结果"
                 else "暂无时政新闻\n点击右上角刷新抓取"
         }
-        adapter = NewsAdapter(filtered)
-        rvNews.adapter = adapter
+        if (adapter == null) {
+            adapter = NewsAdapter(filtered)
+            rvNews.adapter = adapter
+        } else {
+            adapter?.setData(filtered)
+        }
     }
 
     private fun updateStatusText(liveMessage: String) {
+        // 题数/错题数/未分类数是 3-4 个 COUNT 查询，挪后台避免每次回本页都卡主线程
+        Thread {
+            val qCount = ShizhengManager.questionCount()
+            val wCount = ShizhengManager.wrongCount()
+            val lastSync = ShizhengManager.lastSyncText()
+            val pending = ShizhengManager.unclassifiedCount()
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                renderStatusText(qCount, wCount, lastSync, pending, liveMessage)
+            }
+        }.start()
+    }
+
+    private fun renderStatusText(
+        questionCount: Int,
+        wrongCount: Int,
+        lastSync: String?,
+        pending: Int,
+        liveMessage: String
+    ) {
         val sb = StringBuilder()
-        sb.append("时政题 ${ShizhengManager.questionCount()} 道 · 错题 ${ShizhengManager.wrongCount()} 道")
-        ShizhengManager.lastSyncText()?.let { sb.append(" · 上次同步 $it") }
+        sb.append("时政题 $questionCount 道 · 错题 $wrongCount 道")
+        lastSync?.let { sb.append(" · 上次同步 $it") }
         sb.append("\n")
         sb.append(
             if (ShizhengManager.isAiConfigured()) {
@@ -189,7 +246,6 @@ class ShizhengActivity : AppCompatActivity() {
                 "时政 AI：未配置，点右上角⚙设置（与主体 AI 分开）"
             }
         )
-        val pending = ShizhengManager.unclassifiedCount()
         if (pending > 0) {
             sb.append("\n⚠️ $pending 篇求是文章待 AI 分类出题，点此开始补处理")
         } else if (ShizhengManager.isAiConfigured()) {
@@ -297,8 +353,14 @@ class ShizhengActivity : AppCompatActivity() {
             .show()
     }
 
-    inner class NewsAdapter(private val list: List<NewsArticle>) :
+    inner class NewsAdapter(private var list: List<NewsArticle>) :
         RecyclerView.Adapter<NewsAdapter.ViewHolder>() {
+
+        /** 复用同一 Adapter 刷新数据（保留滚动位置，避免整列表重建闪烁） */
+        fun setData(data: List<NewsArticle>) {
+            list = data
+            notifyDataSetChanged()
+        }
 
         inner class ViewHolder(view: View) : RecyclerView.ViewHolder(view) {
             val tvSourceBadge: TextView = view.findViewById(R.id.tv_source_badge)
@@ -334,10 +396,15 @@ class ShizhengActivity : AppCompatActivity() {
                     .setTitle("删除新闻")
                     .setMessage("确定删除《${item.title.take(20)}…》吗？\n其关联的时政题与作答记录将一并删除。")
                     .setPositiveButton("删除") { _, _ ->
-                        ShizhengManager.deleteNews(item.id)
-                        Toast.makeText(this@ShizhengActivity, "已删除", Toast.LENGTH_SHORT).show()
-                        loadNews()
-                        updateStatusText("")
+                        // 级联删除（文章正文+题目+记录的事务）放后台，避免长文卡主线程
+                        Thread {
+                            ShizhengManager.deleteNews(item.id)
+                            runOnUiThread {
+                                Toast.makeText(this@ShizhengActivity, "已删除", Toast.LENGTH_SHORT).show()
+                                loadNews()
+                                updateStatusText("")
+                            }
+                        }.start()
                     }
                     .setNegativeButton("取消", null)
                     .show()

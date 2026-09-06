@@ -89,6 +89,10 @@ class PracticeActivity : AppCompatActivity() {
     // 当前材料区渲染的 materialId：同组子题共用，切换子题不重载材料（滚动位置保持）
     private var lastMaterialKey: String? = null
 
+    // 翻题渲染缓存：题干/材料 HTML 按题缓存（reflow 正则链与 KaTeX 拼串是主线程重活），翻回旧题零重算
+    private val stemHtmlCache = mutableMapOf<String, Pair<Boolean, String>>()  // 题id → (走KaTeX渲染, html)
+    private val materialHtmlCache = mutableMapOf<String, String>()             // 材料id → 完整 KaTeX 页
+
     // 回看模式：从计划表-做题历史打开往期训练（session_id >= 0），进来即交卷后锁定状态
     private var reviewSessionId = -1L
     private var reviewRecord: PracticeSessionRecord? = null
@@ -130,15 +134,35 @@ class PracticeActivity : AppCompatActivity() {
             override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = arrayOf()
         })
 
+        @Volatile private var appCtx: android.content.Context? = null
+
         private val imageClient: OkHttpClient by lazy {
             val sslContext = javax.net.ssl.SSLContext.getInstance("TLS")
             sslContext.init(null, trustAllCerts, java.security.SecureRandom())
-            OkHttpClient.Builder()
+            val builder = OkHttpClient.Builder()
                 .connectTimeout(15, TimeUnit.SECONDS)
                 .readTimeout(15, TimeUnit.SECONDS)
                 .sslSocketFactory(sslContext.socketFactory, trustAllCerts[0])
                 .hostnameVerifier { _, _ -> true }
-                .build()
+            // 题图磁盘缓存：内存缓存只在进程内有效，磁盘缓存让隔天重做同题也秒出图。
+            // 服务端不给缓存头，网络层统一改写响应头强制缓存（题图 URL 内容不变，安全）
+            appCtx?.let { ctx ->
+                builder.cache(okhttp3.Cache(java.io.File(ctx.cacheDir, "question_images"), 64L * 1024 * 1024))
+                builder.addNetworkInterceptor { chain ->
+                    chain.proceed(chain.request()).newBuilder()
+                        .removeHeader("Pragma")
+                        .header("Cache-Control", "max-age=2592000")
+                        .build()
+                }
+            }
+            builder.build()
+        }
+
+        // 题图内存缓存：翻回旧题立即出图，不再重新下载（上限 1/8 堆内存，足够覆盖整场训练）
+        private val imageMemCache = object : android.util.LruCache<String, android.graphics.Bitmap>(
+            (Runtime.getRuntime().maxMemory() / 8).toInt().coerceAtMost(32 * 1024 * 1024)
+        ) {
+            override fun sizeOf(key: String, value: android.graphics.Bitmap) = value.byteCount
         }
     }
 
@@ -150,6 +174,7 @@ class PracticeActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        Companion.appCtx = applicationContext
         setContentView(R.layout.activity_practice)
 
         reviewSessionId = intent.getLongExtra("review_session_id", -1L)
@@ -205,6 +230,11 @@ class PracticeActivity : AppCompatActivity() {
         setupWebView(wvStem)
         setupWebView(wvMaterial)
 
+        // 题干 WebView 撑高时内容整体平滑过渡（默认布局过渡不含 CHANGING，需手动启用）
+        (svContent.getChildAt(0) as? ViewGroup)?.let { contentRoot ->
+            contentRoot.layoutTransition?.enableTransitionType(android.animation.LayoutTransition.CHANGING)
+        }
+
         setupTextSelection()
     }
 
@@ -230,6 +260,11 @@ class PracticeActivity : AppCompatActivity() {
      */
     @SuppressLint("SetJavaScriptEnabled")
     private fun renderInWebView(webView: WebView, html: String) {
+        webView.loadDataWithBaseURL("file:///android_asset/", buildKatexHtml(html), "text/html", "UTF-8", null)
+    }
+
+    /** 拼 KaTeX 完整页（KaTeX 资源插值 + 协议相对 URL 修复）；结果可入渲染缓存直接复用 */
+    private fun buildKatexHtml(html: String): String {
         val (katexCss, katexJs, autoRenderJs) = katexAssets
 
         // 将协议相对 URL //xxx 转换为 https://xxx，因为基础 URL 是 file:/// 会导致解析错误
@@ -272,7 +307,43 @@ try {
 </body>
 </html>""".trimIndent()
 
-        webView.loadDataWithBaseURL("file:///android_asset/", fullHtml, "text/html", "UTF-8", null)
+        return fullHtml
+    }
+
+    /**
+     * 材料归一：转换器把 PDF 视觉行存成硬换行（<br>），数字两侧残留排版空格，
+     * 导致"宋4/人组成""3 支"这类断行与空格。与解析同一套归一：
+     * <br>→换行 → squeeze+reflow 合并段落 → 换行→<br>（图片标签行保留不合并）
+     */
+    private fun normalizeMaterial(content: String): String {
+        val withNewlines = content.replace(Regex("<br\\s*/?>", RegexOption.IGNORE_CASE), "\n")
+        return TextFlow.normalize(withNewlines).replace("\n", "<br>")
+    }
+
+    /** 题干 HTML（按题缓存）：true=KaTeX 片段走 renderInWebView；false=纯文本完整页直载 */
+    private fun buildStemHtml(question: Question): Pair<Boolean, String> {
+        // 多选题角标：答案长度>1 即多选（判断题 A正确/B错误 是单选不标）
+        val multiBadge = if (question.answer.length > 1)
+            "<span style=\"background:#F8E8C8;color:#8A6D3B;border-radius:4px;" +
+                "padding:2px 8px;font-size:12px;font-weight:bold;display:inline-block;margin-bottom:6px;\">多选题</span><br>"
+            else ""
+        if (question.stemHtml.isNotEmpty()) return true to multiBadge + TextFlow.squeezeSpaces(question.stemHtml)
+
+        // 纯文本 + 图片：构建简单 HTML，不用 KaTeX
+        // 换行归一：PDF 逐行硬换行合并成段落（条目/空行保留），WebView 里 \n 需转 <br>
+        val stemText = TextFlow.reflow(formatBlanks(TextFlow.squeezeSpaces(question.stem)))
+            .replace("\n", "<br>")
+        val imageHtml = question.titleImages
+            .filter { !it.contains("formulas") && !it.contains("latex=") }
+            .joinToString("") { """<img src="$it" style="max-width:100%;height:auto;margin:8px 0;">""" }
+        val simpleHtml = """
+            <html><head><meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <style>body{font-family:sans-serif;font-size:16px;color:#212121;line-height:1.6;margin:0;padding:8px;}
+            img{max-width:100%;height:auto;display:block;margin:8px 0;}</style>
+            </head><body>$multiBadge<p>$stemText</p>$imageHtml</body></html>
+        """.trimIndent()
+        return false to simpleHtml
     }
 
     /**
@@ -378,11 +449,63 @@ try {
         showQuestion(0)
     }
 
-    /** 回看模式：从训练快照重建整场记录，进来即交卷后状态（与刚完成训练时一致） */
+    /** 回看模式：从训练快照重建整场记录，进来即交卷后状态（与刚完成训练时一致）。
+     *  读库与解析都挪后台：v1 全量快照可达数 MB；v2 极简快照按题 id 从题库现取内容 */
     private fun loadReviewSession() {
-        val rec = QuestionBankManager.getPracticeSession(reviewSessionId)
-        if (rec == null) {
-            Toast.makeText(this, "训练记录不存在", Toast.LENGTH_SHORT).show()
+        val sessionId = reviewSessionId
+        Thread {
+            val rec = QuestionBankManager.getPracticeSession(sessionId)
+            if (rec == null) {
+                runOnUiThread {
+                    if (destroyed || isFinishing) return@runOnUiThread
+                    Toast.makeText(this, "训练记录不存在", Toast.LENGTH_SHORT).show()
+                    finish()
+                }
+                return@Thread
+            }
+            val json = rec.questionsJson
+            var missingNote = ""
+            val qs: List<Question>
+            val sels: IntArray
+            val res: Array<Boolean?>
+            if (PracticeSessionRecord.isSlimSnapshot(json)) {
+                // v2：题面从题库现取；个别题已被删除则跳过（作答统计仍以快照列为准）
+                val items = PracticeSessionRecord.parseSlimItems(json)
+                val fetched = items.mapNotNull { item ->
+                    QuestionBankManager.getQuestionById(item.id)?.let { q -> Pair(item, q) }
+                }
+                qs = fetched.map { it.second }
+                sels = fetched.map { it.first.selected }.toIntArray()
+                res = fetched.map { it.first.result }.toTypedArray()
+                val skipped = items.size - fetched.size
+                if (skipped > 0) missingNote = "有 ${skipped} 题已不在题库，回看中已跳过"
+            } else {
+                qs = PracticeSessionRecord.parseQuestions(json)
+                sels = PracticeSessionRecord.parseSelected(json)
+                res = PracticeSessionRecord.parseResults(json)
+            }
+            runOnUiThread {
+                if (destroyed || isFinishing) return@runOnUiThread
+                applyReviewSession(rec, qs, sels, res, missingNote)
+            }
+        }.start()
+    }
+
+    /** 主线程应用回看快照：空/损坏提示退出，正常则进入交卷后回看状态 */
+    private fun applyReviewSession(
+        rec: PracticeSessionRecord,
+        qs: List<Question>,
+        sels: IntArray,
+        res: Array<Boolean?>,
+        missingNote: String
+    ) {
+        if (qs.isEmpty() || sels.size != qs.size || res.size != qs.size) {
+            Toast.makeText(
+                this,
+                if (PracticeSessionRecord.isSlimSnapshot(rec.questionsJson) && qs.isEmpty()) "这批题目已不在题库中，无法回看"
+                else "训练记录已损坏",
+                Toast.LENGTH_SHORT
+            ).show()
             finish()
             return
         }
@@ -393,15 +516,9 @@ try {
         rateMin = rec.rateMin
         rateMax = rec.rateMax
         tvTitle.text = moduleName
-
-        questions = PracticeSessionRecord.parseQuestions(rec.questionsJson)
-        selectedOptions = PracticeSessionRecord.parseSelected(rec.questionsJson)
-        results = PracticeSessionRecord.parseResults(rec.questionsJson)
-        if (questions.isEmpty() || selectedOptions.size != questions.size || results.size != questions.size) {
-            Toast.makeText(this, "训练记录已损坏", Toast.LENGTH_SHORT).show()
-            finish()
-            return
-        }
+        questions = qs
+        selectedOptions = sels
+        results = res
         correctCount = rec.correctCount
         wrongCount = rec.wrongCount
         lastElapsedMs = rec.elapsedMs
@@ -410,6 +527,7 @@ try {
 
         showQuestion(0)
         showAnswerCard()
+        if (missingNote.isNotEmpty()) Toast.makeText(this, missingNote, Toast.LENGTH_LONG).show()
     }
 
     private fun setupListeners() {
@@ -447,7 +565,13 @@ try {
             if (lastMaterialKey != question.materialId) {
                 lastMaterialKey = question.materialId
                 wvMaterial.visibility = View.VISIBLE
-                renderInWebView(wvMaterial, question.materialContent)
+                wvMaterial.loadDataWithBaseURL(
+                    "file:///android_asset/",
+                    materialHtmlCache.getOrPut(question.materialId) {
+                        buildKatexHtml(normalizeMaterial(question.materialContent))
+                    },
+                    "text/html", "UTF-8", null
+                )
                 // 换组：新材料新题号，题目区滚回顶部
                 svContent.post { svContent.scrollTo(0, 0) }
             }
@@ -464,47 +588,38 @@ try {
             tvKnowledgePoint.visibility = View.GONE
         }
 
-        // 题干 - 有 HTML 时用 WebView 渲染，纯文本 + 图片也用 WebView
+        // 题干 - 有 HTML 时用 WebView 渲染，纯文本 + 图片也用 WebView；构建结果按题缓存（翻回旧题零重算）
         layoutStemImages.removeAllViews()
         layoutStemImages.visibility = View.GONE
-        // 多选题角标：答案长度>1 即多选（判断题 A正确/B错误 是单选不标）
-        val multiBadge = if (question.answer.length > 1)
-            "<span style=\"background:#F8E8C8;color:#8A6D3B;border-radius:4px;" +
-                "padding:2px 8px;font-size:12px;font-weight:bold;display:inline-block;margin-bottom:6px;\">多选题</span><br>"
-            else ""
-        if (question.stemHtml.isNotEmpty()) {
+        val (useKatex, stemFinalHtml) = stemHtmlCache.getOrPut(question.id) { buildStemHtml(question) }
+        if (useKatex) {
             wvStem.visibility = View.VISIBLE
-            renderInWebView(wvStem, multiBadge + question.stemHtml)
+            renderInWebView(wvStem, stemFinalHtml)
         } else {
-            // 纯文本 + 图片：构建简单 HTML，不用 KaTeX
-            val stemText = formatBlanks(question.stem)
-            val imageHtml = question.titleImages
-                .filter { !it.contains("formulas") && !it.contains("latex=") }
-                .joinToString("") { """<img src="$it" style="max-width:100%;height:auto;margin:8px 0;">""" }
-            val simpleHtml = """
-                <html><head><meta charset="UTF-8">
-                <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                <style>body{font-family:sans-serif;font-size:16px;color:#212121;line-height:1.6;margin:0;padding:8px;}
-                img{max-width:100%;height:auto;display:block;margin:8px 0;}</style>
-                </head><body>$multiBadge<p>$stemText</p>$imageHtml</body></html>
-            """.trimIndent()
             wvStem.visibility = View.VISIBLE
-            wvStem.loadDataWithBaseURL("https://fb.fenbike.cn/", simpleHtml, "text/html", "UTF-8", null)
+            wvStem.loadDataWithBaseURL("https://fb.fenbike.cn/", stemFinalHtml, "text/html", "UTF-8", null)
         }
 
         showOptions(question.options)
 
         if (submitted) {
-            // 交卷后回看：显示本题对错与解析
+            // 交卷后回看：显示本题对错与解析；批注查看态下点笔迹可直接继续手写
+            hw.setTapToEditEnabled(true)
             applyResult(question, selectedOptions[index])
             btnAiAnalysis.visibility = View.VISIBLE
         } else {
+            // 做题中：点击必须穿透到选项行，不开"点笔迹进编辑"
+            hw.setTapToEditEnabled(false)
             cardAnswer.visibility = View.GONE
             btnAiAnalysis.visibility = View.GONE
             restoreSelection()
         }
 
         updateProgress()
+
+        // 翻题过渡：内容整体淡入，消掉整页重建的生硬感
+        svContent.alpha = 0.4f
+        svContent.animate().alpha(1f).setDuration(160).start()
 
         btnPrev.isEnabled = index > 0
         btnNext.text = when {
@@ -591,14 +706,13 @@ try {
                 }
             } else if (option.text.isNotEmpty()) {
                 tvText.visibility = View.VISIBLE
-                tvText.text = option.text
+                tvText.text = TextFlow.squeezeSpaces(option.text)  // 清数字/英文两侧排版残留空格
             } else {
                 tvText.visibility = View.GONE
             }
 
             if (option.images.isNotEmpty()) {
                 ivImage.visibility = View.VISIBLE
-                ivImage.setImageResource(android.R.drawable.ic_menu_gallery)
                 loadImage(option.images[0], ivImage)
             } else {
                 ivImage.visibility = View.GONE
@@ -640,6 +754,17 @@ try {
         val finalUrl = if (url.contains("fontSize=") && url.contains("formulas")) {
             url.replace(Regex("fontSize=\\d+"), "fontSize=40")
         } else url
+        // 绑定校验：异步回调回来时若视图已被别的图复用/题已切走，不再贴图
+        imageView.tag = finalUrl
+
+        // 内存缓存命中：翻回旧题立即出图，不再走网络
+        imageMemCache.get(finalUrl)?.let { bmp ->
+            imageView.setImageBitmap(bmp)
+            imageView.visibility = View.VISIBLE
+            return
+        }
+        imageView.setImageResource(R.drawable.bg_image_placeholder)
+
         val request = Request.Builder().url(finalUrl)
             .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36")
             .header("Referer", "https://www.fenbike.cn/")
@@ -651,9 +776,9 @@ try {
                     handler.postDelayed({ loadImage(url, imageView, isStemImage, retryCount + 1) }, 1000L * (retryCount + 1))
                 } else {
                     runOnUiThread {
-                        if (destroyed) return@runOnUiThread
+                        if (destroyed || imageView.tag != finalUrl) return@runOnUiThread
                         if (isStemImage) {
-                            imageView.setImageResource(android.R.drawable.ic_menu_gallery)
+                            imageView.setImageResource(R.drawable.bg_image_placeholder)
                             imageView.visibility = View.VISIBLE
                         } else {
                             imageView.visibility = View.GONE
@@ -665,12 +790,14 @@ try {
             override fun onResponse(call: Call, response: Response) {
                 if (destroyed) { response.close(); return }
                 if (!response.isSuccessful) {
+                    response.close()
                     if (retryCount < 2) {
                         handler.postDelayed({ loadImage(url, imageView, isStemImage, retryCount + 1) }, 1000L * (retryCount + 1))
                     } else {
                         runOnUiThread {
+                            if (imageView.tag != finalUrl) return@runOnUiThread
                             if (isStemImage) {
-                                imageView.setImageResource(android.R.drawable.ic_menu_gallery)
+                                imageView.setImageResource(R.drawable.bg_image_placeholder)
                                 imageView.visibility = View.VISIBLE
                             } else {
                                 imageView.visibility = View.GONE
@@ -696,13 +823,15 @@ try {
 
                     val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size,
                         BitmapFactory.Options().apply { inSampleSize = sampleSize })
+                    if (bitmap != null) imageMemCache.put(finalUrl, bitmap)
 
                     runOnUiThread {
+                        if (destroyed || imageView.tag != finalUrl) return@runOnUiThread
                         if (bitmap != null) {
                             imageView.setImageBitmap(bitmap)
                             imageView.visibility = View.VISIBLE
                         } else if (isStemImage) {
-                            imageView.setImageResource(android.R.drawable.ic_menu_gallery)
+                            imageView.setImageResource(R.drawable.bg_image_placeholder)
                             imageView.visibility = View.VISIBLE
                         } else {
                             imageView.visibility = View.GONE
@@ -710,8 +839,9 @@ try {
                     }
                 } else {
                     runOnUiThread {
+                        if (destroyed || imageView.tag != finalUrl) return@runOnUiThread
                         if (isStemImage) {
-                            imageView.setImageResource(android.R.drawable.ic_menu_gallery)
+                            imageView.setImageResource(R.drawable.bg_image_placeholder)
                             imageView.visibility = View.VISIBLE
                         } else {
                             imageView.visibility = View.GONE
@@ -739,6 +869,13 @@ try {
             selectedOptions[currentIndex] = index
             paintOptionBackground(old, selected = false)
             paintOptionBackground(index, selected = true)
+        }
+
+        // 选中反馈：轻微缩放弹跳
+        layoutOptions.getChildAt(index)?.let { v ->
+            v.animate().scaleX(1.03f).scaleY(1.03f).setDuration(70).withEndAction {
+                v.animate().scaleX(1f).scaleY(1f).setDuration(70).start()
+            }.start()
         }
     }
 
@@ -804,27 +941,51 @@ try {
             }.start()
         }
 
-        // 记录整场训练快照（计划表-做题历史；只记完成训练，中途退出不记）
-        val finishedAt = System.currentTimeMillis()
-        QuestionBankManager.savePracticeSession(PracticeSessionRecord(
-            finishedAt = finishedAt,
-            dateStr = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault()).format(java.util.Date(finishedAt)),
-            moduleId = if (isWrongPractice) "" else moduleId,
-            moduleName = moduleName.ifBlank { if (isWrongPractice) "错题重练" else "练习" },
-            isWrongPractice = isWrongPractice,
-            questionCount = questions.size,
-            correctCount = correctCount,
-            wrongCount = wrongCount,
-            elapsedMs = lastElapsedMs,
-            rateMin = rateMin,
-            rateMax = rateMax,
-            questionsJson = PracticeSessionRecord.snapshotToJson(questions, selectedOptions, results)
-        ))
+        // 记录整场训练快照（计划表-做题历史；只记完成训练，中途退出不记）。
+        // 主线程先定格不可变副本（题列表/作答/判分），后台队列只做 JSON 序列化，
+        // 避免交卷后立刻"再来一组"重置数组时后台读到混搭状态
+        val snapQuestions = questions.toList()
+        val snapSelected = selectedOptions.copyOf()
+        val snapResults = results.copyOf()
+        val snapCorrect = correctCount
+        val snapWrong = wrongCount
+        val snapElapsed = lastElapsedMs
+        val snapModuleId = if (isWrongPractice) "" else moduleId
+        val snapModuleName = moduleName.ifBlank { if (isWrongPractice) "错题重练" else "练习" }
+        val snapIsWrong = isWrongPractice
+        val snapRateMin = rateMin
+        val snapRateMax = rateMax
+        QuestionBankManager.savePracticeSession {
+            val finishedAt = System.currentTimeMillis()
+            PracticeSessionRecord(
+                finishedAt = finishedAt,
+                dateStr = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault()).format(java.util.Date(finishedAt)),
+                moduleId = snapModuleId,
+                moduleName = snapModuleName,
+                isWrongPractice = snapIsWrong,
+                questionCount = snapQuestions.size,
+                correctCount = snapCorrect,
+                wrongCount = snapWrong,
+                elapsedMs = snapElapsed,
+                rateMin = snapRateMin,
+                rateMax = snapRateMax,
+                questionsJson = PracticeSessionRecord.snapshotToJson(
+                    snapQuestions, snapSelected, snapResults,
+                    slim = !snapIsWrong   // 题库来源只存 id+作答（解析 base64 图是快照膨胀主因）；错题重练存全量
+                )
+            )
+        }
 
         applyResult(questions[currentIndex], selectedOptions[currentIndex])
         updateProgress()
 
+        // 交卷瞬间反馈：选项区轻微明暗呼吸，突出对错色块
+        layoutOptions.animate().alpha(0.55f).setDuration(80).withEndAction {
+            layoutOptions.animate().alpha(1f).setDuration(220).start()
+        }.start()
+
         // 交卷后解除防剧透：显示当前题的手写批注（可在其上继续手写）
+        hw.setTapToEditEnabled(true)
         hw.revealAnnotation(questions[currentIndex].id)
     }
 
@@ -1037,6 +1198,14 @@ try {
         dialog.show()
         dialog.capDialogWidth()
         answerCardDialog = dialog
+
+        // 报告/答题卡弹出：缩放+淡入，替代生硬瞬现
+        dialog.window?.decorView?.apply {
+            alpha = 0f
+            scaleX = 0.94f
+            scaleY = 0.94f
+            animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(200).start()
+        }
 
         val btnRestart = dialogView.findViewById<MaterialButton>(R.id.btn_card_restart)
         // 错题重练的回看没有"同分类再来一组"语义，隐藏该按钮
@@ -1285,6 +1454,8 @@ try {
         }
         activeOptionWebViews.clear()
         optionWebViewPool.clear()
+        stemHtmlCache.clear()
+        materialHtmlCache.clear()
         wvStem.destroy()
         wvMaterial.destroy()
         QuestionBankManager.removeOnReadyListener(readyListener)

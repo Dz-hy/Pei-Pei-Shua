@@ -156,6 +156,9 @@ class ScreenCaptureService : Service() {
     // ── 请求 ID（丢弃过期回调） ──────────────────────────────────────
     @Volatile internal var currentRequestId: Long = 0
 
+    // ── AI 故障转移执行器（文字/视觉分析管道共用当前运行链） ──────────
+    private var aiFailover: AiFailoverExecutor? = null
+
     // ── 渲染失败重试 ──────────────────────────────────────────────────
     @Volatile private var lastOcrText: String? = null
     @Volatile private var lastImageBase64: String? = null
@@ -336,6 +339,7 @@ class ScreenCaptureService : Service() {
         removeResultCard()
         releaseMediaProjection()
         captureThread?.quitSafely()
+        aiFailover?.cancel()
         CloudOcrClient.cancelCurrentRequest()
         OpenAIApiService.cancelCurrentRequest()
         getSharedPreferences("ai_assistant_prefs", MODE_PRIVATE)
@@ -766,6 +770,12 @@ class ScreenCaptureService : Service() {
                             AppPreferences.getCloudOcrUrl(this@ScreenCaptureService)
                         val ocrToken = AppPreferences.getCloudOcrToken(this@ScreenCaptureService)
 
+                        if (ocrUrl.isBlank()) {
+                            recycleInput()
+                            updateResultCard("❌ 未配置云端 OCR 地址，请在设置-OCR模型中填写")
+                            return@post
+                        }
+
                         if (ocrToken.isBlank()) {
                             recycleInput()
                             updateResultCard("❌ 未配置云端 OCR Token，请在设置中填写")
@@ -885,43 +895,28 @@ class ScreenCaptureService : Service() {
     }
 
     private fun buildCandidateModels(isVisionMode: Boolean): List<AiModelConfig> {
-        val activeModel = getActiveModelConfig()
-        val list = mutableListOf<AiModelConfig>()
-        
-        // 1. 首选当前活跃模型
-        if (activeModel != null) {
-            list.add(activeModel)
-        }
-        
-        // 2. 依次把所有其他模型作为后备备用模型
-        val others = ModelManager.allModels.filter { it.id != activeModel?.id }
-        if (isVisionMode) {
-            list.addAll(others.filter { it.isVision })
-            list.addAll(others.filter { !it.isVision })
-        } else {
-            list.addAll(others)
-        }
-        
-        // 3. 兜底保障
-        if (list.isEmpty()) {
-            list.add(
-                AiModelConfig(
-                    name = "默认备用模型",
-                    baseUrl = AppPreferences.getApiBaseUrl(this),
-                    apiKey = AppPreferences.getApiKey(this),
-                    model = AppPreferences.getApiModel(this)
-                )
+        // 候选链构造统一下沉到 AiFailoverExecutor：活跃模型优先 + 其余依次兜底，视觉模式识图模型前置
+        val chain = AiFailoverExecutor.buildChain(
+            preferredId = AppPreferences.getActiveModelId(this),
+            isVision = isVisionMode
+        )
+        if (chain.isNotEmpty()) return chain
+
+        // 兜底保障
+        return listOf(
+            AiModelConfig(
+                name = "默认备用模型",
+                baseUrl = AppPreferences.getApiBaseUrl(this),
+                apiKey = AppPreferences.getApiKey(this),
+                model = AppPreferences.getApiModel(this)
             )
-        }
-        return list
+        )
     }
 
     internal fun requestAiAnalysis(
-        ocrText: String, 
-        startTime: Long, 
-        requestId: Long,
-        modelIndex: Int = 0,
-        candidates: List<AiModelConfig> = emptyList()
+        ocrText: String,
+        startTime: Long,
+        requestId: Long
     ) {
         if (isDictOcrMode) {
             isDictOcrMode = false
@@ -934,116 +929,208 @@ class ScreenCaptureService : Service() {
         }
 
         lastOcrText = ocrText
-        val questionType = AppPreferences.getCurrentQuestionType(this)
-        var prompt = AppPreferences.getPromptForType(this, questionType)
+        aiFailover?.cancel()
 
-        // 题库匹配
+        // 题库 FTS+LCS 全库检索放后台线程执行（入口含主线程：重新分析按钮/渲染失败重试），
+        // 完成后回主线程启动故障转移链
         Log.i(TAG, "题库查询: 文本前80字=${ocrText.take(80)}")
-        val bankMatch = QuestionBankManager.search(ocrText)
-        if (bankMatch != null) {
-            Log.i(TAG, "题库命中: ${bankMatch.id}, 答案=${bankMatch.answer}")
-        } else {
-            Log.i(TAG, "题库未命中 (已加载=${QuestionBankManager.isLoaded()}, 文本长度=${ocrText.length})")
+        QuestionBankManager.searchAsync(ocrText) { bankMatch ->
+            if (currentRequestId != requestId) return@searchAsync
+            mainHandler.post {
+                if (bankMatch != null) {
+                    Log.i(TAG, "题库命中: ${bankMatch.id}, 答案=${bankMatch.answer}")
+                } else {
+                    Log.i(TAG, "题库未命中 (已加载=${QuestionBankManager.isLoaded()}, 文本长度=${ocrText.length})")
+                }
+                lastBankMatch = bankMatch
+                startTextAnalysis(ocrText, startTime, requestId, bankMatch)
+            }
         }
-        lastBankMatch = bankMatch
+    }
 
-        // 题库原题是否含有图片判定
+    /** 文字解析管道：题库检索完成后在主线程启动 AI 故障转移链 */
+    private fun startTextAnalysis(
+        ocrText: String,
+        startTime: Long,
+        requestId: Long,
+        bankMatch: com.example.aiassistant.questionbank.Question?
+    ) {
+        val questionType = AppPreferences.getCurrentQuestionType(this)
+        val useTools = AppPreferences.isToolCallingEnabled(this) &&
+                com.example.aiassistant.skills.ToolRegistry.hasTools()
+        val toolsArray = if (useTools)
+            com.example.aiassistant.skills.ToolRegistry.toOpenAiToolsArrayForType(questionType)
+        else null
+
+        val modelList = buildCandidateModels(isVisionMode = false)
+        primaryModelError = null
+        usedToolsInCurrentRequest.clear()
+
+        // 题库原题含图片：升级为多模态识图管道（链前决策，换视觉优先链）
         val hasBankImage = bankMatch != null && (
-            bankMatch.stem.contains("<img") || 
-            bankMatch.stem.contains("![") || 
-            bankMatch.analysis.contains("<img") || 
+            bankMatch.stem.contains("<img") ||
+            bankMatch.stem.contains("![") ||
+            bankMatch.analysis.contains("<img") ||
             bankMatch.analysis.contains("![") ||
             (bankMatch.stem.contains("http") && (bankMatch.stem.contains(".png") || bankMatch.stem.contains(".jpg") || bankMatch.stem.contains(".jpeg") || bankMatch.stem.contains(".webp")))
         )
-
-        val modelList = if (candidates.isEmpty()) buildCandidateModels(isVisionMode = false) else candidates
-        val currentModel = modelList.getOrNull(modelIndex)
-
-        if (modelIndex == 0) {
-            primaryModelError = null
-            usedToolsInCurrentRequest.clear()
+        if (hasBankImage) {
+            val visionChain = buildCandidateModels(isVisionMode = true)
+            if (visionChain.none { it.isVision }) {
+                Log.d(TAG, "题库命中含图片，但模型链中无识图模型")
+                hideBallProgress()
+                updateResultCard(
+                    "⚠️ 题库中该题包含图片信息，但当前模型链中所有模型均不支持【多模态识图】能力。\n\n" +
+                    "💡 请在设置中切换或导入支持识图的模型（如 gpt-4o 或 Gemini 等）。",
+                    isAiResponse = false
+                )
+                isCapturing = false
+                cancelCaptureTimeout()
+                return
+            }
+            val jpegBase64 = lastImageBase64
+            if (jpegBase64 != null) {
+                Log.d(TAG, "题库命中且包含图片！自动升级为多模态识图管道")
+                requestVisionAnalysis(jpegBase64, startTime, requestId, visionChain)
+                return
+            }
+            // 无截图 base64 可用：退回文字解析
         }
 
-        if (currentModel == null) {
+        if (modelList.isEmpty()) {
             Log.e(TAG, "模型故障转移链已尝试完毕，全部失败")
             updateResultCard("❌ 所有可用 AI 模型均请求失败，最后重试已终止。")
             hideBallProgress()
             return
         }
 
-        if (hasBankImage) {
-            Log.d(TAG, "题库命中且包含图片！自动升级为多模态识图管道")
-            if (!currentModel.isVision) {
-                var foundVisionModel = false
-                for (i in modelIndex until modelList.size) {
-                    if (modelList[i].isVision) {
-                        Log.d(TAG, "当前模型「${currentModel.name}」不支持识图，自动跳跃至「${modelList[i].name}」发起识图请求")
-                        val jpegBase64 = lastImageBase64
-                        if (jpegBase64 != null) {
-                            requestVisionAnalysis(jpegBase64, startTime, requestId, i, modelList)
-                            return
-                        }
-                        foundVisionModel = true
-                        break
-                    }
-                }
-                if (!foundVisionModel) {
-                    hideBallProgress()
-                    updateResultCard(
-                        "⚠️ 题库中该题包含图片信息，但当前模型链中所有模型均不支持【多模态识图】能力。\n\n" +
-                        "💡 请在设置中切换或导入支持识图的模型（如 gpt-4o 或 Gemini 等）。",
-                        isAiResponse = false
-                    )
-                    isCapturing = false
-                    cancelCaptureTimeout()
-                    return
+        val prompt = buildTextAnalysisPrompt(bankMatch, useTools)
+        val userMsg = if (bankMatch != null)
+            "请基于系统提示中的题库数据，按照要求进行详细分析，输出标准JSON格式。"
+        else null
+        val ocrTime = System.currentTimeMillis() - startTime
+
+        fun chainFailed(lastError: String) {
+            hideBallProgress()
+            if (isSilentCapture) {
+                isCapturing = false
+                isSilentCapture = false
+                cancelCaptureTimeout()
+                mainHandler.post {
+                    reattachSmallBall()
+                    Toast.makeText(this@ScreenCaptureService, "静默搜题失败：$lastError", Toast.LENGTH_SHORT).show()
                 }
             } else {
-                val jpegBase64 = lastImageBase64
-                if (jpegBase64 != null) {
-                    requestVisionAnalysis(jpegBase64, startTime, requestId, modelIndex, modelList)
-                    return
-                }
+                Log.e(TAG, "AI请求失败: $lastError")
+                updateResultCard("❌ 所有模型均请求失败，最后错误：$lastError")
             }
         }
 
-        val useTools = AppPreferences.isToolCallingEnabled(this) &&
-                com.example.aiassistant.skills.ToolRegistry.hasTools()
-
-        if (useTools) {
-            prompt = getUniversalAgentPrompt()
-        }
-
-        // 命中题库：在原始prompt前注入题库数据，去掉OCR校对部分
-        if (bankMatch != null) {
-            val bankContext = buildString {
-                appendLine("=== 题库已收录此题，以下为题库数据（正确答案已确定） ===")
-                appendLine()
-                appendLine("【题库题目】")
-                appendLine(bankMatch.stem)
-                appendLine()
-                if (bankMatch.options.isNotEmpty()) {
-                    appendLine("【题库选项】")
-                    for ((i, opt) in bankMatch.options.withIndex()) {
-                        appendLine("${'A' + i}. ${opt.text}")
+        // 故障转移策略（瞬时错误同模型退避重试、可切换错误逐个换模型、客户端错误终止）
+        // 统一由 AiFailoverExecutor 驱动，与错题匹配/时政等调用点共用同一实现
+        aiFailover = AiFailoverExecutor.execute(
+            candidates = modelList,
+            request = { config, onDone, onErr ->
+                val label = if (config === modelList.first()) config.name else "【备用】${config.name}"
+                showLoading("⚡ AI 正在深度解析中...\n当前模型: $label")
+                attemptTextAnalysis(config, ocrText, prompt, userMsg, useTools, toolsArray, onDone, onErr)
+            },
+            onComplete = { fullText ->
+                if (currentRequestId == requestId) {
+                    val totalTime = System.currentTimeMillis() - startTime
+                    Log.d(TAG, "总耗时: ${totalTime}ms (OCR: ${ocrTime}ms, AI: ${totalTime - ocrTime}ms)")
+                    hideBallProgress()
+                    if (isSilentCapture) {
+                        silentSearchText = fullText
+                        silentSearchReady = true
+                        isCapturing = false
+                        isSilentCapture = false
+                        cancelCaptureTimeout()
+                        mainHandler.post { reattachSmallBall() }
+                    } else {
+                        performJsonValidationAndRepair(fullText, requestId, startTime, 0, isVision = false)
                     }
-                    appendLine()
                 }
-                appendLine("【题库正确答案】${bankMatch.answer}")
-                appendLine()
-                if (bankMatch.analysis.isNotBlank()) {
-                    appendLine("【题库参考解析】")
-                    appendLine(bankMatch.analysis)
-                    appendLine()
+            },
+            onError = { lastError ->
+                if (currentRequestId == requestId) chainFailed(lastError)
+            },
+            onModelAttemptFailed = { failed, kind, msg ->
+                if (currentRequestId == requestId) {
+                    if (failed === modelList.first()) {
+                        primaryModelError = "主模型「${failed.name}」请求失败：$msg"
+                    }
+                    Log.w(TAG, "模型「${failed.name}」请求失败($kind): $msg")
+                    showLoading("⚠️ 请求失败，正在重试…\n当前模型: ${failed.name}")
                 }
-                appendLine("=== 以上为题库数据，请以此为基础进行分析 ===")
-                appendLine("特别注意：")
-                appendLine("1. 正确答案已确定为 ${bankMatch.answer}，请围绕该答案展开分析，对每个选项逐一说明选或不选的理由。")
-                appendLine("2. 请在JSON中额外输出 keywords 数组，列出题目中的3-8个关键词/关键语句（用于在题目中标红高亮）。")
-                appendLine()
+            },
+            onModelSwitched = { failed, reason, next ->
+                if (currentRequestId == requestId) {
+                    mainHandler.post {
+                        Toast.makeText(this@ScreenCaptureService, "⚠️ 主模型「${failed.name}」失败: ${cleanErrorForToast(reason)}\n已自动切换备用「${next.name}」", Toast.LENGTH_LONG).show()
+                    }
+                }
             }
-            if (useTools) {
-                prompt = bankContext + prompt
+        )
+    }
+
+    /** 模型切换 Toast 的错误文案清洗 */
+    private fun cleanErrorForToast(error: String): String = when {
+        error.contains("401", ignoreCase = true) || error.contains("Unauthorized", ignoreCase = true) -> "API Key 校验未通过"
+        error.contains("timeout", ignoreCase = true) || error.contains("ConnectException", ignoreCase = true) -> "连接超时，请确认是否需要开启科学网络"
+        error.contains("403", ignoreCase = true) -> "无权限访问 (403)，请确认模型权限与额度"
+        error.contains("429", ignoreCase = true) -> "请求过于频繁 (429)"
+        else -> error.take(60)
+    }
+
+    /** 题库命中注入段（文字/视觉管道共用，口径略有差异） */
+    private fun buildBankContext(bankMatch: com.example.aiassistant.questionbank.Question, forVision: Boolean): String = buildString {
+        appendLine("=== 题库已收录此题，以下为题库数据（正确答案已确定） ===")
+        appendLine()
+        appendLine("【题库题目】")
+        appendLine(bankMatch.stem)
+        appendLine()
+        if (bankMatch.options.isNotEmpty()) {
+            appendLine("【题库选项】")
+            for ((i, opt) in bankMatch.options.withIndex()) {
+                appendLine("${'A' + i}. ${opt.text}")
+            }
+            appendLine()
+        }
+        appendLine("【题库正确答案】${bankMatch.answer}")
+        appendLine()
+        if (bankMatch.analysis.isNotBlank()) {
+            appendLine("【题库参考解析】")
+            appendLine(bankMatch.analysis)
+            appendLine()
+        }
+        if (forVision) {
+            appendLine("=== 以上为题库数据，请结合输入的图片进行深度分析 ===")
+        } else {
+            appendLine("=== 以上为题库数据，请以此为基础进行分析 ===")
+        }
+        appendLine("特别注意：")
+        appendLine("1. 正确答案已确定为 ${bankMatch.answer}，请围绕该答案展开分析，对每个选项逐一说明选或不选的理由。")
+        if (forVision) {
+            appendLine("2. 请在JSON中额外输出 keywords 数组，列出题目中的3-8个关键词/关键语句。")
+        } else {
+            appendLine("2. 请在JSON中额外输出 keywords 数组，列出题目中的3-8个关键词/关键语句（用于在题目中标红高亮）。")
+        }
+        appendLine()
+    }
+
+    /** 文字解析 prompt：题型 prompt（工具模式换通用 Agent prompt）+ 题库数据注入（命中且非工具模式时去掉 OCR 校对段） */
+    private fun buildTextAnalysisPrompt(
+        bankMatch: com.example.aiassistant.questionbank.Question?,
+        useTools: Boolean
+    ): String {
+        val questionType = AppPreferences.getCurrentQuestionType(this)
+        var prompt = AppPreferences.getPromptForType(this, questionType)
+        if (useTools) prompt = getUniversalAgentPrompt()
+        if (bankMatch != null) {
+            val bankContext = buildBankContext(bankMatch, forVision = false)
+            prompt = if (useTools) {
+                bankContext + prompt
             } else {
                 // 去掉原始prompt中的OCR校对部分（题库数据已经是干净的）
                 val ocrStart = prompt.indexOf("⭐")
@@ -1057,94 +1144,35 @@ class ScreenCaptureService : Service() {
                 } else {
                     prompt
                 }
-                prompt = bankContext + cleanPrompt
+                bankContext + cleanPrompt
             }
         }
-        val baseUrl = currentModel.baseUrl
-        val apiKey = currentModel.apiKey
-        val model = currentModel.model
-        val apiType = currentModel.apiType
-        val thinking = currentModel.thinkingDefault
-        val thinkingBudget = currentModel.thinkingBudget
+        return prompt
+    }
 
-        val ocrTime = System.currentTimeMillis() - startTime
-
-        val userMsg = if (bankMatch != null) {
-            "请基于系统提示中的题库数据，按照要求进行详细分析，输出标准JSON格式。"
-        } else null
-
-        val modelLabel = if (modelIndex > 0) "【备用】${currentModel.name}" else currentModel.name
-        showLoading("⚡ AI 正在深度解析中...\n当前模型: $modelLabel")
-
-        val onCompleteCallback = { fullText: String ->
-            if (currentRequestId == requestId) {
-                val totalTime = System.currentTimeMillis() - startTime
-                Log.d(TAG, "总耗时: ${totalTime}ms (OCR: ${ocrTime}ms, AI: ${totalTime - ocrTime}ms)")
-                hideBallProgress()
-                if (isSilentCapture) {
-                    silentSearchText = fullText
-                    silentSearchReady = true
-                    isCapturing = false
-                    isSilentCapture = false
-                    cancelCaptureTimeout()
-                    mainHandler.post { reattachSmallBall() }
-                } else {
-                    performJsonValidationAndRepair(fullText, requestId, startTime, 0, isVision = false)
-                }
-            }
-        }
-
-        val onErrorCallback = { error: String ->
-            if (currentRequestId == requestId) {
-                if (modelIndex == 0) {
-                    primaryModelError = "主模型「${currentModel.name}」请求失败：$error"
-                }
-                
-                if (modelIndex + 1 < modelList.size) {
-                    val nextModel = modelList[modelIndex + 1]
-                    Log.w(TAG, "模型「${currentModel.name}」请求失败: $error. 自动切换至备用模型「${nextModel.name}」")
-                    mainHandler.post {
-                        val cleanMsg = when {
-                            error.contains("401", ignoreCase = true) || error.contains("Unauthorized", ignoreCase = true) -> "API Key 校验未通过"
-                            error.contains("timeout", ignoreCase = true) || error.contains("ConnectException", ignoreCase = true) -> "连接超时，请确认是否需要开启科学网络"
-                            error.contains("403", ignoreCase = true) -> "无权限访问 (403)，请确认模型权限与额度"
-                            error.contains("429", ignoreCase = true) -> "请求过于频繁 (429)"
-                            else -> error.take(60)
-                        }
-                        Toast.makeText(this@ScreenCaptureService, "⚠️ 主模型「${currentModel.name}」失败: $cleanMsg\n已自动切换备用「${nextModel.name}」", Toast.LENGTH_LONG).show()
-                        requestAiAnalysis(ocrText, startTime, requestId, modelIndex + 1, modelList)
-                    }
-                } else {
-                    hideBallProgress()
-                    if (isSilentCapture) {
-                        isCapturing = false
-                        isSilentCapture = false
-                        cancelCaptureTimeout()
-                        mainHandler.post {
-                            reattachSmallBall()
-                            Toast.makeText(this@ScreenCaptureService, "静默搜题失败：$error", Toast.LENGTH_SHORT).show()
-                        }
-                    } else {
-                        Log.e(TAG, "AI请求失败: $error")
-                        updateResultCard("❌ 所有模型均请求失败，最后错误：$error")
-                    }
-                }
-            }
-        }
-
-        if (useTools) {
-            val toolsArray = com.example.aiassistant.skills.ToolRegistry.toOpenAiToolsArrayForType(questionType)
+    /** 用给定模型发起一次文字解析请求（文字管道与视觉管道"备用模型不识图退化"共用） */
+    private fun attemptTextAnalysis(
+        config: AiModelConfig,
+        ocrText: String,
+        prompt: String,
+        userMsg: String?,
+        useTools: Boolean,
+        toolsArray: org.json.JSONArray?,
+        onDone: (String) -> Unit,
+        onErr: (AiErrorKind, String) -> Unit
+    ) {
+        if (useTools && toolsArray != null) {
             OpenAIApiService.analyzeWithTools(
-                context = this@ScreenCaptureService,
+                context = this,
                 ocrText = ocrText,
-                baseUrl = baseUrl,
-                apiKey = apiKey,
-                model = model,
+                baseUrl = config.baseUrl,
+                apiKey = config.apiKey,
+                model = config.model,
                 prompt = prompt,
-                thinking = thinking,
+                thinking = config.thinkingDefault,
                 userMessage = userMsg,
-                apiType = apiType,
-                thinkingBudget = thinkingBudget,
+                apiType = config.apiType,
+                thinkingBudget = config.thinkingBudget,
                 tools = toolsArray,
                 onToolCall = { toolName ->
                     val displayName = when (toolName) {
@@ -1156,22 +1184,24 @@ class ScreenCaptureService : Service() {
                     usedToolsInCurrentRequest.add(displayName)
                     showLoading("AI 正在使用工具：$displayName...")
                 },
-                onComplete = onCompleteCallback,
-                onError = onErrorCallback
+                onComplete = onDone,
+                onError = { onErr(AiErrorKind.PARSE, it) },
+                onStructuredError = onErr
             )
         } else {
             OpenAIApiService.analyzeText(
                 ocrText = ocrText,
-                baseUrl = baseUrl,
-                apiKey = apiKey,
-                model = model,
+                baseUrl = config.baseUrl,
+                apiKey = config.apiKey,
+                model = config.model,
                 prompt = prompt,
-                thinking = thinking,
+                thinking = config.thinkingDefault,
                 userMessage = userMsg,
-                apiType = apiType,
-                thinkingBudget = thinkingBudget,
-                onComplete = onCompleteCallback,
-                onError = onErrorCallback
+                apiType = config.apiType,
+                thinkingBudget = config.thinkingBudget,
+                onComplete = onDone,
+                onError = { onErr(AiErrorKind.PARSE, it) },
+                onStructuredError = onErr
             )
         }
     }
@@ -1202,51 +1232,42 @@ class ScreenCaptureService : Service() {
     // ── 视觉分析管道 ──────────────────────────────────────────────────
 
     internal fun requestVisionAnalysis(
-        imageBase64: String, 
-        startTime: Long, 
+        imageBase64: String,
+        startTime: Long,
         requestId: Long,
-        modelIndex: Int = 0,
         candidates: List<AiModelConfig> = emptyList()
     ) {
         lastImageBase64 = imageBase64
+        aiFailover?.cancel()
+
+        // 题库检索（FTS+LCS 全库）放后台线程：入口 sendToAI 在主线程 post 进来
+        val ocrText = lastOcrText
+        if (ocrText.isNullOrBlank()) {
+            mainHandler.post { startVisionAnalysis(imageBase64, startTime, requestId, null, candidates) }
+        } else {
+            QuestionBankManager.searchAsync(ocrText) { bankMatch ->
+                if (currentRequestId != requestId) return@searchAsync
+                mainHandler.post { startVisionAnalysis(imageBase64, startTime, requestId, bankMatch, candidates) }
+            }
+        }
+    }
+
+    /** 视觉解析管道：题库检索完成后在主线程启动视觉故障转移链 */
+    private fun startVisionAnalysis(
+        imageBase64: String,
+        startTime: Long,
+        requestId: Long,
+        bankMatch: com.example.aiassistant.questionbank.Question?,
+        candidates: List<AiModelConfig>
+    ) {
         val questionType = AppPreferences.getCurrentQuestionType(this)
         var prompt = AppPreferences.getPromptForType(this, questionType)
-
-        // 识别暂存的 lastOcrText 题库匹配
-        val ocrText = lastOcrText
-        val bankMatch = if (!ocrText.isNullOrBlank()) QuestionBankManager.search(ocrText) else null
         if (bankMatch != null) {
             Log.d(TAG, "视觉模式匹配题库命中: 强制注入参考答案 ${bankMatch.answer}")
-            val bankContext = buildString {
-                appendLine("=== 题库已收录此题，以下为题库数据（正确答案已确定） ===")
-                appendLine()
-                appendLine("【题库题目】")
-                appendLine(bankMatch.stem)
-                appendLine()
-                if (bankMatch.options.isNotEmpty()) {
-                    appendLine("【题库选项】")
-                    for ((i, opt) in bankMatch.options.withIndex()) {
-                        appendLine("${'A' + i}. ${opt.text}")
-                    }
-                    appendLine()
-                }
-                appendLine("【题库正确答案】${bankMatch.answer}")
-                appendLine()
-                if (bankMatch.analysis.isNotBlank()) {
-                    appendLine("【题库参考解析】")
-                    appendLine(bankMatch.analysis)
-                    appendLine()
-                }
-                appendLine("=== 以上为题库数据，请结合输入的图片进行深度分析 ===")
-                appendLine("特别注意：")
-                appendLine("1. 正确答案已确定为 ${bankMatch.answer}，请围绕该答案展开分析，对每个选项逐一说明选或不选的理由。")
-                appendLine("2. 请在JSON中额外输出 keywords 数组，列出题目中的3-8个关键词/关键语句。")
-                appendLine()
-            }
-            prompt = bankContext + prompt
+            prompt = buildBankContext(bankMatch, forVision = true) + prompt
         }
 
-        // 彻底的“视觉化处理”：如果是识图模式来的，就不要说 OCR，直接解析图片内容
+        // 彻底的"视觉化处理"：如果是识图模式来的，就不要说 OCR，直接解析图片内容
         val ocrStart = prompt.indexOf("⭐")
         val taskStart = prompt.indexOf("任务要求")
         var visionPrompt = if (ocrStart > 0 && taskStart > ocrStart) {
@@ -1269,40 +1290,22 @@ class ScreenCaptureService : Service() {
             .replace("OCR识别", "直接识图")
             .replace("OCR 识别", "直接识图")
 
-        val modelList = if (candidates.isEmpty()) buildCandidateModels(isVisionMode = true) else candidates
-        val currentModel = modelList.getOrNull(modelIndex)
+        val modelList = if (candidates.isNotEmpty()) candidates else buildCandidateModels(isVisionMode = true)
+        primaryModelError = null
+        usedToolsInCurrentRequest.clear()
 
-        if (modelIndex == 0) {
-            primaryModelError = null
-            usedToolsInCurrentRequest.clear()
-        }
-
-        if (currentModel == null) {
+        if (modelList.isEmpty()) {
             Log.e(TAG, "多模态容错链尝试完毕，均失败")
             updateResultCard("❌ 所有可用视觉/备用大模型均调用失败。")
             hideBallProgress()
             return
         }
 
-        // 如果备用模型不支持识图，且我们有 OCR 文本，自动退化调用它的 analyzeText
-        if (!currentModel.isVision) {
-            val ocr = lastOcrText
-            if (!ocr.isNullOrBlank()) {
-                Log.w(TAG, "备用模型「${currentModel.name}」不支持视觉多模态，自动退化执行文字分析管道")
-                requestAiAnalysis(ocr, startTime, requestId, modelIndex, modelList)
-                return
-            }
-        }
-
-        val baseUrl = currentModel.baseUrl
-        val apiKey = currentModel.apiKey
-        val model = currentModel.model
-        val apiType = currentModel.apiType
-        val thinking = currentModel.thinkingDefault
-        val thinkingBudget = currentModel.thinkingBudget
-
         val useTools = AppPreferences.isToolCallingEnabled(this) &&
                 com.example.aiassistant.skills.ToolRegistry.hasTools()
+        val toolsArray = if (useTools)
+            com.example.aiassistant.skills.ToolRegistry.toOpenAiToolsArrayForType(questionType)
+        else null
 
         val promptForVision = if (useTools) {
             getUniversalAgentPrompt()
@@ -1311,140 +1314,132 @@ class ScreenCaptureService : Service() {
         } else {
             visionPrompt
         }
-
-        val finalVisionPrompt = if (useTools && bankMatch != null) {
-            val bankContext = buildString {
-                appendLine("=== 题库已收录此题，以下为题库数据（正确答案已确定） ===")
-                appendLine()
-                appendLine("【题库题目】")
-                appendLine(bankMatch.stem)
-                appendLine()
-                if (bankMatch.options.isNotEmpty()) {
-                    appendLine("【题库选项】")
-                    for ((i, opt) in bankMatch.options.withIndex()) {
-                        appendLine("${'A' + i}. ${opt.text}")
-                    }
-                    appendLine()
-                }
-                appendLine("【题库正确答案】${bankMatch.answer}")
-                appendLine()
-                if (bankMatch.analysis.isNotBlank()) {
-                    appendLine("【题库参考解析】")
-                    appendLine(bankMatch.analysis)
-                    appendLine()
-                }
-                appendLine("=== 以上为题库数据，请结合输入的图片进行深度分析 ===")
-                appendLine("特别注意：")
-                appendLine("1. 正确答案已确定为 ${bankMatch.answer}，请围绕该答案展开分析，对每个选项逐一说明选或不选的理由。")
-                appendLine("2. 请在JSON中额外输出 keywords 数组，列出题目中的3-8个关键词/关键语句。")
-                appendLine()
-            }
-            bankContext + promptForVision
-        } else {
+        val finalVisionPrompt = if (useTools && bankMatch != null)
+            buildBankContext(bankMatch, forVision = true) + promptForVision
+        else
             promptForVision
-        }
 
-        val modelLabel = if (modelIndex > 0) "【备用】${currentModel.name}" else currentModel.name
-        showLoading("🎨 视觉模型分析中...\n当前模型: $modelLabel")
+        val visionUserMsg = if (bankMatch != null)
+            "请基于系统提示中的题库数据与输入的图片，按照要求进行详细分析，输出标准JSON格式。"
+        else null
+        val textUserMsg = if (bankMatch != null)
+            "请基于系统提示中的题库数据，按照要求进行详细分析，输出标准JSON格式。"
+        else null
 
-        val onCompleteCallback = { fullText: String ->
-            if (currentRequestId == requestId) {
-                val totalTime = System.currentTimeMillis() - startTime
-                Log.d(TAG, "视觉分析总耗时: ${totalTime}ms")
-                hideBallProgress()
-                if (isSilentCapture) {
-                    silentSearchText = fullText
-                    silentSearchReady = true
-                    isCapturing = false
-                    isSilentCapture = false
-                    cancelCaptureTimeout()
-                    mainHandler.post { reattachSmallBall() }
-                } else {
-                    performJsonValidationAndRepair(fullText, requestId, startTime, 0, isVision = true)
+        fun visionChainFailed(lastError: String) {
+            hideBallProgress()
+            if (isSilentCapture) {
+                isCapturing = false
+                isSilentCapture = false
+                cancelCaptureTimeout()
+                mainHandler.post {
+                    reattachSmallBall()
+                    Toast.makeText(this@ScreenCaptureService, "视觉分析失败：$lastError", Toast.LENGTH_SHORT).show()
                 }
+            } else {
+                Log.e(TAG, "视觉大模型请求失败: $lastError")
+                updateResultCard("❌ 所有备用视觉模型均请求失败，最后错误：$lastError")
             }
         }
 
-        val onErrorCallback = { error: String ->
-            if (currentRequestId == requestId) {
-                if (modelIndex == 0) {
-                    primaryModelError = "主模型「${currentModel.name}」请求失败：$error"
-                }
-                
-                if (modelIndex + 1 < modelList.size) {
-                    val nextModel = modelList[modelIndex + 1]
-                    Log.w(TAG, "视觉模型「${currentModel.name}」调用失败: $error. 自动尝试备用「${nextModel.name}」")
-                    mainHandler.post {
-                        val cleanMsg = when {
-                            error.contains("401", ignoreCase = true) || error.contains("Unauthorized", ignoreCase = true) -> "API Key 校验未通过"
-                            error.contains("timeout", ignoreCase = true) || error.contains("ConnectException", ignoreCase = true) -> "连接超时，请确认是否需要开启科学网络"
-                            error.contains("403", ignoreCase = true) -> "无权限访问 (403)，请确认模型权限与额度"
-                            error.contains("429", ignoreCase = true) -> "请求过于频繁 (429)"
-                            else -> error.take(60)
-                        }
-                        Toast.makeText(this@ScreenCaptureService, "⚠️ 视觉模型「${currentModel.name}」失败: $cleanMsg\n已自动切换备用「${nextModel.name}」", Toast.LENGTH_LONG).show()
-                        requestVisionAnalysis(imageBase64, startTime, requestId, modelIndex + 1, modelList)
-                    }
+        // 视觉与文字管道共用同一套故障转移语义（AiFailoverExecutor 统一驱动退避重试/切换/终止）
+        aiFailover = AiFailoverExecutor.execute(
+            candidates = modelList,
+            request = { config, onDone, onErr ->
+                val label = if (config === modelList.first()) config.name else "【备用】${config.name}"
+                val ocr = lastOcrText
+                if (!config.isVision && !ocr.isNullOrBlank()) {
+                    // 备用模型不支持识图且有 OCR 文本：自动退化调用其文字分析管道（仍在本次故障转移链内）
+                    Log.w(TAG, "备用模型「${config.name}」不支持视觉多模态，自动退化执行文字分析管道")
+                    showLoading("⚡ AI 正在深度解析中（文字退化）...\n当前模型: $label")
+                    attemptTextAnalysis(
+                        config, ocr,
+                        buildTextAnalysisPrompt(bankMatch, useTools),
+                        textUserMsg, useTools, toolsArray, onDone, onErr
+                    )
+                } else if (useTools && toolsArray != null) {
+                    showLoading("🎨 视觉模型分析中...\n当前模型: $label")
+                    OpenAIApiService.analyzeWithTools(
+                        context = this@ScreenCaptureService,
+                        ocrText = lastOcrText ?: "",
+                        baseUrl = config.baseUrl,
+                        apiKey = config.apiKey,
+                        model = config.model,
+                        prompt = finalVisionPrompt,
+                        thinking = config.thinkingDefault,
+                        userMessage = visionUserMsg,
+                        apiType = config.apiType,
+                        thinkingBudget = config.thinkingBudget,
+                        tools = toolsArray,
+                        imageBase64 = imageBase64,  // 多模态传图参数
+                        onToolCall = { toolName ->
+                            val displayName = when (toolName) {
+                                "get_solving_skill" -> "解题技巧"
+                                "get_typical_special_rule" -> "专项考点"
+                                "query_question_bank" -> "本地题库"
+                                else -> toolName
+                            }
+                            usedToolsInCurrentRequest.add(displayName)
+                            showLoading("AI 正在使用工具：$displayName...")
+                        },
+                        onComplete = onDone,
+                        onError = { onErr(AiErrorKind.PARSE, it) },
+                        onStructuredError = onErr
+                    )
                 } else {
+                    showLoading("🎨 视觉模型分析中...\n当前模型: $label")
+                    OpenAIApiService.analyzeWithImage(
+                        imageBase64 = imageBase64,
+                        systemPrompt = finalVisionPrompt,
+                        baseUrl = config.baseUrl,
+                        apiKey = config.apiKey,
+                        model = config.model,
+                        thinking = config.thinkingDefault,
+                        apiType = config.apiType,
+                        thinkingBudget = config.thinkingBudget,
+                        onComplete = onDone,
+                        onError = { onErr(AiErrorKind.PARSE, it) },
+                        onStructuredError = onErr
+                    )
+                }
+            },
+            onComplete = { fullText ->
+                if (currentRequestId == requestId) {
+                    val totalTime = System.currentTimeMillis() - startTime
+                    Log.d(TAG, "视觉分析总耗时: ${totalTime}ms")
                     hideBallProgress()
                     if (isSilentCapture) {
+                        silentSearchText = fullText
+                        silentSearchReady = true
                         isCapturing = false
                         isSilentCapture = false
                         cancelCaptureTimeout()
-                        mainHandler.post {
-                            reattachSmallBall()
-                            Toast.makeText(this@ScreenCaptureService, "视觉分析失败：$error", Toast.LENGTH_SHORT).show()
-                        }
+                        mainHandler.post { reattachSmallBall() }
                     } else {
-                        Log.e(TAG, "视觉大模型请求失败: $error")
-                        updateResultCard("❌ 所有备用视觉模型均请求失败，最后错误：$error")
+                        performJsonValidationAndRepair(fullText, requestId, startTime, 0, isVision = true)
+                    }
+                }
+            },
+            onError = { lastError ->
+                if (currentRequestId == requestId) visionChainFailed(lastError)
+            },
+            onModelAttemptFailed = { failed, kind, msg ->
+                if (currentRequestId == requestId) {
+                    if (failed === modelList.first()) {
+                        primaryModelError = "主模型「${failed.name}」请求失败：$msg"
+                    }
+                    Log.w(TAG, "视觉模型「${failed.name}」请求失败($kind): $msg")
+                    showLoading("⚠️ 请求失败，正在重试…\n当前模型: ${failed.name}")
+                }
+            },
+            onModelSwitched = { failed, reason, next ->
+                if (currentRequestId == requestId) {
+                    mainHandler.post {
+                        Toast.makeText(this@ScreenCaptureService, "⚠️ 视觉模型「${failed.name}」失败: ${cleanErrorForToast(reason)}\n已自动切换备用「${next.name}」", Toast.LENGTH_LONG).show()
                     }
                 }
             }
-        }
-
-        if (useTools) {
-            val toolsArray = com.example.aiassistant.skills.ToolRegistry.toOpenAiToolsArrayForType(questionType)
-            OpenAIApiService.analyzeWithTools(
-                context = this@ScreenCaptureService,
-                ocrText = lastOcrText ?: "",
-                baseUrl = baseUrl,
-                apiKey = apiKey,
-                model = model,
-                prompt = finalVisionPrompt,
-                thinking = thinking,
-                userMessage = if (bankMatch != null) "请基于系统提示中的题库数据与输入的图片，按照要求进行详细分析，输出标准JSON格式。" else null,
-                apiType = apiType,
-                thinkingBudget = thinkingBudget,
-                tools = toolsArray,
-                imageBase64 = imageBase64,  // 多模态传图参数
-                onToolCall = { toolName ->
-                    val displayName = when (toolName) {
-                        "get_solving_skill" -> "解题技巧"
-                        "get_typical_special_rule" -> "专项考点"
-                        "query_question_bank" -> "本地题库"
-                        else -> toolName
-                    }
-                    usedToolsInCurrentRequest.add(displayName)
-                    showLoading("AI 正在使用工具：$displayName...")
-                },
-                onComplete = onCompleteCallback,
-                onError = onErrorCallback
-            )
-        } else {
-            OpenAIApiService.analyzeWithImage(
-                imageBase64 = imageBase64,
-                systemPrompt = finalVisionPrompt,
-                baseUrl = baseUrl,
-                apiKey = apiKey,
-                model = model,
-                thinking = thinking,
-                apiType = apiType,
-                thinkingBudget = thinkingBudget,
-                onComplete = onCompleteCallback,
-                onError = onErrorCallback
-            )
-        }
+        )
     }
 
     private fun retryVisionAnalysis(requestId: Long, startTime: Long) {

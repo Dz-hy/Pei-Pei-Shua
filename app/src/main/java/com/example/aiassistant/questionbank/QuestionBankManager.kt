@@ -144,9 +144,18 @@ object QuestionBankManager {
         }
     }
 
-    /** 删除自定义分类（级联其子分类与全部题目），用于长按分类删除 */
-    fun deleteModule(context: Context, moduleId: String) {
-        QuestionBankDb(context).deleteModuleCascade(moduleId)
+    /** 删除自定义分类（级联其子分类与全部题目），用于长按分类删除。
+     *  写库经单线程 executor 串行化，避免与其他写操作争锁；onDone 在 executor 线程回调 */
+    fun deleteModule(moduleId: String, onDone: () -> Unit) {
+        executor.execute {
+            try {
+                db?.deleteModuleCascade(moduleId)
+                notifyBankDataChanged()  // 失效向量缓存并通知界面刷新
+            } catch (e: Exception) {
+                Log.e(TAG, "删除分类失败: ${e.message}")
+            }
+            onDone()
+        }
     }
 
     fun getModulesAsync(onResult: (List<QuestionModule>) -> Unit) {
@@ -171,6 +180,12 @@ object QuestionBankManager {
     fun getQuestionById(id: String): Question? {
         return db?.getQuestionById(id)
     }
+
+    /** 共享连接读透传（错题三级匹配链用）：材料组检索，避免另开一条库连接 */
+    fun findMaterialByText(text: String): String? = db?.findMaterialByText(text)
+
+    /** 共享连接读透传（VectorCache 用）：全量向量表 */
+    fun loadAllVectors(): Map<String, FloatArray> = db?.loadAllVectors() ?: emptyMap()
 
     fun getQuestionCountByModule(moduleId: String): Int {
         return db?.getQuestionCountByModule(moduleId) ?: 0
@@ -225,11 +240,14 @@ object QuestionBankManager {
 
     // ── 训练会话（计划表-做题历史） ───────────────────────────────────
 
-    /** 保存整场训练快照（异步写入） */
-    fun savePracticeSession(session: PracticeSessionRecord) {
+    /**
+     * 保存整场训练快照（异步写入）。session 用构造 lambda 传入：
+     * 快照 JSON 序列化（全题面转 JSON）也在后台队列执行，交卷瞬间不卡主线程。
+     */
+    fun savePracticeSession(buildSession: () -> PracticeSessionRecord) {
         executor.execute {
             try {
-                db?.savePracticeSession(session)
+                db?.savePracticeSession(buildSession())
             } catch (e: Exception) {
                 Log.e(TAG, "保存训练记录失败: ${e.message}")
             }
@@ -252,7 +270,7 @@ object QuestionBankManager {
             val list = try {
                 db?.getPracticeSessionsByDate(dateStr) ?: emptyList()
             } catch (e: Exception) {
-                Log.e(TAG, "查询训练记录失败: ${e.message}")
+                Log.e(TAG, "查询训练记录失败: $dateStr", e)
                 emptyList()
             }
             onResult(list)
@@ -274,7 +292,7 @@ object QuestionBankManager {
             val dates = try {
                 db?.getPracticeSessionDates(year, month) ?: emptySet()
             } catch (e: Exception) {
-                Log.e(TAG, "查询训练日期失败: ${e.message}")
+                Log.e(TAG, "查询训练日期失败: $year-$month", e)
                 emptySet()
             }
             onResult(dates)

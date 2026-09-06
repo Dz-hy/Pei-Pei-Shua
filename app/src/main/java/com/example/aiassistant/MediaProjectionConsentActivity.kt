@@ -27,6 +27,9 @@ class MediaProjectionConsentActivity : Activity() {
 
     private val handler = Handler(Looper.getMainLooper())
 
+    /** 只有真正把 isShowing 置 true 的实例才负责清零，防止重复实例的 onDestroy 提前解除防重入 */
+    private var ownsShowingFlag = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Log.d(TAG, "onCreate: Called, isShowing = $isShowing")
@@ -36,7 +39,8 @@ class MediaProjectionConsentActivity : Activity() {
             return
         }
         isShowing = true
-        
+        ownsShowingFlag = true
+
         // 延迟 150ms 执行，确保透明 Activity Window 已经成功挂载并获得焦点，
         // 从而完美绕过 MIUI/HyperOS 等国内系统对于“后台或无焦点透明 Activity 直接拉起系统敏感授权框”的安全拦截！
         handler.postDelayed({
@@ -99,7 +103,7 @@ class MediaProjectionConsentActivity : Activity() {
     override fun onDestroy() {
         super.onDestroy()
         Log.d(TAG, "onDestroy: ConsentActivity finishing.")
-        isShowing = false
+        if (ownsShowingFlag) isShowing = false
         handler.removeCallbacksAndMessages(null)
     }
 }

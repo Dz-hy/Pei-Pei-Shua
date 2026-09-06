@@ -38,7 +38,7 @@
             android:id="@+id/btn_summary"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_toStartOf="@id/btn_open_original"
+            android:layout_toStartOf="@id/btn_handwriting"
             android:layout_centerVertical="true"
             android:text="✨ 总结"
             android:textSize="14sp"
@@ -49,6 +49,21 @@
             android:clickable="true"
             android:focusable="true"
             android:visibility="gone" />
+
+        <TextView
+            android:id="@+id/btn_handwriting"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_toStartOf="@id/btn_open_original"
+            android:layout_centerVertical="true"
+            android:text="手写"
+            android:textSize="14sp"
+            android:textStyle="bold"
+            android:textColor="@color/primary"
+            android:padding="6dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:clickable="true"
+            android:focusable="true" />
 
         <TextView
             android:id="@+id/btn_open_original"
@@ -70,9 +85,20 @@
         android:layout_height="1dp"
         android:background="@color/border_light" />
 
-    <WebView
-        android:id="@+id/web_content"
+    <!-- 手写批注需要 ScrollView 承载批注层；WebView 自适应内容高度，滚动交给 ScrollView -->
+    <ScrollView
+        android:id="@+id/sv_article_content"
         android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:background="@color/background" />
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:fillViewport="true"
+        android:scrollbars="none">
+
+        <WebView
+            android:id="@+id/web_content"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="@color/background"
+            android:scrollbars="none" />
+    </ScrollView>
 </LinearLayout>

@@ -52,9 +52,14 @@ class KnowledgeCardFragment : Fragment() {
     }
 
     private fun loadCategories() {
-        val categories = KnowledgeCardManager.getVisibleCategories()
-        val counts = categories.associate { it.id to KnowledgeCardManager.getCategoryCount(it.id) }
-        adapter.setData(categories, counts)
+        val hostActivity = activity ?: return
+        Thread {
+            val categories = KnowledgeCardManager.getVisibleCategories()
+            val counts = categories.associate { it.id to KnowledgeCardManager.getCategoryCount(it.id) }
+            hostActivity.runOnUiThread {
+                if (isAdded && !isDetached) adapter.setData(categories, counts)
+            }
+        }.start()
     }
 
     private fun showImportDialog() {

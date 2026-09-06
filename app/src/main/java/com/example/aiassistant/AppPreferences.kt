@@ -34,8 +34,7 @@ object AppPreferences {
     private const val KEY_CLOUD_TEXT_OCR_URL = "cloud_text_ocr_url"
     const val CLOUD_OCR_TYPE_LAYOUT = 0   // 布局解析（可识别数字）
     const val CLOUD_OCR_TYPE_TEXT = 1     // 轻量文字识别
-    const val DEFAULT_CLOUD_OCR_URL = "https://s1k6ee37p1b2retc.aistudio-app.com/layout-parsing"
-    const val DEFAULT_CLOUD_TEXT_OCR_URL = "https://b4q5p4ybl3g3p8o5.aistudio-app.com/ocr"
+    // 云端 OCR 地址无内置默认值：属个人部署端点，须在「设置-OCR模型」中自行配置
 
     // 静默搜题
     private const val KEY_SILENT_SEARCH = "silent_search"
@@ -236,8 +235,7 @@ object AppPreferences {
         prefs(context).edit().putInt(KEY_OCR_MODE, mode).apply()
 
     fun getCloudOcrUrl(context: Context): String =
-        prefs(context).getString(KEY_CLOUD_OCR_URL, DEFAULT_CLOUD_OCR_URL)
-            ?.takeIf { it.isNotBlank() } ?: DEFAULT_CLOUD_OCR_URL
+        prefs(context).getString(KEY_CLOUD_OCR_URL, "").orEmpty()
 
     fun setCloudOcrUrl(context: Context, url: String) =
         prefs(context).edit().putString(KEY_CLOUD_OCR_URL, url).apply()
@@ -255,8 +253,7 @@ object AppPreferences {
         prefs(context).edit().putInt(KEY_CLOUD_OCR_TYPE, type).apply()
 
     fun getCloudTextOcrUrl(context: Context): String =
-        prefs(context).getString(KEY_CLOUD_TEXT_OCR_URL, DEFAULT_CLOUD_TEXT_OCR_URL)
-            ?.takeIf { it.isNotBlank() } ?: DEFAULT_CLOUD_TEXT_OCR_URL
+        prefs(context).getString(KEY_CLOUD_TEXT_OCR_URL, "").orEmpty()
 
     fun setCloudTextOcrUrl(context: Context, url: String) =
         prefs(context).edit().putString(KEY_CLOUD_TEXT_OCR_URL, url).apply()
@@ -548,7 +545,8 @@ object AppPreferences {
         for ((key, value) in prefs(context).all) {
             if (key.startsWith("task_wl_") && value is String && value.isNotEmpty()) {
                 val taskTitle = key.removePrefix("task_wl_")
-                val count = value.split(",").size + SYSTEM_DEFAULT_PACKAGES.size
+                // 白名单初始值即含系统应用（见 getTaskWhitelist），不能重复累加
+                val count = value.split(",").size
                 result.add(taskTitle to count)
             }
         }

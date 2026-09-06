@@ -45,6 +45,17 @@ class WrongQuestionsActivity : AppCompatActivity() {
     private var adapter: WrongQuestionsAdapter? = null
     private val sdf = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
 
+    companion object {
+        /** 错题列表分页大小：首屏只渲染一页，滚动到底再追加，避免大列表一次性全量绑定卡顿 */
+        private const val PAGE_SIZE = 50
+        /** 距底部还剰几个 item 时触发加载下一页 */
+        private const val LOAD_MORE_THRESHOLD = 5
+    }
+
+    // 分页状态：完整筛选结果常驻内存（后台线程查询），列表仅渲染前 visibleCount 条
+    private var fullFiltered: List<WrongQuestion> = emptyList()
+    private var visibleCount = 0
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_wrong_questions)
@@ -69,6 +80,21 @@ class WrongQuestionsActivity : AppCompatActivity() {
         }
 
         btnBack.setOnClickListener { finish() }
+
+        // 分页：滚动接近底部时追加下一页（增量绑定，避免全量重建列表卡顿）
+        rvWrongQuestions.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+            override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
+                if (dy <= 0) return
+                val lm = recyclerView.layoutManager ?: return
+                val lastVisible = when (lm) {
+                    is GridLayoutManager -> lm.findLastVisibleItemPosition()
+                    is LinearLayoutManager -> lm.findLastVisibleItemPosition()
+                    else -> return
+                }
+                val count = adapter?.itemCount ?: return
+                if (lastVisible >= count - LOAD_MORE_THRESHOLD) loadMorePage()
+            }
+        })
 
         tabAll.setOnClickListener { switchFilter(SourceFilter.ALL) }
         tabBank.setOnClickListener { switchFilter(SourceFilter.BANK) }
@@ -150,8 +176,19 @@ class WrongQuestionsActivity : AppCompatActivity() {
             rvWrongQuestions.visibility = View.VISIBLE
         }
 
-        adapter = WrongQuestionsAdapter(filteredList)
+        // 分页重启：只渲染首页，后续滚动到底自动追加
+        fullFiltered = filteredList
+        visibleCount = minOf(PAGE_SIZE, filteredList.size)
+        adapter = WrongQuestionsAdapter(filteredList.subList(0, visibleCount).toMutableList())
         rvWrongQuestions.adapter = adapter
+    }
+
+    /** 滚动到底触发：向列表追加下一页（增量刷新，不重绑已有项） */
+    private fun loadMorePage() {
+        if (visibleCount >= fullFiltered.size) return
+        val nextCount = minOf(fullFiltered.size, visibleCount + PAGE_SIZE)
+        adapter?.appendItems(fullFiltered.subList(visibleCount, nextCount))
+        visibleCount = nextCount
     }
 
     /** 按错题快照的卷名生成筛选 chips（全部 + 各卷），与来源 tab 叠加过滤 */
@@ -239,8 +276,16 @@ class WrongQuestionsActivity : AppCompatActivity() {
     }
 
     inner class WrongQuestionsAdapter(
-        private val list: List<WrongQuestion>
+        private val list: MutableList<WrongQuestion>
     ) : RecyclerView.Adapter<WrongQuestionsAdapter.ViewHolder>() {
+
+        /** 分页追加（增量刷新） */
+        fun appendItems(newItems: List<WrongQuestion>) {
+            if (newItems.isEmpty()) return
+            val start = list.size
+            list.addAll(newItems)
+            notifyItemRangeInserted(start, newItems.size)
+        }
 
         inner class ViewHolder(view: View) : RecyclerView.ViewHolder(view) {
             val cardView: com.google.android.material.card.MaterialCardView = view.findViewById(R.id.card_view)

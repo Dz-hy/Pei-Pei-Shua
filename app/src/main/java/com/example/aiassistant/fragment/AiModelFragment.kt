@@ -8,6 +8,7 @@ import android.view.ViewGroup
 import android.widget.*
 import androidx.appcompat.app.AlertDialog
 import androidx.fragment.app.Fragment
+import androidx.recyclerview.widget.ItemTouchHelper
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.example.aiassistant.AiModelConfig
@@ -23,7 +24,7 @@ import com.google.android.material.textfield.TextInputEditText
 class AiModelFragment : Fragment() {
 
     // 数据备份多选状态缓存：[系统设置, 错题本, 知识卡片, 本地题库]
-    private var exportOptions = booleanArrayOf(true, true, true, true)
+    private var exportOptions = booleanArrayOf(true, true, true, true, true)
 
     private val exportDataLauncher = registerForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.CreateDocument("application/json")
@@ -51,6 +52,7 @@ class AiModelFragment : Fragment() {
 
     private lateinit var rv: RecyclerView
     private var adapter: ModelAdapter? = null
+    private var touchHelper: ItemTouchHelper? = null
 
     // 截图模式
     private lateinit var rgCaptureMode: RadioGroup
@@ -75,10 +77,31 @@ class AiModelFragment : Fragment() {
         rv = view.findViewById(R.id.rv_model_list)
         rv.layoutManager = LinearLayoutManager(requireContext())
         view.findViewById<MaterialButton>(R.id.btn_add_model).setOnClickListener { showEditDialog(null) }
-        
+
         view.findViewById<MaterialButton>(R.id.btn_teacher_manage).setOnClickListener {
             showTeacherDialog()
         }
+
+        // 拖动排序：按住卡片右侧 ≡ 手柄上下拖动，顺序即故障转移优先级
+        touchHelper = ItemTouchHelper(object : ItemTouchHelper.Callback() {
+            override fun getMovementFlags(rv: RecyclerView, vh: RecyclerView.ViewHolder): Int =
+                ItemTouchHelper.Callback.makeMovementFlags(ItemTouchHelper.UP or ItemTouchHelper.DOWN, 0)
+
+            override fun isLongPressDragEnabled() = false
+
+            override fun onMove(rv: RecyclerView, src: RecyclerView.ViewHolder, dst: RecyclerView.ViewHolder): Boolean {
+                val ad = adapter ?: return false
+                val from = src.bindingAdapterPosition
+                val to = dst.bindingAdapterPosition
+                if (from == RecyclerView.NO_POSITION || to == RecyclerView.NO_POSITION) return false
+                ad.moveItem(from, to)
+                ModelManager.move(requireContext(), from, to)
+                return true
+            }
+
+            override fun onSwiped(vh: RecyclerView.ViewHolder, dir: Int) {}
+        })
+        touchHelper?.attachToRecyclerView(rv)
 
         bindSettingsViews(view)
         loadSettingsConfig()
@@ -104,7 +127,7 @@ class AiModelFragment : Fragment() {
         }
         
         adapter = ModelAdapter(
-            items = allModels.toList(),
+            items = allModels.toMutableList(),
             activeModelId = activeModelId,
             onSelect = { selectedModel ->
                 AppPreferences.setActiveModelId(ctx, selectedModel.id)
@@ -112,7 +135,8 @@ class AiModelFragment : Fragment() {
                 refreshModelList()
             },
             onEdit = { showEditDialog(it) },
-            onDelete = { showDeleteConfirm(it) }
+            onDelete = { showDeleteConfirm(it) },
+            onStartDrag = { vh -> touchHelper?.startDrag(vh) }
         )
         rv.adapter = adapter
     }
@@ -336,6 +360,11 @@ class AiModelFragment : Fragment() {
 
     private fun setupSettingsListeners() {
         val ctx = requireContext()
+
+        // ── 功能指引（全功能速查手册，离线可读） ──
+        view?.findViewById<View>(R.id.btn_feature_guide)?.setOnClickListener {
+            startActivity(android.content.Intent(ctx, com.example.aiassistant.GuideActivity::class.java))
+        }
 
         // ── 向量模型（错题匹配） ──
         view?.findViewById<com.google.android.material.button.MaterialButton>(R.id.btn_save_emb)?.setOnClickListener {
@@ -731,7 +760,7 @@ class AiModelFragment : Fragment() {
 
     private fun showExportDialog() {
         val ctx = context ?: return
-        val items = arrayOf("系统设置 (Preferences)", "错题本记录 (Wrong Questions)", "知识卡片 (Knowledge Cards)", "本地题库 (Question Bank)")
+        val items = arrayOf("系统设置 (Preferences)", "错题本记录 (Wrong Questions)", "知识卡片 (Knowledge Cards)", "本地题库 (Question Bank)", "做题历史与手写批注 (Sessions & Annotations)")
         
         AlertDialog.Builder(ctx)
             .setTitle("选择要导出的数据")
@@ -875,13 +904,36 @@ class AiModelFragment : Fragment() {
                     }
                 }
 
+                var sessionCount = 0
+                var annCount = 0
+                if (exportOptions[4]) {
+                    val qdb = com.example.aiassistant.questionbank.QuestionBankDb(ctx)
+                    val sessionsStr = qdb.exportSessionsJson()
+                    if (sessionsStr.isNotEmpty()) {
+                        val sArr = org.json.JSONArray(sessionsStr)
+                        sessionCount = sArr.length()
+                        root.put("practice_sessions", sArr)
+                    }
+                    val annStr = qdb.exportAnnotationsJson()
+                    if (annStr.isNotEmpty()) {
+                        val aArr = org.json.JSONArray(annStr)
+                        annCount = aArr.length()
+                        root.put("question_annotations", aArr)
+                    }
+                }
+
                 ctx.contentResolver.openOutputStream(uri)?.use { os ->
                     os.write(root.toString(2).toByteArray(Charsets.UTF_8))
                 }
 
                 activity?.runOnUiThread {
                     dialog.dismiss()
-                    Toast.makeText(ctx, "🎉 数据备份导出成功！", Toast.LENGTH_SHORT).show()
+                    val msg = buildString {
+                        append("🎉 数据备份导出成功！")
+                        if (sessionCount > 0) append("\n含做题历史 $sessionCount 条")
+                        if (annCount > 0) append("\n含手写批注 $annCount 条")
+                    }
+                    Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show()
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -922,6 +974,8 @@ class AiModelFragment : Fragment() {
                 var wqCount = 0
                 var cardCount = 0
                 var qbCount = 0
+                var sessionCount = 0
+                var annCount = 0
 
                 if (isQuestionBank && !isMultiBackup) {
                     // ================== 🌟 终极超大题库纯流式还原通道 ==================
@@ -971,6 +1025,18 @@ class AiModelFragment : Fragment() {
                                 com.example.aiassistant.questionbank.QuestionBankManager.reloadDatabaseAfterImport(ctx)
                             }
                         }
+                        if (root.has("practice_sessions")) {
+                            val db = com.example.aiassistant.questionbank.QuestionBankDb(ctx)
+                            sessionCount = db.importSessionsJson(root.getJSONArray("practice_sessions").toString())
+                        }
+                        if (root.has("question_annotations")) {
+                            val db = com.example.aiassistant.questionbank.QuestionBankDb(ctx)
+                            annCount = db.importAnnotationsJson(root.getJSONArray("question_annotations").toString())
+                        }
+                        // 只还了做题历史（未动题库）也要重开连接，确保管理器立刻读到新记录
+                        if (sessionCount > 0 && qbCount <= 0) {
+                            com.example.aiassistant.questionbank.QuestionBankManager.reloadDatabaseAfterImport(ctx)
+                        }
                     } else {
                         when (type) {
                             "preferences" -> {
@@ -1008,7 +1074,9 @@ class AiModelFragment : Fragment() {
                     if (wqCount > 0) sb.append("• 错题本恢复 $wqCount 道错题\n")
                     if (cardCount > 0) sb.append("• 知识卡片新增 $cardCount 张卡片\n")
                     if (qbCount > 0) sb.append("• 题库恢复 $qbCount 道题\n")
-                    if (!prefRestored && wqCount == 0 && cardCount == 0 && qbCount == 0) {
+                    if (sessionCount > 0) sb.append("• 做题历史恢复 $sessionCount 条\n")
+                    if (annCount > 0) sb.append("• 手写批注恢复 $annCount 条\n")
+                    if (!prefRestored && wqCount == 0 && cardCount == 0 && qbCount == 0 && sessionCount == 0 && annCount == 0) {
                         sb.append("• 无新增增量数据（已排重合并）")
                     }
 
@@ -1182,11 +1250,12 @@ private class QuotesAdapter(
 }
 
 private class ModelAdapter(
-    private val items: List<AiModelConfig>,
+    private val items: MutableList<AiModelConfig>,
     private val activeModelId: String,
     private val onSelect: (AiModelConfig) -> Unit,
     private val onEdit: (AiModelConfig) -> Unit,
-    private val onDelete: (AiModelConfig) -> Unit
+    private val onDelete: (AiModelConfig) -> Unit,
+    private val onStartDrag: (RecyclerView.ViewHolder) -> Unit
 ) : RecyclerView.Adapter<ModelAdapter.VH>() {
 
     class VH(view: View) : RecyclerView.ViewHolder(view) {
@@ -1194,8 +1263,15 @@ private class ModelAdapter(
         val tvName: TextView = view.findViewById(R.id.tv_model_name)
         val tvDetail: TextView = view.findViewById(R.id.tv_model_detail)
         val tvThinking: TextView = view.findViewById(R.id.tv_model_thinking)
+        val btnDrag: View = view.findViewById(R.id.btn_model_drag)
         val btnEdit: View = view.findViewById(R.id.btn_model_edit)
         val btnDelete: View = view.findViewById(R.id.btn_model_delete)
+    }
+
+    /** 拖动过程中的原地换位；持久化由外层调用 ModelManager.move 完成 */
+    fun moveItem(from: Int, to: Int) {
+        items.add(to, items.removeAt(from))
+        notifyItemMoved(from, to)
     }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
@@ -1209,7 +1285,7 @@ private class ModelAdapter(
         val m = items[pos]
         val context = h.itemView.context
         val density = context.resources.displayMetrics.density
-        
+
         val isActive = m.id == activeModelId
         if (isActive) {
             h.tvName.text = "✓  ${m.name}"
@@ -1227,14 +1303,22 @@ private class ModelAdapter(
         }
 
         h.tvDetail.text = "${m.model}  |  ${m.baseUrl.ifBlank { "Google AI Studio 官方" }}"
-        
+
         val tags = mutableListOf<String>()
         if (m.apiType != "openai") tags.add(m.apiType.uppercase())
         if (m.thinkingDefault) tags.add("思考")
         if (m.isVision) tags.add("识图")
         h.tvThinking.text = tags.joinToString(" • ")
         h.tvThinking.visibility = if (tags.isNotEmpty()) View.VISIBLE else View.GONE
-        
+
+        // 拖动手柄：按下即开始拖动（不影响卡片点击选中）
+        h.btnDrag.setOnTouchListener { _, event ->
+            if (event.actionMasked == android.view.MotionEvent.ACTION_DOWN) {
+                onStartDrag(h)
+            }
+            false
+        }
+
         // 整个卡片区域（除编辑和删除外）点击触发设为首选大模型！
         h.cardRoot.setOnClickListener { onSelect(m) }
         h.btnEdit.setOnClickListener { onEdit(m) }

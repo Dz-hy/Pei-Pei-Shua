@@ -357,6 +357,7 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
 
             var total = 0
             var materialCount = 0
+            var failedFiles = 0
 
             for (fileName in bankFiles) {
                 if (!fileName.endsWith(".json")) continue
@@ -426,18 +427,22 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
                         total++
                     }
                 } catch (e: Exception) {
+                    failedFiles++
                     Log.e(TAG, "导入 $fileName 失败: ${e.message}")
                 }
             }
 
-            val meta = ContentValues().apply {
-                put("key", "imported")
-                put("value", "true")
+            if (failedFiles == 0) {
+                val meta = ContentValues().apply {
+                    put("key", "imported")
+                    put("value", "true")
+                }
+                db.insert("meta", null, meta)
+                Log.d(TAG, "题库导入完成: $total 题, $materialCount 材料, 耗时 ${System.currentTimeMillis() - t0}ms")
+            } else {
+                // 不标记 imported：下次启动走"删除重导"自愈，避免残缺题库被永久固化
+                Log.e(TAG, "题库导入有 $failedFiles 个文件失败（成功 $total 题），下次启动将重新导入")
             }
-            db.insert("meta", null, meta)
-
-            db.setTransactionSuccessful()
-            Log.d(TAG, "题库导入完成: $total 题, $materialCount 材料, 耗时 ${System.currentTimeMillis() - t0}ms")
         } finally {
             db.endTransaction()
         }
@@ -575,7 +580,9 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
                 questions.add(cursorToQuestion(cursor))
             }
         }
-        return questions
+        // 跨卷同题去重（同 getQuestionsByRateRange）：多卷共用题会被内容 hash 归入同一材料组
+        val seen = HashSet<String>()
+        return questions.filter { seen.add(it.stem + "#" + it.answer + "#" + it.options) }
     }
 
     /**
@@ -667,7 +674,8 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
         // 1. 尝试先获取未做过的题目（材料组感知：同 material_id 整组进/整组出，组内连续）
         questions.addAll(pickQuestionsByRange(moduleId, rateMin, rateMax, limit, onlyUncompleted = true))
 
-        // 2. 如果未做过的题目不足，且该范围内所有题目均已做完，则自动重置已做记录并重新派送
+        // 2. 如果未做过的题目不足，且该范围内所有题目均已做完，则自动重置已做记录并重新派送。
+        //    补抽必须排除第一阶段已选的题，否则同一道题会出现两次（16/17 重复题的根源）
         if (questions.size < limit) {
             val totalInModuleRange = getQuestionCountByRateRange(moduleId, rateMin, rateMax)
             val completedInModuleRange = getCompletedQuestionCountByRateRange(moduleId, rateMin, rateMax)
@@ -675,9 +683,10 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
             if (completedInModuleRange >= totalInModuleRange && totalInModuleRange > 0) {
                 // 该范围的所有题都做完了，重置它们以允许重新派送
                 resetCompletedQuestionsByRange(moduleId, rateMin, rateMax)
+                val alreadyPicked = questions.map { it.id }.toSet()
                 questions.addAll(
                     pickQuestionsByRange(moduleId, rateMin, rateMax,
-                        limit - questions.size, onlyUncompleted = false)
+                        limit - questions.size, onlyUncompleted = false, excludeIds = alreadyPicked)
                 )
             }
         }
@@ -688,9 +697,11 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
      * 材料组感知组卷：把 [moduleId] 范围内 (rate 区间) 的题读全量，按 material_id 分组——
      * 材料组整组抽取（一组 N 题占 N 配额，组内连续、组间按题号序）；无材料散题单抽。
      * onlyUncompleted=true 时优先未做过的题（组内任一未做过即整组保留）。
+     * excludeIds：跳过这些题（两阶段补抽时排除第一阶段已选，防止同题重复入卷）。
      */
     private fun pickQuestionsByRange(moduleId: String, rateMin: Int, rateMax: Int,
-                                     limit: Int, onlyUncompleted: Boolean): List<Question> {
+                                     limit: Int, onlyUncompleted: Boolean,
+                                     excludeIds: Set<String> = emptySet()): List<Question> {
         if (limit <= 0) return emptyList()
         val all = readableDatabase.rawQuery(
             "SELECT q.id, q.stem, q.stem_html, q.options, q.answer, q.analysis, q.knowledge_point, q.source, q.rate, q.title_images, q.material_id, COALESCE(m.content, ''), q.difficulty " +
@@ -703,7 +714,7 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
             val list = mutableListOf<Question>()
             while (cursor.moveToNext()) list.add(cursorToQuestion(cursor))
             list
-        }
+        }.filter { it.id !in excludeIds }
         if (all.isEmpty()) return emptyList()
 
         // 按 material_id 分组；同组按题号序（id 尾数字）。空串 = 无材料散题，
@@ -717,29 +728,36 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
             qs.sortBy { it.id.substringAfterLast('_').toIntOrNull() ?: 0 }
         }
 
-        val shuffledGroups = groups.values.shuffled()
+        // 跨卷同题去重：不同卷（如 2026 地市级/行政执法卷）共用判断推理题，材料 id 按内容
+        // hash 归并 → 两份卷的同题落进同一材料组，整组抽取会原样带出重复题（16/17 重复）。
+        // 按 题干+答案+选项 去重只留一份（不能只按题干：同组可能有两道"能够从上述资料中推出的是"）
+        val deduped = LinkedHashMap<String, List<Question>>()
+        for ((key, qs) in groups) {
+            val seen = HashSet<String>()
+            deduped[key] = qs.filter { seen.add(it.stem + "#" + it.answer + "#" + it.options) }
+        }
+
+        val shuffledGroups = deduped.values.shuffled()
         val picked = mutableListOf<Question>()
-        val pickedSize = mutableSetOf<String>()
+        val pickedKeys = mutableSetOf<String>()
+        fun keyOf(group: List<Question>) = group[0].materialId.ifBlank { "single#" + group[0].id }
+
         var remain = limit
-        // 先保证组完整性：组超配额不拆（一组 N 题占 N 配额），组内连续追加
+        // 第一轮：只收"装得下"的组（散题恒装得下），材料组不超配额，尽量凑到精确题数
         for (group in shuffledGroups) {
-            // 去重必须按"组键"（散题=自身id）而非原始 material_id——散题都是空串，
-            // 按空串记账会导致第一个散题之后的所有散题被 continue 跳过（只出一题）
-            val groupKey = group[0].materialId.ifBlank { "single#" + group[0].id }
-            if (pickedSize.contains(groupKey)) continue
-            if (group.size > 1) {
-                // 材料组：整组进（超配额也整组进，保材料一致性）
+            if (remain <= 0) break
+            val groupKey = keyOf(group)
+            if (!pickedKeys.add(groupKey)) continue
+            if (group.size <= remain) {
                 picked.addAll(group)
                 remain -= group.size
-                pickedSize.add(groupKey)
-            } else {
-                if (remain > 0) {
-                    picked.add(group[0])
-                    remain -= 1
-                    pickedSize.add(groupKey)
-                }
             }
-            if (remain <= 0) break
+        }
+        // 第二轮：还差题说明剩下的全是超配材料组——取最小的组整组进（材料一致性优先于精确题数，
+        // 一拖五的组只剩 2 个配额时也不能拆成 2 题残组）
+        if (remain > 0) {
+            shuffledGroups.filter { keyOf(it) !in pickedKeys }
+                .minByOrNull { it.size }?.let { picked.addAll(it) }
         }
         return picked
     }
@@ -773,7 +791,12 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
 
     // ── 训练会话（计划表-做题历史） ───────────────────────────────────
 
-    private val SESSION_COLS = "id, finished_at, date_str, module_id, module_name, is_wrong_practice, question_count, correct_count, wrong_count, elapsed_ms, rate_min, rate_max, questions_json"
+    // questions_json 不整列读：长训练的全题面快照单行可达数 MB，超出 SQLite 游标窗口（约 2MB）会让
+    // 整条查询抛 Row too big 异常（表现：计划表该天"有绿点无记录"）。列表只取 length，正文按需分块读
+    private val SESSION_COLS = "id, finished_at, date_str, module_id, module_name, is_wrong_practice, question_count, correct_count, wrong_count, elapsed_ms, rate_min, rate_max, length(questions_json)"
+
+    // 快照 JSON 分块读取的块大小（字符）：最坏 3 字节/字的 CJK 也仅约 768KB，远小于游标窗口
+    private val SESSION_JSON_CHUNK = 262144
 
     fun savePracticeSession(s: PracticeSessionRecord): Long {
         val values = ContentValues().apply {
@@ -831,9 +854,104 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
         writableDatabase.delete(T_SESSIONS, "id = ?", arrayOf(id.toString()))
     }
 
+    /** 全部训练快照导出为 JSON 数组（备份用）；questions_json 走分块读防游标窗口溢出 */
+    fun exportSessionsJson(): String {
+        val arr = JSONArray()
+        readableDatabase.rawQuery("SELECT $SESSION_COLS FROM $T_SESSIONS ORDER BY id", null).use { c ->
+            while (c.moveToNext()) {
+                arr.put(JSONObject().apply {
+                    put("finished_at", c.getLong(1))
+                    put("date_str", c.getString(2))
+                    put("module_id", c.getString(3) ?: "")
+                    put("module_name", c.getString(4) ?: "")
+                    put("is_wrong_practice", c.getInt(5))
+                    put("question_count", c.getInt(6))
+                    put("correct_count", c.getInt(7))
+                    put("wrong_count", c.getInt(8))
+                    put("elapsed_ms", c.getLong(9))
+                    put("rate_min", c.getInt(10))
+                    put("rate_max", c.getInt(11))
+                    put("questions_json", readSessionJson(c.getLong(0), c.getInt(12)))
+                })
+            }
+        }
+        return arr.toString()
+    }
+
+    /** 还原训练快照：不带 id 插入（自动分配，避免与目标机已有记录撞主键），返回条数 */
+    fun importSessionsJson(json: String): Int {
+        val arr = JSONArray(json)
+        var n = 0
+        writableDatabase.beginTransaction()
+        try {
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                val values = ContentValues().apply {
+                    put("finished_at", o.optLong("finished_at"))
+                    put("date_str", o.optString("date_str"))
+                    put("module_id", o.optString("module_id"))
+                    put("module_name", o.optString("module_name"))
+                    put("is_wrong_practice", o.optInt("is_wrong_practice"))
+                    put("question_count", o.optInt("question_count"))
+                    put("correct_count", o.optInt("correct_count"))
+                    put("wrong_count", o.optInt("wrong_count"))
+                    put("elapsed_ms", o.optLong("elapsed_ms"))
+                    put("rate_min", o.optInt("rate_min", 0))
+                    put("rate_max", o.optInt("rate_max", 100))
+                    put("questions_json", o.optString("questions_json", "[]"))
+                }
+                writableDatabase.insert(T_SESSIONS, null, values)
+                n++
+            }
+            writableDatabase.setTransactionSuccessful()
+        } finally {
+            writableDatabase.endTransaction()
+        }
+        return n
+    }
+
+    /** 全部手写批注导出为 JSON 数组（备份用） */
+    fun exportAnnotationsJson(): String {
+        val arr = JSONArray()
+        readableDatabase.rawQuery("SELECT question_id, strokes, updated_at FROM $T_ANNOTATIONS", null).use { c ->
+            while (c.moveToNext()) {
+                arr.put(JSONObject().apply {
+                    put("question_id", c.getString(0))
+                    put("strokes", c.getString(1))
+                    put("updated_at", c.getLong(2))
+                })
+            }
+        }
+        return arr.toString()
+    }
+
+    /** 还原手写批注：question_id 为稳定主键，REPLACE 幂等合并，返回条数 */
+    fun importAnnotationsJson(json: String): Int {
+        val arr = JSONArray(json)
+        var n = 0
+        writableDatabase.beginTransaction()
+        try {
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                val values = ContentValues().apply {
+                    put("question_id", o.optString("question_id"))
+                    put("strokes", o.optString("strokes"))
+                    put("updated_at", o.optLong("updated_at"))
+                }
+                writableDatabase.insertWithOnConflict(T_ANNOTATIONS, null, values, SQLiteDatabase.CONFLICT_REPLACE)
+                n++
+            }
+            writableDatabase.setTransactionSuccessful()
+        } finally {
+            writableDatabase.endTransaction()
+        }
+        return n
+    }
+
     private fun cursorToSession(cursor: android.database.Cursor): PracticeSessionRecord {
+        val id = cursor.getLong(0)
         return PracticeSessionRecord(
-            id = cursor.getLong(0),
+            id = id,
             finishedAt = cursor.getLong(1),
             dateStr = cursor.getString(2),
             moduleId = cursor.getString(3) ?: "",
@@ -845,8 +963,33 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
             elapsedMs = cursor.getLong(9),
             rateMin = cursor.getInt(10),
             rateMax = cursor.getInt(11),
-            questionsJson = cursor.getString(12) ?: "[]"
+            questionsJson = readSessionJson(id, cursor.getInt(12))
         )
+    }
+
+    /** 按需读 questions_json：小快照直读，大快照 substr 分块拼接（整读会撑爆游标窗口） */
+    private fun readSessionJson(id: Long, totalChars: Int): String {
+        if (totalChars <= 0) return "[]"
+        if (totalChars <= SESSION_JSON_CHUNK) {
+            readableDatabase.rawQuery(
+                "SELECT questions_json FROM $T_SESSIONS WHERE id = ?",
+                arrayOf(id.toString())
+            ).use { c ->
+                return if (c.moveToFirst()) (c.getString(0) ?: "[]") else "[]"
+            }
+        }
+        val sb = StringBuilder(totalChars)
+        var pos = 1
+        while (pos <= totalChars) {
+            readableDatabase.rawQuery(
+                "SELECT substr(questions_json, ?, ?) FROM $T_SESSIONS WHERE id = ?",
+                arrayOf(pos.toString(), SESSION_JSON_CHUNK.toString(), id.toString())
+            ).use { c ->
+                if (c.moveToFirst()) sb.append(c.getString(0))
+            }
+            pos += SESSION_JSON_CHUNK
+        }
+        return sb.toString()
     }
 
     fun getQuestionCountByRateRange(moduleId: String, rateMin: Int, rateMax: Int): Int {

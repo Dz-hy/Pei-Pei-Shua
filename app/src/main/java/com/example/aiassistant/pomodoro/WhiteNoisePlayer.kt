@@ -60,10 +60,22 @@ class WhiteNoisePlayer(private val context: Context) {
                 setDataSource(afd.fileDescriptor, afd.startOffset, afd.length)
                 isLooping = true
                 setVolume(volume, volume)
-                prepare()
-                start()
+                // prepareAsync：媒体 IO 与解码器初始化不阻塞主线程（setDataSource 已复制 fd，afd 可立即关闭）
+                setOnPreparedListener { mp ->
+                    if (mediaPlayer === mp) {
+                        mp.start()
+                        playing = true
+                    }
+                }
+                setOnErrorListener { mp, _, _ ->
+                    if (mediaPlayer === mp) {
+                        releasePlayer()
+                        playing = false
+                    }
+                    true
+                }
+                prepareAsync()
             }
-            playing = true
         } catch (e: Exception) {
             e.printStackTrace()
             releasePlayer()

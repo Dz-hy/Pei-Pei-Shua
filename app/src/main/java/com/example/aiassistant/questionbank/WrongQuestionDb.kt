@@ -156,7 +156,28 @@ class WrongQuestionDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, nul
     }
 
     fun getById(id: String): WrongQuestion? {
-        return listAll().firstOrNull { it.id == id }
+        // 单行查询：listAll 会为每行反序列化快照 JSON（含 base64 解析图，单条可达数 MB），
+        // 主线程调用点用 getById 拿一条不该全表加载
+        readableDatabase.rawQuery(
+            "SELECT id, timestamp, image_path, ocr_text, snapshot, bank_question_id, summary, is_summarized, annotation_json, wrong_count, mastered FROM $T_WRONG WHERE id = ?",
+            arrayOf(id)
+        ).use { c ->
+            if (!c.moveToFirst()) return null
+            val snapshot = WrongSnapshotCodec.fromJson(c.getString(4) ?: "")
+            return WrongQuestion(
+                id = c.getString(0),
+                questionText = c.getString(3) ?: "",
+                imagePath = c.getString(2) ?: "",
+                timestamp = c.getLong(1),
+                isSummarized = c.getInt(7) != 0,
+                summary = c.getString(6) ?: "",
+                bankQuestionId = c.getString(5) ?: "",
+                annotationJson = c.getString(8) ?: "",
+                wrongCount = c.getInt(9),
+                mastered = c.getInt(10) != 0,
+                snapshot = snapshot
+            )
+        }
     }
 
     fun insert(q: WrongQuestion) {

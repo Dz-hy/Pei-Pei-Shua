@@ -1,13 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?><!--
-   Sample backup rules file; uncomment and customize as necessary.
-   See https://developer.android.com/guide/topics/data/autobackup
-   for details.
-   Note: This file is ignored for devices older than API 31
-   See https://developer.android.com/about/versions/12/backup-restore
+   备份规则：SharedPreferences（ai_assistant_prefs）内含 AI/OCR API Key 等敏感配置，
+   禁止随云备份上传；设置迁移请使用 App 内「设置导出/导入」JSON 功能。
+   数据库（题库/错题本等）仍正常备份。
+   详见 https://developer.android.com/guide/topics/data/autobackup
 -->
 <full-backup-content>
-    <!--
-   <include domain="sharedpref" path="."/>
-   <exclude domain="sharedpref" path="device.xml"/>
--->
+    <exclude domain="sharedpref" path="." />
 </full-backup-content>

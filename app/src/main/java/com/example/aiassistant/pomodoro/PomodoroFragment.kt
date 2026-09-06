@@ -109,7 +109,10 @@ class PomodoroFragment : Fragment(), PomodoroTimer.TimerListener {
 
         // 先恢复旋转前的计时器，再清理孤立会话（避免清理掉正在恢复的会话）
         restoreTimerIfNeeded()
-        try { PomodoroManager.cleanOrphanedSessions() } catch (_: Exception) {}
+        // 孤儿会话清理（查 20 条 + 批量更新）放后台
+        Thread {
+            try { PomodoroManager.cleanOrphanedSessions() } catch (_: Exception) {}
+        }.start()
         refreshStats()
 
         // 第一次进入番茄钟引导
