@@ -351,11 +351,15 @@ class PomodoroFragment : Fragment(), PomodoroTimer.TimerListener {
 
         if (!isSkipped) {
             vibrator?.let { v ->
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    v.vibrate(VibrationEffect.createOneShot(500, VibrationEffect.DEFAULT_AMPLITUDE))
-                } else {
-                    @Suppress("DEPRECATION")
-                    v.vibrate(500)
+                try {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        v.vibrate(VibrationEffect.createOneShot(500, VibrationEffect.DEFAULT_AMPLITUDE))
+                    } else {
+                        @Suppress("DEPRECATION")
+                        v.vibrate(500)
+                    }
+                } catch (_: Exception) {
+                    // 个别 ROM 即使声明权限也可能拒震，提示反馈失败不该崩掉计时流程
                 }
             }
             val msg = when (state) {
