@@ -237,8 +237,9 @@ def _pdf_elements(doc):
     return elements
 
 
-def _is_uniform_image(data: bytes) -> bool:
-    """全图单一颜色（全黑/全白/纯透明装饰条，WPS 导出常见）→ True，调用方丢弃。"""
+def _uniform_color(data: bytes):
+    """全图单一颜色 → 返回该颜色 RGB 元组（PDF stencil 掩模按普通图导出即全黑）；
+    多色图/解析失败 → None。"""
     import fitz
     try:
         with fitz.open(stream=data, filetype="png") as idoc:
@@ -247,9 +248,11 @@ def _is_uniform_image(data: bytes) -> bool:
             pix = fitz.Pixmap(fitz.csRGB, pix)
         step = max(1, (pix.width * pix.height) // 64)
         samples = {pix.pixel(x, y)[:3] for y in range(0, pix.height, step) for x in range(0, pix.width, step)}
-        return len(samples) <= 1
+        if len(samples) <= 1:
+            return next(iter(samples))
     except Exception:
-        return False
+        pass
+    return None
 
 
 def _image_data_url(doc, xref, page, bbox, cache):
@@ -279,8 +282,20 @@ def _image_data_url(doc, xref, page, bbox, cache):
             data = pix.tobytes("png")
         except Exception:
             return None
-    if len(data) < 640 and _is_uniform_image(data):
-        return None  # 单色装饰条/空白块（压缩后 <640B 且全图一色），无信息量
+    color = _uniform_color(data) if data else None
+    if color is not None:
+        # 单色图：全黑无论大小多半是 stencil 掩模（掩模无颜色信息，导出即全黑），
+        # 小单色图多为装饰条。先按页面显示区域渲染兜底（带绘制色渲染出来就是正常公式图），
+        # 渲染后仍单色且为全黑或小图，才确认无信息量，丢弃
+        try:
+            alt = page.get_pixmap(clip=fitz.Rect(*bbox), dpi=150).tobytes("png")
+            if alt and not _uniform_color(alt):
+                data, mime = alt, "image/png"
+                color = None
+        except Exception:
+            pass
+    if data is None or (color is not None and (len(data) < 640 or color == (0, 0, 0))):
+        return None  # 单色装饰条/空白块/救不回来的掩模，无信息量
     url = f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
     if xref:
         cache[xref] = url
