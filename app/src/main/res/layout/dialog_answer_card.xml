@@ -127,7 +127,8 @@
         <com.google.android.material.button.MaterialButton
             android:id="@+id/btn_card_restart"
             android:layout_width="0dp"
-            android:layout_height="44dp"
+            android:layout_height="wrap_content"
+            android:minHeight="44dp"
             android:layout_weight="1"
             android:text="再来一组"
             android:textSize="14sp"
@@ -138,7 +139,8 @@
         <com.google.android.material.button.MaterialButton
             android:id="@+id/btn_card_exit"
             android:layout_width="0dp"
-            android:layout_height="44dp"
+            android:layout_height="wrap_content"
+            android:minHeight="44dp"
             android:layout_weight="1"
             android:text="退出训练"
             android:textSize="14sp"

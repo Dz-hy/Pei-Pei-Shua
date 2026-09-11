@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- AI 解析对话框 WebView 内容区高度；横屏在 values-land 覆盖，防止对话框超出屏幕 -->
+    <dimen name="ai_analysis_webview_height">420dp</dimen>
+</resources>

@@ -11,12 +11,14 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.PixelFormat
+import android.util.DisplayMetrics
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
 import android.provider.Settings
+import android.view.Gravity
 import android.view.KeyEvent
 import android.view.LayoutInflater
 import android.view.View
@@ -284,7 +286,13 @@ class AppBlockerService : Service() {
                 or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
                 or WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
                 or WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-            val params = WindowParamsCreator.createLayoutParams(windowFlags)
+            // 显式全屏尺寸：MATCH_PARENT 会被 HyperOS 布局到状态栏之下，遮罩内容整体上移一个状态栏高度
+            val metrics = DisplayMetrics()
+            @Suppress("DEPRECATION")
+            wm.defaultDisplay.getRealMetrics(metrics)
+            val params = WindowParamsCreator.createLayoutParams(
+                metrics.widthPixels, metrics.heightPixels, windowFlags
+            )
 
             val view = LayoutInflater.from(this).inflate(R.layout.layout_app_blocker_overlay, null)
 
@@ -352,10 +360,10 @@ class AppBlockerService : Service() {
     }
 
     private object WindowParamsCreator {
-        fun createLayoutParams(windowFlags: Int): WindowManager.LayoutParams {
+        fun createLayoutParams(width: Int, height: Int, windowFlags: Int): WindowManager.LayoutParams {
             return WindowManager.LayoutParams(
-                WindowManager.LayoutParams.MATCH_PARENT,
-                WindowManager.LayoutParams.MATCH_PARENT,
+                width,
+                height,
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
                     WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
                 else
@@ -363,7 +371,11 @@ class AppBlockerService : Service() {
                     WindowManager.LayoutParams.TYPE_PHONE,
                 windowFlags,
                 PixelFormat.TRANSLUCENT
-            )
+            ).apply {
+                gravity = Gravity.TOP or Gravity.START
+                x = 0
+                y = 0
+            }
         }
     }
 

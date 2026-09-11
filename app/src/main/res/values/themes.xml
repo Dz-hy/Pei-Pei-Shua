@@ -1,6 +1,6 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
     <!-- Base application theme. -->
-    <style name="Base.Theme.AIAssistant" parent="Theme.Material3.DayNight.NoActionBar">
+    <style name="Base.Theme.AIAssistant" parent="Theme.Material3.Light.NoActionBar">
         <!-- 沉浸式状态栏与导航栏适配 -->
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@color/background</item>
@@ -18,7 +18,7 @@
         <item name="android:windowIsFloating">true</item>
     </style>
 
-    <style name="Theme.Transparent" parent="Theme.Material3.DayNight.NoActionBar">
+    <style name="Theme.Transparent" parent="Theme.Material3.Light.NoActionBar">
         <item name="android:windowIsTranslucent">true</item>
         <item name="android:windowBackground">@android:color/transparent</item>
         <item name="android:windowNoTitle">true</item>
@@ -30,7 +30,8 @@
     <style name="PomodoroDurationChip">
         <item name="android:layout_width">0dp</item>
         <item name="android:layout_weight">1</item>
-        <item name="android:layout_height">40dp</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:minHeight">40dp</item>
         <item name="android:gravity">center</item>
         <item name="android:background">@drawable/bg_noise_chip</item>
         <item name="android:textSize">13sp</item>

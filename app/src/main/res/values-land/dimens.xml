@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 横屏屏幕高度有限（高屏手机约 360dp），压缩 WebView 高度保证标题与按钮可见 -->
+    <dimen name="ai_analysis_webview_height">180dp</dimen>
+</resources>
