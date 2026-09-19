@@ -4,6 +4,7 @@ plugins {
 }
 
 import java.text.SimpleDateFormat
+import java.util.Calendar
 import java.util.Date
 
 buildDir = file("build-zen")
@@ -16,7 +17,10 @@ android {
         applicationId = "com.example.aiassistant"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
+        // versionCode 跨构建单调递增：(年-2025)*1e8 + MMddHHmm，2046 年内不会溢出 int
+        val buildCal = Calendar.getInstance()
+        versionCode = (buildCal.get(Calendar.YEAR) - 2025) * 100_000_000 +
+            SimpleDateFormat("MMddHHmm").format(Date()).toInt()
         // 每次构建自动变化的版号（如 1.0.08292145），用于确认真机安装的是哪个构建
         versionName = "1.0." + SimpleDateFormat("MMddHHmm").format(Date())
 
@@ -64,7 +68,6 @@ dependencies {
     implementation(libs.androidx.activity)
     implementation(libs.androidx.constraintlayout)
     implementation(libs.okhttp)
-    implementation(libs.brotli)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

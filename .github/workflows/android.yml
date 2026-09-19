@@ -33,10 +33,9 @@ jobs:
       - name: 打包 Debug APK
         run: ./gradlew :app:assembleDebug --stacktrace
 
-      # Release 用仓库内 debug.keystore 签名；首次跑 CI 若 proguard 有问题不阻塞 Debug 产物
+      # Release 与 Debug 同一套签名；R8 失败必须让 job 变红（此前 continue-on-error 会静默吞掉）
       - name: 打包 Release APK
         run: ./gradlew :app:assembleRelease --stacktrace
-        continue-on-error: true
 
       - name: 整理产物
         run: |
