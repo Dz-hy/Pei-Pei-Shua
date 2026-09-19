@@ -46,28 +46,34 @@ class ShizhengWrongDetailActivity : AppCompatActivity() {
 
         findViewById<ImageView>(R.id.btn_back).setOnClickListener { finish() }
 
-        val qid = intent.getLongExtra(EXTRA_QUESTION_ID, -1)
-        question = ShizhengManager.getQuestion(qid)
-        if (question == null) {
-            Toast.makeText(this, "题目不存在", Toast.LENGTH_SHORT).show()
-            finish()
-            return
-        }
-
         btnRedo.setOnClickListener { onRedo() }
         btnDelete.setOnClickListener { onDelete() }
         findViewById<TextView>(R.id.tv_source).setOnClickListener { openSource() }
 
-        renderReadOnly()
+        // 题目+最近作答记录后台加载（同步 SQLiteOpenHelper，主线程查库会卡顿）
+        val qid = intent.getLongExtra(EXTRA_QUESTION_ID, -1)
+        Thread {
+            val q = ShizhengManager.getQuestion(qid)
+            val latest = q?.let { ShizhengManager.getLatestRecord(it.id) }
+            runOnUiThread {
+                if (isDestroyed || isFinishing) return@runOnUiThread
+                if (q == null) {
+                    Toast.makeText(this, "题目不存在", Toast.LENGTH_SHORT).show()
+                    finish()
+                    return@runOnUiThread
+                }
+                question = q
+                renderReadOnly(latest)
+            }
+        }.start()
     }
 
-    private fun renderReadOnly() {
+    private fun renderReadOnly(latest: ShizhengWrongRecord?) {
         val q = question ?: return
         findViewById<TextView>(R.id.tv_type_badge).text = ShizhengQuestionType.label(q.type)
         findViewById<TextView>(R.id.tv_stem).text = q.stem
         findViewById<TextView>(R.id.tv_source).text = "📰 来源：${q.sourceLabel}"
 
-        val latest = ShizhengManager.getLatestRecord(q.id)
         val yourLetter = latest?.let { r -> if (r.selected in 0..3) ('A' + r.selected).toString() else "未作答" } ?: "未作答"
         tvYourAnswer.text = "你的答案：$yourLetter　正确答案：${q.answer}"
 
@@ -100,9 +106,9 @@ class ShizhengWrongDetailActivity : AppCompatActivity() {
         val answerIndex = q.answer.firstOrNull()?.minus('A') ?: -1
         val isCorrect = selected == answerIndex
 
-        ShizhengManager.insertWrongRecord(
-            ShizhengWrongRecord(questionId = q.id, selected = selected, isCorrect = isCorrect)
-        )
+        // 作答记录后台写库
+        val record = ShizhengWrongRecord(questionId = q.id, selected = selected, isCorrect = isCorrect)
+        Thread { ShizhengManager.insertWrongRecord(record) }.start()
 
         optionViews.forEachIndexed { j, tv ->
             when (j) {
@@ -131,7 +137,8 @@ class ShizhengWrongDetailActivity : AppCompatActivity() {
             .setTitle("移出错题本")
             .setMessage("将清除该题的全部作答记录，确定吗？")
             .setPositiveButton("确定") { _, _ ->
-                ShizhengManager.clearWrongRecords(q.id)
+                // 清记录后台写库，UI 即刻退出
+                Thread { ShizhengManager.clearWrongRecords(q.id) }.start()
                 Toast.makeText(this, "已移出错题本", Toast.LENGTH_SHORT).show()
                 finish()
             }
@@ -140,13 +147,20 @@ class ShizhengWrongDetailActivity : AppCompatActivity() {
     }
 
     private fun openSource() {
-        val news = question?.let { ShizhengManager.getNews(it.newsId) } ?: return
-        if (news.url.isEmpty()) return
-        try {
-            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(news.url)))
-        } catch (e: Exception) {
-            Toast.makeText(this, "无法打开浏览器", Toast.LENGTH_SHORT).show()
-        }
+        val q = question ?: return
+        // 原文查询后台读库
+        Thread {
+            val news = ShizhengManager.getNews(q.newsId)
+            runOnUiThread {
+                if (isDestroyed || isFinishing) return@runOnUiThread
+                if (news == null || news.url.isEmpty()) return@runOnUiThread
+                try {
+                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(news.url)))
+                } catch (e: Exception) {
+                    Toast.makeText(this, "无法打开浏览器", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }.start()
     }
 
     private fun buildOptions(q: ShizhengQuestion, interactive: Boolean) {

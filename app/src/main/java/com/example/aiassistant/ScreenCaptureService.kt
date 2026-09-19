@@ -921,10 +921,8 @@ class ScreenCaptureService : Service() {
         if (isDictOcrMode) {
             isDictOcrMode = false
             Log.i(TAG, "词典识词模式触发，OCR文本前100字=${ocrText.take(100)}")
-            mainHandler.post {
-                hideBallProgress()
-                performDictOcrSearch(ocrText)
-            }
+            mainHandler.post { hideBallProgress() }
+            performDictOcrSearch(ocrText, requestId)
             return
         }
 
@@ -1966,74 +1964,78 @@ class ScreenCaptureService : Service() {
         """.trimIndent()
     }
 
-    private fun performDictOcrSearch(ocrText: String) {
+    private fun performDictOcrSearch(ocrText: String, requestId: Long) {
         val cleanedText = ocrText.lines()
             .map { it.trim() }
             .filter { it.isNotEmpty() }
             .joinToString("\n")
 
-        // 1. 本地题库库检索原题
-        val bankMatch = com.example.aiassistant.questionbank.QuestionBankManager.search(cleanedText)
-        val wordsToSearch = mutableListOf<String>()
+        // 题库 FTS+LCS 检索与词典逐词查库整体下放后台线程（此前在主线程，出卡前 UI 冻结），
+        // 复用 searchAsync 的库线程回调，完成后回主线程展示；过期请求直接丢弃
+        com.example.aiassistant.questionbank.QuestionBankManager.searchAsync(cleanedText) { bankMatch ->
+            if (currentRequestId != requestId) return@searchAsync
 
-        if (bankMatch != null) {
-            Log.i(TAG, "词库识图模式 - 题库命中！ID=${bankMatch.id}, 选项数=${bankMatch.options.size}")
-            for ((i, opt) in bankMatch.options.withIndex()) {
-                Log.i(TAG, "  选项$i: text='${opt.text}'")
-            }
-            val extracted = extractCleanWordsFromOptions(bankMatch.options)
-            Log.i(TAG, "词库识图模式 - 从选项中提取到 ${extracted.size} 个词: $extracted")
-            wordsToSearch.addAll(extracted)
-        } else {
-            Log.i(TAG, "词库识图模式 - 题库未命中，执行OCR文本选项词汇智能提取")
-            val ocrOptions = extractCleanWordsFromOcrOptions(cleanedText)
-            if (ocrOptions.isNotEmpty()) {
-                Log.i(TAG, "成功从 OCR 文本中提取到选项词汇: $ocrOptions")
-                wordsToSearch.addAll(ocrOptions)
+            val wordsToSearch = mutableListOf<String>()
+            if (bankMatch != null) {
+                Log.i(TAG, "词库识图模式 - 题库命中！ID=${bankMatch.id}, 选项数=${bankMatch.options.size}")
+                for ((i, opt) in bankMatch.options.withIndex()) {
+                    Log.i(TAG, "  选项$i: text='${opt.text}'")
+                }
+                val extracted = extractCleanWordsFromOptions(bankMatch.options)
+                Log.i(TAG, "词库识图模式 - 从选项中提取到 ${extracted.size} 个词: $extracted")
+                wordsToSearch.addAll(extracted)
             } else {
-                Log.i(TAG, "OCR 文本中无明显选项格式，走智能滑动窗口文本扫描")
-                wordsToSearch.addAll(extractCandidatesFromText(cleanedText))
+                Log.i(TAG, "词库识图模式 - 题库未命中，执行OCR文本选项词汇智能提取")
+                val ocrOptions = extractCleanWordsFromOcrOptions(cleanedText)
+                if (ocrOptions.isNotEmpty()) {
+                    Log.i(TAG, "成功从 OCR 文本中提取到选项词汇: $ocrOptions")
+                    wordsToSearch.addAll(ocrOptions)
+                } else {
+                    Log.i(TAG, "OCR 文本中无明显选项格式，走智能滑动窗口文本扫描")
+                    wordsToSearch.addAll(extractCandidatesFromText(cleanedText))
+                }
             }
-        }
 
-        // 2. 内存词库匹配
-        val finalMatchList = mutableListOf<com.example.aiassistant.dictionary.DictItem>()
-        for (word in wordsToSearch) {
-            val dictRes = com.example.aiassistant.dictionary.DictionaryManager.search(word)
-            if (!dictRes.isEmpty) {
-                // 优先挑选精确完全相等词条
-                val matchedItem = dictRes.items.firstOrNull { item ->
-                    val itemWord = when (item) {
-                        is com.example.aiassistant.dictionary.DictItem.IdiomItem -> item.data.word
-                        is com.example.aiassistant.dictionary.DictItem.WordItem -> item.data.word
-                        is com.example.aiassistant.dictionary.DictItem.CiItem -> item.data.ci
-                        is com.example.aiassistant.dictionary.DictItem.XiehouyuItem -> item.data.riddle
+            // 2. 内存词库匹配
+            val finalMatchList = mutableListOf<com.example.aiassistant.dictionary.DictItem>()
+            for (word in wordsToSearch) {
+                val dictRes = com.example.aiassistant.dictionary.DictionaryManager.search(word)
+                if (!dictRes.isEmpty) {
+                    // 优先挑选精确完全相等词条
+                    val matchedItem = dictRes.items.firstOrNull { item ->
+                        val itemWord = when (item) {
+                            is com.example.aiassistant.dictionary.DictItem.IdiomItem -> item.data.word
+                            is com.example.aiassistant.dictionary.DictItem.WordItem -> item.data.word
+                            is com.example.aiassistant.dictionary.DictItem.CiItem -> item.data.ci
+                            is com.example.aiassistant.dictionary.DictItem.XiehouyuItem -> item.data.riddle
+                        }
+                        itemWord == word
                     }
-                    itemWord == word
-                }
-                if (matchedItem != null) {
-                    finalMatchList.add(matchedItem)
+                    if (matchedItem != null) {
+                        finalMatchList.add(matchedItem)
+                    }
                 }
             }
-        }
 
-        // 3. 去重
-        val distinctList = finalMatchList.distinctBy { item ->
-            when (item) {
-                is com.example.aiassistant.dictionary.DictItem.IdiomItem -> item.data.word
-                is com.example.aiassistant.dictionary.DictItem.WordItem -> item.data.word
-                is com.example.aiassistant.dictionary.DictItem.CiItem -> item.data.ci
-                is com.example.aiassistant.dictionary.DictItem.XiehouyuItem -> item.data.riddle
+            // 3. 去重
+            val distinctList = finalMatchList.distinctBy { item ->
+                when (item) {
+                    is com.example.aiassistant.dictionary.DictItem.IdiomItem -> item.data.word
+                    is com.example.aiassistant.dictionary.DictItem.WordItem -> item.data.word
+                    is com.example.aiassistant.dictionary.DictItem.CiItem -> item.data.ci
+                    is com.example.aiassistant.dictionary.DictItem.XiehouyuItem -> item.data.riddle
+                }
             }
-        }
 
-        Log.i(TAG, "词库匹配完成，搜索词数=${wordsToSearch.size}，命中词汇量=${distinctList.size}")
+            Log.i(TAG, "词库匹配完成，搜索词数=${wordsToSearch.size}，命中词汇量=${distinctList.size}")
 
-        // 4. 显示浮空卡片结果
-        mainHandler.post {
-            isCapturing = false
-            cancelCaptureTimeout()
-            showDictOcrResultCard(distinctList, cleanedText)
+            // 4. 显示浮空卡片结果
+            mainHandler.post {
+                if (currentRequestId != requestId) return@post
+                isCapturing = false
+                cancelCaptureTimeout()
+                showDictOcrResultCard(distinctList, cleanedText)
+            }
         }
     }
 

@@ -49,6 +49,7 @@ class HandwritingController(
     private var currentId: String? = null
     private var editing = false
     private var tapEditHintShown = false
+    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
     /** 幂等安装：包装 ScrollView 内容、叠加批注层与工具栏 */
     fun install() {
@@ -95,21 +96,33 @@ class HandwritingController(
         }
     }
 
-    /** 答案揭晓：加载并显示该题已有批注（查看态，防剧透只在答题后调用） */
+    /** 答案揭晓：批注 JSON 后台加载，回主线程显示（查看态，防剧透只在答题后调用）。
+     *  笔画 JSON 可达数百 KB，此前在主线程同步查库；异步化后未命中/已切题/已进编辑均不显示 */
     fun revealAnnotation(id: String) {
         if (editing) return
         currentId = id
-        val json = loader(id)
-        android.util.Log.d("HWDebug", "revealAnnotation id=$id jsonLen=${json?.length ?: -1}")
-        if (!json.isNullOrBlank()) {
-            overlay.clearStrokes()
-            overlay.loadFromJson(json)
-            showOverlay(interactive = false)
-            if (overlay.tapToEditEnabled && overlay.hasStrokes() && !tapEditHintShown) {
-                tapEditHintShown = true
-                Toast.makeText(activity, "点击手写笔迹可直接继续编辑", Toast.LENGTH_SHORT).show()
+        Thread {
+            val json = try {
+                loader(id)
+            } catch (e: Exception) {
+                android.util.Log.w("HWDebug", "revealAnnotation load failed", e)
+                null
             }
-        }
+            mainHandler.post {
+                // 过期结果兜底：加载期间切题或进入编辑态则丢弃
+                if (currentId != id || editing) return@post
+                android.util.Log.d("HWDebug", "revealAnnotation id=$id jsonLen=${json?.length ?: -1}")
+                if (!json.isNullOrBlank()) {
+                    overlay.clearStrokes()
+                    overlay.loadFromJson(json)
+                    showOverlay(interactive = false)
+                    if (overlay.tapToEditEnabled && overlay.hasStrokes() && !tapEditHintShown) {
+                        tapEditHintShown = true
+                        Toast.makeText(activity, "点击手写笔迹可直接继续编辑", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+        }.start()
     }
 
     /** 查看态"点笔迹直接进编辑"开关：交卷回看/复习页/文章页开启；做题中必须关闭（点击要穿透到选项） */

@@ -51,7 +51,24 @@ class TimerHistoryActivity : AppCompatActivity() {
     }
 
     private fun refresh() {
-        val sessions = TimerStore.getSessions(this)
+        // 全表读取后台执行，回主线程刷新（onCreate 直调，避免主线程读库卡顿）
+        Thread {
+            val sessions = TimerStore.getSessions(this)
+            runOnUiThread { applySessions(sessions) }
+        }.start()
+    }
+
+    /** 删除后重载：删除与重读串在同一后台线程，保证列表反映删除结果 */
+    private fun deleteAndRefresh(sessionId: Long) {
+        Thread {
+            TimerStore.deleteSession(this, sessionId)
+            val sessions = TimerStore.getSessions(this)
+            runOnUiThread { applySessions(sessions) }
+        }.start()
+    }
+
+    private fun applySessions(sessions: List<TimerSession>) {
+        if (isDestroyed || isFinishing) return
         adapter.submit(sessions)
         emptyView.visibility = if (sessions.isEmpty()) TextView.VISIBLE else TextView.GONE
     }
@@ -136,8 +153,7 @@ class TimerHistoryActivity : AppCompatActivity() {
                     .setTitle("删除这条计时记录？")
                     .setMessage("删除后不可恢复")
                     .setPositiveButton("删除") { _, _ ->
-                        TimerStore.deleteSession(this@TimerHistoryActivity, session.id)
-                        refresh()
+                        deleteAndRefresh(session.id)
                         Toast.makeText(this@TimerHistoryActivity, "已删除", Toast.LENGTH_SHORT).show()
                     }
                     .setNegativeButton("取消", null)

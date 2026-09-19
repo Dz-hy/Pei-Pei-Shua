@@ -167,6 +167,10 @@ class PracticeActivity : AppCompatActivity() {
         Companion.appCtx = applicationContext
         setContentView(R.layout.activity_practice)
 
+        // KaTeX 大文件（katex.min.js 250KB+）后台预热：首题渲染时通常已就绪，
+        // lazy 线程安全，未就绪时主线程同步读兜底（不改变渲染时序）
+        Thread({ katexAssets }, "KatexPrewarm").start()
+
         reviewSessionId = intent.getLongExtra("review_session_id", -1L)
         moduleId = intent.getStringExtra("module_id") ?: ""
         moduleName = intent.getStringExtra("module_name") ?: ""
@@ -548,6 +552,9 @@ try {
         lastSelectedText = ""
 
         val question = questions[index]
+
+        // 解析图后台预解码：揭晓解析时零等待（缓存未命中会同步解码兜底，不影响正确性）
+        HtmlAnalysis.preloadAsync(question.analysis)
 
         // 材料区域：同组子题共享同一 materialId，切换子题时不重载、滚动位置保持；
         // 无材料时整个材料区隐藏（上半区让给题目，sv_content 占满）

@@ -222,6 +222,10 @@ class WrongQuestionDetailActivity : AppCompatActivity() {
             return
         }
 
+        // 解析图/材料图后台预解码（首渲染未命中时仍同步解码兜底，不影响显示）
+        HtmlAnalysis.preloadAsync(item.bankAnalysis)
+        item.snapshot?.materialContent?.let { HtmlAnalysis.preloadAsync(it) }
+
         // 来源标记：题库题展示完整 JSON key（快照 id，含 custom_ 前缀，用于排查转换失败），
         // 无快照回落"来自题库"
         val tvBadge = findViewById<TextView>(R.id.tv_source_badge)
