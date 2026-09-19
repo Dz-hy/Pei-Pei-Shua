@@ -1,6 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  明文 HTTP 已全局禁用（2026-09-20 盘点：全部 AI/OCR/时政/题库接口与图片均为 HTTPS，
+  现有题库数据中的图片全部是 base64 data URI，无任何 http 外链）。
+  保留 user 证书锚点以便抓包调试（Clash/Charles 自签证书）。
+-->
 <network-security-config>
-    <base-config cleartextTrafficPermitted="true">
+    <base-config cleartextTrafficPermitted="false">
         <trust-anchors>
             <certificates src="system" />
             <certificates src="user" />

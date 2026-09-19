@@ -128,22 +128,12 @@ class PracticeActivity : AppCompatActivity() {
             "4) 给一条实用的记忆技巧或秒杀技巧。不要复述题目，直接开讲。" +
             "数学公式用 LaTeX 写在 $...$ 或 \\(...\\) 里（会被渲染成公式），不要输出纯文本化的乱码公式。"
 
-        private val trustAllCerts = arrayOf<javax.net.ssl.X509TrustManager>(object : javax.net.ssl.X509TrustManager {
-            override fun checkClientTrusted(chain: Array<java.security.cert.X509Certificate>, authType: String) {}
-            override fun checkServerTrusted(chain: Array<java.security.cert.X509Certificate>, authType: String) {}
-            override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = arrayOf()
-        })
-
         @Volatile private var appCtx: android.content.Context? = null
 
         private val imageClient: OkHttpClient by lazy {
-            val sslContext = javax.net.ssl.SSLContext.getInstance("TLS")
-            sslContext.init(null, trustAllCerts, java.security.SecureRandom())
             val builder = OkHttpClient.Builder()
                 .connectTimeout(15, TimeUnit.SECONDS)
                 .readTimeout(15, TimeUnit.SECONDS)
-                .sslSocketFactory(sslContext.socketFactory, trustAllCerts[0])
-                .hostnameVerifier { _, _ -> true }
             // 题图磁盘缓存：内存缓存只在进程内有效，磁盘缓存让隔天重做同题也秒出图。
             // 服务端不给缓存头，网络层统一改写响应头强制缓存（题图 URL 内容不变，安全）
             appCtx?.let { ctx ->
