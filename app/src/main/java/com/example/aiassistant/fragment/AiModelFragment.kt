@@ -793,27 +793,18 @@ class AiModelFragment : Fragment() {
         importBankLauncher.launch(arrayOf("application/json", "text/*"))
     }
 
-    private fun getWrongQuestionsJson(context: android.content.Context): String {
-        val raw = com.example.aiassistant.questionbank.WrongQuestionManager.exportLegacyJson(context)
-        try {
-            val arr = org.json.JSONArray(raw)
-            for (i in 0 until arr.length()) {
-                val obj = arr.getJSONObject(i)
-                val path = obj.optString("imagePath", "")
-                if (path.isNotEmpty()) {
-                    val file = java.io.File(path)
-                    if (file.exists()) {
-                        val bytes = file.readBytes()
-                        val base64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
-                        obj.put("imageBase64", base64)
-                    }
-                }
+    /** 单条错题 + 截图 base64（备份导出流式写入用：一次只在内存里放一条记录） */
+    private fun enrichedWrongQuestionJson(obj: org.json.JSONObject): String {
+        val path = obj.optString("imagePath", "")
+        if (path.isNotEmpty()) {
+            val file = java.io.File(path)
+            if (file.exists()) {
+                val bytes = file.readBytes()
+                val base64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+                obj.put("imageBase64", base64)
             }
-            return arr.toString()
-        } catch (e: Exception) {
-            e.printStackTrace()
-            return raw
         }
+        return obj.toString()
     }
 
     private fun saveWrongQuestionsJson(context: android.content.Context, jsonStr: String) {
@@ -829,7 +820,8 @@ class AiModelFragment : Fragment() {
                     val base64Str = obj.getString("imageBase64")
                     try {
                         val bytes = android.util.Base64.decode(base64Str, android.util.Base64.DEFAULT)
-                        val file = java.io.File(dir, "wq_$id.png")
+                        // 统一 .jpg 命名（新截图为 JPEG）；旧备份里的 PNG 字节解码按内容嗅探不受扩展名影响
+                        val file = java.io.File(dir, "wq_$id.jpg")
                         java.io.FileOutputStream(file).use { fos ->
                             fos.write(bytes)
                         }
@@ -841,8 +833,15 @@ class AiModelFragment : Fragment() {
                     obj.remove("imageBase64")
                 } else if (id.isNotEmpty()) {
                     // 即使没有带 base64 字段，也可以尝试校准本地路径以防止不同用户/包路径发生改变
-                    val file = java.io.File(dir, "wq_$id.png")
-                    if (file.exists()) {
+                    // （新装机器存 .jpg，老机器可能有遗留 .png，两者都认）
+                    val jpg = java.io.File(dir, "wq_$id.jpg")
+                    val png = java.io.File(dir, "wq_$id.png")
+                    val file = when {
+                        jpg.exists() -> jpg
+                        png.exists() -> png
+                        else -> null
+                    }
+                    if (file != null) {
                         obj.put("imagePath", file.absolutePath)
                     }
                 }
@@ -871,59 +870,72 @@ class AiModelFragment : Fragment() {
         }
         Thread {
             try {
-                val root = org.json.JSONObject()
-                root.put("backup_type", "ai_assistant_multi_backup")
-                root.put("version", 1)
-                root.put("timestamp", System.currentTimeMillis())
-
-                if (exportOptions[0]) {
-                    val prefStr = AppPreferences.exportPreferencesJson(ctx)
-                    if (prefStr.isNotEmpty()) {
-                        root.put("preferences", org.json.JSONObject(prefStr))
-                    }
-                }
-
-                if (exportOptions[1]) {
-                    val wqStr = getWrongQuestionsJson(ctx)
-                    if (wqStr.isNotEmpty()) {
-                        root.put("wrong_questions", org.json.JSONArray(wqStr))
-                    }
-                }
-
-                if (exportOptions[2]) {
-                    val cardsStr = com.example.aiassistant.knowledge.KnowledgeCardDb(ctx).exportAllCardsJson()
-                    if (cardsStr.isNotEmpty()) {
-                        root.put("knowledge_cards", org.json.JSONObject(cardsStr))
-                    }
-                }
-
-                if (exportOptions[3]) {
-                    val bankStr = com.example.aiassistant.questionbank.QuestionBankDb(ctx).exportQuestionsJson()
-                    if (bankStr.isNotEmpty()) {
-                        root.put("question_bank", org.json.JSONObject(bankStr))
-                    }
-                }
-
                 var sessionCount = 0
                 var annCount = 0
-                if (exportOptions[4]) {
-                    val qdb = com.example.aiassistant.questionbank.QuestionBankDb(ctx)
-                    val sessionsStr = qdb.exportSessionsJson()
-                    if (sessionsStr.isNotEmpty()) {
-                        val sArr = org.json.JSONArray(sessionsStr)
-                        sessionCount = sArr.length()
-                        root.put("practice_sessions", sArr)
-                    }
-                    val annStr = qdb.exportAnnotationsJson()
-                    if (annStr.isNotEmpty()) {
-                        val aArr = org.json.JSONArray(annStr)
-                        annCount = aArr.length()
-                        root.put("question_annotations", aArr)
-                    }
-                }
-
+                // 流式写出：根结构手工拼装，各节直接写合法 JSON 文本（与旧版 JSONObject 树
+                // 等价、导入端无感）。避免把整份备份（含全部截图 base64）先拼成单个字符串
+                // 再 toString 造成的数倍内存尖峰
                 ctx.contentResolver.openOutputStream(uri)?.use { os ->
-                    os.write(root.toString(2).toByteArray(Charsets.UTF_8))
+                    java.io.BufferedWriter(java.io.OutputStreamWriter(os, Charsets.UTF_8)).use { w ->
+                        w.write("{\"backup_type\":\"ai_assistant_multi_backup\",\"version\":1")
+                        w.write(",\"timestamp\":${System.currentTimeMillis()}")
+
+                        fun writeJsonSection(name: String, json: String?) {
+                            if (!json.isNullOrEmpty()) {
+                                w.write(",\"$name\":")
+                                w.write(json)
+                            }
+                        }
+
+
+                        if (exportOptions[0]) {
+                            writeJsonSection("preferences", AppPreferences.exportPreferencesJson(ctx))
+                        }
+
+                        if (exportOptions[1]) {
+                            val raw = com.example.aiassistant.questionbank.WrongQuestionManager.exportLegacyJson(ctx)
+                            if (raw.isNotEmpty()) {
+                                w.write(",\"wrong_questions\":[")
+                                val arr = org.json.JSONArray(raw)
+                                for (i in 0 until arr.length()) {
+                                    if (i > 0) w.write(",")
+                                    w.write(enrichedWrongQuestionJson(arr.getJSONObject(i)))
+                                }
+                                w.write("]")
+                            }
+                        }
+
+                        if (exportOptions[2]) {
+                            writeJsonSection(
+                                "knowledge_cards",
+                                com.example.aiassistant.knowledge.KnowledgeCardDb(ctx).exportAllCardsJson()
+                            )
+                        }
+
+                        if (exportOptions[3]) {
+                            writeJsonSection(
+                                "question_bank",
+                                com.example.aiassistant.questionbank.QuestionBankDb(ctx).exportQuestionsJson()
+                            )
+                        }
+
+                        if (exportOptions[4]) {
+                            val qdb = com.example.aiassistant.questionbank.QuestionBankDb(ctx)
+                            val sessionsStr = qdb.exportSessionsJson()
+                            if (sessionsStr.isNotEmpty()) {
+                                sessionCount = org.json.JSONArray(sessionsStr).length()
+                                writeJsonSection("practice_sessions", sessionsStr)
+                            }
+                            val annStr = qdb.exportAnnotationsJson()
+                            if (annStr.isNotEmpty()) {
+                                annCount = org.json.JSONArray(annStr).length()
+                                writeJsonSection("question_annotations", annStr)
+                            }
+                        }
+
+                        w.write("}")
+                        w.flush()
+                    }
                 }
 
                 activity?.runOnUiThread {

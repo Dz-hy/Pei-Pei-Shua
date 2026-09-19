@@ -46,6 +46,9 @@ class WrongQuestionDetailActivity : AppCompatActivity() {
     companion object {
         const val EXTRA_ID = "wrong_question_id"
 
+        // 导出长图 ARGB_8888 总像素上限（≈64MB），超出按比例缩小
+        private const val MAX_EXPORT_PIXELS = 16_000_000L
+
         /** 无专属题型模板（大模块）时的通用讲解 prompt：不要求 JSON 结构，纯文本讲解 */
         private val GENERIC_ANALYSIS_PROMPT =
             "你是一名经验丰富的公务员考试辅导老师。用户会给你一道完整题目（题干、选项、正确答案、官方解析）。" +
@@ -1222,8 +1225,12 @@ class WrongQuestionDetailActivity : AppCompatActivity() {
         }.start()
     }
 
-    private fun generateExportBitmap(item: WrongQuestion): Bitmap {
-        val density = resources.displayMetrics.density
+    private fun generateExportBitmap(item: WrongQuestion): Bitmap =
+        generateExportBitmap(item, resources.displayMetrics.density, allowRescale = true)
+
+    /** OOM 防护：长解析题 totalHeight 无上界（曾见数万行），ARGB_8888 总像素封顶 ≈64MB，
+     *  超限按有效密度等比缩小重排——宽/字号同比缩放，换行行数不变，内容布局保持原样 */
+    private fun generateExportBitmap(item: WrongQuestion, density: Float, allowRescale: Boolean): Bitmap {
         val widthPx = (360 * density).toInt()
         val padding = (20 * density).toInt()
         val cardPadding = (16 * density).toInt()
@@ -1295,6 +1302,14 @@ class WrongQuestionDetailActivity : AppCompatActivity() {
         // 水印
         totalHeight += 40 * density
         totalHeight += padding
+
+        if (allowRescale) {
+            val totalPx = totalHeight.toLong() * widthPx
+            if (totalPx > MAX_EXPORT_PIXELS) {
+                val s = kotlin.math.sqrt(MAX_EXPORT_PIXELS.toDouble() / totalPx).toFloat()
+                return generateExportBitmap(item, (density * s).coerceAtLeast(0.5f), allowRescale = false)
+            }
+        }
 
         // 创建 Bitmap
         val bitmap = Bitmap.createBitmap(widthPx, totalHeight.toInt(), Bitmap.Config.ARGB_8888)

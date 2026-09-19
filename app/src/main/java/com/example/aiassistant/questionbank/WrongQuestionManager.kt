@@ -233,9 +233,11 @@ object WrongQuestionManager {
         return try {
             val dir = File(context.filesDir, "wrong_questions")
             if (!dir.exists()) dir.mkdirs()
-            val file = File(dir, "wq_$id.png")
+            // JPEG 85：全屏截图 PNG（quality 参数对 PNG 无效，始终无损）文件大、压缩慢、
+            // 后续解码内存高；截图无透明通道，JPEG 显示无损感（旧 .png 文件保留不动）
+            val file = File(dir, "wq_$id.jpg")
             FileOutputStream(file).use { fos ->
-                bitmap.compress(Bitmap.CompressFormat.PNG, 100, fos)
+                bitmap.compress(Bitmap.CompressFormat.JPEG, 85, fos)
                 fos.flush()
             }
             file.absolutePath

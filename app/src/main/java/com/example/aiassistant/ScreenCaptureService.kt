@@ -162,6 +162,16 @@ class ScreenCaptureService : Service() {
     // ── 渲染失败重试 ──────────────────────────────────────────────────
     @Volatile private var lastOcrText: String? = null
     @Volatile private var lastImageBase64: String? = null
+
+    // 截图 base64（数 MB）只保留 10 分钟供"重试/重新分析"使用，到期自动释放——
+    // 服务常驻进程不再长期滞留大字符串；过期后"重新分析"走已有的"请重新截屏"提示
+    private val clearImageBase64Runnable = Runnable { lastImageBase64 = null }
+
+    private fun stashImageBase64(b64: String) {
+        mainHandler.removeCallbacks(clearImageBase64Runnable)
+        lastImageBase64 = b64
+        mainHandler.postDelayed(clearImageBase64Runnable, 10 * 60_000L)
+    }
     internal val retryCount = java.util.concurrent.atomic.AtomicInteger(0)
     private val maxRetries: Int = 3
     @Volatile internal var primaryModelError: String? = null
@@ -321,6 +331,7 @@ class ScreenCaptureService : Service() {
         super.onDestroy()
         instance = null
         TimerEngine.reset()
+        lastImageBase64 = null
         dismissTimerResultCard()
         mainHandler.removeCallbacksAndMessages(null)
         screenStateReceiver?.let {
@@ -702,7 +713,7 @@ class ScreenCaptureService : Service() {
         captureHandler?.post {
             val jpegBytes = bitmapToJpeg(bitmap)
             val jpegBase64 = android.util.Base64.encodeToString(jpegBytes, android.util.Base64.NO_WRAP)
-            lastImageBase64 = jpegBase64
+            stashImageBase64(jpegBase64)
 
             // 错题直录分流
             if (AppPreferences.getFloatClickAction(this@ScreenCaptureService) == AppPreferences.CLICK_ACTION_RECORD_WRONG) {
@@ -1235,7 +1246,7 @@ class ScreenCaptureService : Service() {
         requestId: Long,
         candidates: List<AiModelConfig> = emptyList()
     ) {
-        lastImageBase64 = imageBase64
+        stashImageBase64(imageBase64)
         aiFailover?.cancel()
 
         // 题库检索（FTS+LCS 全库）放后台线程：入口 sendToAI 在主线程 post 进来
