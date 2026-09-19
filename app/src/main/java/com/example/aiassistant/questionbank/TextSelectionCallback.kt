@@ -97,7 +97,12 @@ class TextSelectionCallback(
                     thinkingBudget = cfg.thinkingBudget,
                     onComplete = onComplete,
                     onError = { /* 已由 onStructuredError 接管 */ },
-                    onStructuredError = onError
+                    onStructuredError = onError,
+                    onDelta = { text ->
+                        (context as? android.app.Activity)?.runOnUiThread {
+                            try { dialog.setMessage(text) } catch (_: Exception) {}
+                        }
+                    }
                 )
             },
             onComplete = { response ->

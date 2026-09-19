@@ -12,7 +12,7 @@ import java.util.concurrent.TimeUnit
 
 object CloudOcrClient {
 
-    private val client: OkHttpClient = OkHttpClient.Builder()
+    private val client: OkHttpClient = Http.client.newBuilder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)

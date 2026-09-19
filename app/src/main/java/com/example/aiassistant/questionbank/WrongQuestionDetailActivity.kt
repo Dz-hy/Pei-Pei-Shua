@@ -587,9 +587,32 @@ class WrongQuestionDetailActivity : AppCompatActivity() {
         // 构建用户消息
         val userMessage = buildUserMessage(item)
 
+        // 流式预览：增量文本先打进 layoutAiResult 里的临时 TextView（结构化渲染在完成时进行）。
+        // 250ms 节流；重试/切换模型后新请求的增量会自然覆盖预览
+        var streamPreview: TextView? = null
+        var lastPreviewMs = 0L
+        val onStreamDelta: (String) -> Unit = { text ->
+            runOnUiThread {
+                if (isDestroyed || isFinishing) return@runOnUiThread
+                val now = android.os.SystemClock.elapsedRealtime()
+                if (now - lastPreviewMs < 250) return@runOnUiThread
+                lastPreviewMs = now
+                layoutAiLoading.visibility = View.GONE
+                val tv = streamPreview ?: TextView(this).apply {
+                    textSize = 14f
+                    setTextColor(getColor(R.color.text_primary))
+                    setPadding(dpToPx(4), dpToPx(4), dpToPx(4), dpToPx(4))
+                }
+                streamPreview = tv
+                if (tv.parent == null) layoutAiResult.addView(tv)
+                tv.text = text
+            }
+        }
+
         val onCompleteCallback = { result: String ->
             runOnUiThread {
                 layoutAiLoading.visibility = View.GONE
+                if (streamPreview?.parent != null) layoutAiResult.removeView(streamPreview)
                 if (questionType == null) renderGenericAiResult(result) else renderAiResult(result, questionType)
             }
         }
@@ -597,6 +620,7 @@ class WrongQuestionDetailActivity : AppCompatActivity() {
         val onErrorCallback = { error: String ->
             runOnUiThread {
                 layoutAiLoading.visibility = View.GONE
+                if (streamPreview?.parent != null) layoutAiResult.removeView(streamPreview)
                 tvAiPlaceholder.visibility = View.VISIBLE
                 btnStartAi.visibility = View.VISIBLE
                 Toast.makeText(this, "AI解析失败: $error", Toast.LENGTH_LONG).show()
@@ -645,7 +669,8 @@ class WrongQuestionDetailActivity : AppCompatActivity() {
                         thinkingBudget = cfg.thinkingBudget,
                         onComplete = onComplete,
                         onError = { /* 已由 onStructuredError 接管 */ },
-                        onStructuredError = onError
+                        onStructuredError = onError,
+                        onDelta = onStreamDelta
                     )
                 }
             },

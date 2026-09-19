@@ -32,7 +32,7 @@ enum class AiErrorKind {
  */
 object OpenAIApiService {
 
-    private val client: OkHttpClient = OkHttpClient.Builder()
+    private val client: OkHttpClient = Http.client.newBuilder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(120, TimeUnit.SECONDS)
         .writeTimeout(15, TimeUnit.SECONDS)
@@ -72,7 +72,9 @@ object OpenAIApiService {
         }.start()
     }
 
-    /** 统一文本请求核心：完美路由至 OpenAI / Anthropic / Gemini */
+    /** 统一文本请求核心：完美路由至 OpenAI / Anthropic / Gemini。
+     *  onDelta 非空且协议为 openai 时走 SSE 流式（逐段回调累计文本，主线程）；
+     *  其他协议或未传 onDelta 自动走原非流式路径（流式失败的兜底语义见 executeStreamRequest） */
     fun analyzeText(
         ocrText: String,
         baseUrl: String,
@@ -85,20 +87,26 @@ object OpenAIApiService {
         thinkingBudget: Int = 4096,
         onComplete: (fullText: String) -> Unit,
         onError: (String) -> Unit,
-        onStructuredError: ((AiErrorKind, String) -> Unit)? = null
+        onStructuredError: ((AiErrorKind, String) -> Unit)? = null,
+        onDelta: ((accumulated: String) -> Unit)? = null
     ) {
         val systemPrompt = prompt
         val userContent = userMessage ?: "以下是从图片中识别出的文字内容：\n$ocrText"
+        val isStream = onDelta != null && apiType.lowercase() == "openai"
 
         val request = try {
-            buildTextRequest(baseUrl, apiKey, model, systemPrompt, userContent, thinking, apiType, thinkingBudget)
+            buildTextRequest(baseUrl, apiKey, model, systemPrompt, userContent, thinking, apiType, thinkingBudget, isStream)
         } catch (e: Exception) {
             if (onStructuredError != null) onStructuredError(AiErrorKind.BUILD, "构建请求失败：${e.message}")
             else onError("构建请求失败：${e.message}")
             return
         }
 
-        executeRequest(request, apiType, 0, onComplete, onError, onStructuredError)
+        if (isStream) {
+            executeStreamRequest(request, 0, onDelta!!, onComplete, onError, onStructuredError)
+        } else {
+            executeRequest(request, apiType, 0, onComplete, onError, onStructuredError)
+        }
     }
 
     /** 统一 System Prompt 模式接口（向下兼容） */
@@ -114,9 +122,10 @@ object OpenAIApiService {
         thinkingBudget: Int = 4096,
         onComplete: (fullText: String) -> Unit,
         onError: (String) -> Unit,
-        onStructuredError: ((AiErrorKind, String) -> Unit)? = null
+        onStructuredError: ((AiErrorKind, String) -> Unit)? = null,
+        onDelta: ((accumulated: String) -> Unit)? = null
     ) {
-        analyzeText(ocrText, baseUrl, apiKey, model, systemPrompt, thinking, userMessage, apiType, thinkingBudget, onComplete, onError, onStructuredError)
+        analyzeText(ocrText, baseUrl, apiKey, model, systemPrompt, thinking, userMessage, apiType, thinkingBudget, onComplete, onError, onStructuredError, onDelta)
     }
 
     /** 统一视觉/多模态请求核心：完美路由至 OpenAI / Anthropic / Gemini */
@@ -201,7 +210,8 @@ object OpenAIApiService {
         userContent: String,
         thinking: Boolean,
         apiType: String,
-        thinkingBudget: Int
+        thinkingBudget: Int,
+        stream: Boolean = false
     ): Request {
         val mediaType = "application/json".toMediaType()
 
@@ -283,7 +293,7 @@ object OpenAIApiService {
                         put(JSONObject().apply { put("role", "user"); put("content", userContent) })
                     })
                     put("max_tokens", 8192)
-                    put("stream", false)
+                    put("stream", stream)
                     if (thinking) {
                         // 兼容 DeepSeek
                         put("thinking", JSONObject().apply {
@@ -533,6 +543,132 @@ object OpenAIApiService {
                     if (gen == requestGeneration) report(AiErrorKind.PARSE, "解析响应失败：${e.message}")
                 } finally {
                     try { body.close() } catch (_: Exception) {}
+                }
+            }
+        })
+    }
+
+    /**
+     * SSE 流式执行引擎（仅 OpenAI 协议，onDelta 回调累计文本，经 retryHandler 切主线程，
+     * 节流 80ms）。失败语义与非流式一致：结构化错误上报给故障转移执行器整体重发。
+     * 兜底：服务端不支持流式时返回 200 + 整段 JSON（Content-Type 非 event-stream），
+     * 自动按非流式解析；流中途断开按 NETWORK 上报；未发 [DONE] 但已有内容视为成功。
+     */
+    private fun executeStreamRequest(
+        request: Request,
+        retryCount: Int,
+        onDelta: (String) -> Unit,
+        onComplete: (String) -> Unit,
+        onError: (String) -> Unit,
+        onStructuredError: ((AiErrorKind, String) -> Unit)? = null
+    ) {
+        fun report(kind: AiErrorKind, msg: String) {
+            if (onStructuredError != null) onStructuredError.invoke(kind, msg) else onError(msg)
+        }
+        cancelCurrentRequest()
+        val gen = requestGeneration
+        android.util.Log.d("AIAssistantAPI", "executeStreamRequest: launching. URL: ${request.url.host}${request.url.encodedPath}")
+        val call = client.newCall(request)
+        synchronized(this) { currentCall = call }
+
+        call.enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                if (call.isCanceled() || gen != requestGeneration) return
+                android.util.Log.e("AIAssistantAPI", "executeStreamRequest: onFailure", e)
+                report(AiErrorKind.NETWORK, "网络请求失败：${e.message}")
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                try {
+                    if (call.isCanceled() || gen != requestGeneration) { response.close(); return }
+
+                    if (!response.isSuccessful) {
+                        val statusCode = response.code
+                        val bodyStr = try { response.body?.string() } catch (_: Exception) { null } ?: "无响应体"
+                        if (statusCode == 429 && retryCount < 2) {
+                            val delayMs = (retryCount + 1) * 2000L
+                            retryHandler.postDelayed({
+                                if (gen == requestGeneration) {
+                                    executeStreamRequest(request, retryCount + 1, onDelta, onComplete, onError, onStructuredError)
+                                }
+                            }, delayMs)
+                            return
+                        }
+                        val kind = when {
+                            statusCode == 429 -> AiErrorKind.RATE_LIMIT
+                            statusCode in 400..499 -> AiErrorKind.CLIENT
+                            statusCode >= 500 -> AiErrorKind.SERVER
+                            else -> AiErrorKind.CLIENT
+                        }
+                        report(kind, "API 响应错误 ${statusCode}：$bodyStr")
+                        return
+                    }
+
+                    val body = response.body
+                    if (body == null) { report(AiErrorKind.EMPTY, "API 响应为空"); return }
+                    val contentType = body.contentType()?.toString()?.lowercase() ?: ""
+                    if (!contentType.contains("text/event-stream")) {
+                        // 网关/中转忽略 stream:true：回退为一次性解析
+                        val responseStr = body.string()
+                        if (gen != requestGeneration) return
+                        val parsed = parseResponseStr(responseStr, "openai")
+                        if (parsed.isEmpty()) report(AiErrorKind.EMPTY, "解析响应内容为空") else onComplete(parsed)
+                        return
+                    }
+
+                    val accumulated = StringBuilder()
+                    var lastUiPost = 0L
+                    fun postDelta(force: Boolean) {
+                        val now = android.os.SystemClock.elapsedRealtime()
+                        if (force || now - lastUiPost >= 80) {
+                            lastUiPost = now
+                            retryHandler.post {
+                                if (gen == requestGeneration) onDelta(accumulated.toString())
+                            }
+                        }
+                    }
+
+                    body.charStream().buffered().useLines { lines ->
+                        for (line in lines) {
+                            if (gen != requestGeneration) return
+                            val t = line.trim()
+                            if (t.isEmpty() || t.startsWith(":") || !t.startsWith("data:")) continue
+                            val payload = t.substring(5).trim()
+                            if (payload == "[DONE]") {
+                                postDelta(force = true)
+                                if (gen == requestGeneration) {
+                                    if (accumulated.isEmpty()) report(AiErrorKind.EMPTY, "解析响应内容为空")
+                                    else onComplete(accumulated.toString())
+                                }
+                                return
+                            }
+                            try {
+                                val chunk = JSONObject(payload)
+                                val choice = chunk.optJSONArray("choices")?.optJSONObject(0) ?: continue
+                                var piece = choice.optJSONObject("delta")?.optString("content", "") ?: ""
+                                if (piece.isEmpty()) {
+                                    // 个别实现不分 delta、整段放在 message.content
+                                    piece = choice.optJSONObject("message")?.optString("content", "") ?: ""
+                                }
+                                if (piece.isNotEmpty()) {
+                                    accumulated.append(piece)
+                                    postDelta(force = false)
+                                }
+                            } catch (_: Exception) {
+                                // 心跳/杂项行忽略
+                            }
+                        }
+                    }
+                    // 服务端未发 [DONE] 直接断流：已有内容视为成功，避免白等重试
+                    if (gen != requestGeneration) return
+                    if (accumulated.isNotEmpty()) onComplete(accumulated.toString())
+                    else report(AiErrorKind.EMPTY, "流式响应提前结束且内容为空")
+                } catch (e: IOException) {
+                    if (gen == requestGeneration) report(AiErrorKind.NETWORK, "流式读取中断：${e.message}")
+                } catch (e: Exception) {
+                    if (gen == requestGeneration) report(AiErrorKind.PARSE, "解析流式响应失败：${e.message}")
+                } finally {
+                    try { response.body?.close() } catch (_: Exception) {}
                 }
             }
         })

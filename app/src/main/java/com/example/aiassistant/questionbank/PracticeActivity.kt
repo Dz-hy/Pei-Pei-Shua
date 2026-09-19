@@ -18,6 +18,7 @@ import android.webkit.WebViewClient
 import android.widget.ArrayAdapter
 import android.widget.ImageView
 import android.widget.LinearLayout
+import com.example.aiassistant.Http
 import android.widget.PopupWindow
 import android.widget.ScrollView
 import android.widget.Spinner
@@ -131,7 +132,7 @@ class PracticeActivity : AppCompatActivity() {
         @Volatile private var appCtx: android.content.Context? = null
 
         private val imageClient: OkHttpClient by lazy {
-            val builder = OkHttpClient.Builder()
+            val builder = Http.client.newBuilder()
                 .connectTimeout(15, TimeUnit.SECONDS)
                 .readTimeout(15, TimeUnit.SECONDS)
             // 题图磁盘缓存：内存缓存只在进程内有效，磁盘缓存让隔天重做同题也秒出图。
@@ -1141,6 +1142,11 @@ try {
                 runOnUiThread {
                     try { dialog.setMessage("请求失败: $error") } catch (_: Exception) {}
                 }
+            },
+            onDelta = { text ->
+                runOnUiThread {
+                    try { dialog.setMessage(text) } catch (_: Exception) {}
+                }
             }
         )
     }
@@ -1312,6 +1318,11 @@ try {
             wvContent.visibility = View.GONE
             btnRetry.visibility = View.GONE
 
+            // 流式预览节流：250ms 刷一次 WebView（正式 Markdown/KaTeX 渲染在完成时进行）
+            var lastPreviewMs = 0L
+            fun escapeHtml(s: String) =
+                s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
             // 故障转移：手动选择的模型优先，失败（网络/服务端错误）后自动轮询其余模型
             aiFailover?.cancel()
             aiFailover = com.example.aiassistant.AiFailoverExecutor.execute(
@@ -1329,7 +1340,21 @@ try {
                         thinkingBudget = cfg.thinkingBudget,
                         onComplete = onComplete,
                         onError = { /* 已由 onStructuredError 接管 */ },
-                        onStructuredError = onError
+                        onStructuredError = onError,
+                        onDelta = { text ->
+                            runOnUiThread {
+                                if (destroyed || !dialog.isShowing) return@runOnUiThread
+                                val now = android.os.SystemClock.elapsedRealtime()
+                                if (now - lastPreviewMs < 250) return@runOnUiThread
+                                lastPreviewMs = now
+                                layoutProgress.visibility = View.GONE
+                                wvContent.visibility = View.VISIBLE
+                                renderInWebView(
+                                    wvContent,
+                                    "<pre style=\"white-space:pre-wrap;font-size:14px;\">${escapeHtml(text)}</pre>"
+                                )
+                            }
+                        }
                     )
                 },
                 onComplete = { text ->
