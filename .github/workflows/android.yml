@@ -41,9 +41,10 @@ jobs:
       - name: 整理产物
         run: |
           mkdir -p apk-out
-          cp app/build-zen/outputs/apk/debug/app-debug.apk "apk-out/陪陪刷-debug-r${{ github.run_number }}.apk"
+          # 附件名用 ASCII：GitHub Release 会剥离中文，且避免横杠开头的文件名
+          cp app/build-zen/outputs/apk/debug/app-debug.apk "apk-out/PeiPeiShua-debug-r${{ github.run_number }}.apk"
           if [ -f app/build-zen/outputs/apk/release/app-release.apk ]; then
-            cp app/build-zen/outputs/apk/release/app-release.apk "apk-out/陪陪刷-release-r${{ github.run_number }}.apk"
+            cp app/build-zen/outputs/apk/release/app-release.apk "apk-out/PeiPeiShua-release-r${{ github.run_number }}.apk"
           fi
           ls -la apk-out/
 
