@@ -167,7 +167,7 @@ CI：`.github/workflows/android.yml` 在 push master / 推 `v*` 标签 / 手动�
 ## 致谢
 
 感谢 [Linux.do](https://linux.do/) 社区的支持与鼓励。Linux.do 是一个充满活力的技术社区，汇聚了众多开发者和技术爱好者，提供了宝贵的交流平台和资源分享。本项目的成长离不开社区的帮助。
-
+参考项目：[Pei-Pei-Shua]https://github.com/HuiYeJi-7/Pei-Pei-Shua
 ## 许可证
 
 本项目仅供学习交流使用。
