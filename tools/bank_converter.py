@@ -311,6 +311,34 @@ def _has_body(q: dict) -> bool:
     return any(ln.strip() for ln in rest)
 
 
+def _clamp_micro_top(page, y0, img_top, gutter=0.5):
+    """微图选项块裁剪上边界钳制。
+
+    默认上扩 3pt 是为包住 "A." 字母标记（字母在公式条左侧约 12~22pt），但题目行与
+    选项行间隙极小时（2022 国考实测仅 0.72pt）会吃进上一行文字，渲染出被切断的
+    灰色残影（2022 国考副省级 73、行政执法 65/68/70 曾出现）。
+    取上方最近一条非选项标记文字的底线 + gutter，且不越过图片自身顶边（防裁掉字形）。
+    """
+    try:
+        blocks = page.get_text("dict")["blocks"]
+    except Exception:
+        return y0
+    nearest = None
+    for blk in blocks:
+        if blk.get("type") != 0:
+            continue
+        for line in blk.get("lines", []):
+            t = "".join(s["text"] for s in line.get("spans", [])).strip()
+            if not t or re.fullmatch(r"[A-Ha-h][.、．:：]?", t):
+                continue  # 选项字母标记是预期内容，不算污染
+            bottom = line["bbox"][3]
+            if bottom <= img_top and (nearest is None or bottom > nearest):
+                nearest = bottom
+    if nearest is not None and nearest > y0:
+        y0 = min(img_top, nearest + gutter)
+    return y0
+
+
 def _render_micro(doc, boxes):
     """把一题的微图（公式条）按页分组渲染成整块选项图。boxes: [(页, (x0,y0,x1,y1))]。
     区域向左上扩展以包住 "A." 字母标记（公式条的 x 偏小、字母在其左侧约 12~22pt）。"""
@@ -325,6 +353,7 @@ def _render_micro(doc, boxes):
         y0 = min(b[1] for b in bxs) - 3
         x1 = max(b[2] for b in bxs) + 6
         y1 = max(b[3] for b in bxs) + 3
+        y0 = _clamp_micro_top(doc[pno], y0, min(b[1] for b in bxs))
         rect = fitz.Rect(x0, y0, x1, y1) & doc[pno].rect
         if rect.is_empty:
             continue
