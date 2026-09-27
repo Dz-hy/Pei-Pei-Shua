@@ -85,6 +85,16 @@
                     android:textSize="14sp"
                     android:textColor="@color/primary"
                     style="@style/Widget.Material3.Button.OutlinedButton" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btn_sync_settings"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:layout_marginTop="8dp"
+                    android:text="云同步设置"
+                    android:textSize="14sp"
+                    android:textColor="@color/primary"
+                    style="@style/Widget.Material3.Button.OutlinedButton" />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
@@ -302,6 +312,7 @@
                         android:id="@+id/btn_clear_fixed"
                         android:layout_width="wrap_content"
                         android:layout_height="36dp"
+                        android:minHeight="48dp"
                         android:text="重新选择"
                         android:textSize="12sp"
                         app:cornerRadius="8dp"
@@ -408,6 +419,7 @@
                         android:id="@+id/btn_card_mode"
                         android:layout_width="wrap_content"
                         android:layout_height="36dp"
+                        android:minHeight="48dp"
                         android:gravity="center"
                         android:text="切换"
                         android:textSize="13sp"
@@ -761,6 +773,7 @@
                         android:id="@+id/btn_click_action"
                         android:layout_width="wrap_content"
                         android:layout_height="36dp"
+                        android:minHeight="48dp"
                         android:gravity="center"
                         android:text="切换"
                         android:textSize="13sp"
@@ -814,6 +827,7 @@
                         android:id="@+id/btn_long_press"
                         android:layout_width="wrap_content"
                         android:layout_height="36dp"
+                        android:minHeight="48dp"
                         android:gravity="center"
                         android:text="切换"
                         android:textSize="13sp"
@@ -867,6 +881,7 @@
                         android:id="@+id/btn_menu_items"
                         android:layout_width="wrap_content"
                         android:layout_height="36dp"
+                        android:minHeight="48dp"
                         android:gravity="center"
                         android:text="配置"
                         android:textSize="13sp"
@@ -913,6 +928,7 @@
                         android:id="@+id/btn_timer_sensitivity"
                         android:layout_width="wrap_content"
                         android:layout_height="36dp"
+                        android:minHeight="48dp"
                         android:gravity="center"
                         android:text="调整"
                         android:textSize="13sp"

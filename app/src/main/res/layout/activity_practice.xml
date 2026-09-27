@@ -207,7 +207,7 @@
                                 android:layout_height="wrap_content"
                                 android:textSize="18sp"
                                 android:textStyle="bold"
-                                android:textColor="#4CAF50" />
+                                android:textColor="@color/correct_green" />
 
                             <TextView
                                 android:id="@+id/tv_rate"

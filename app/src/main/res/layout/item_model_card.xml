@@ -76,20 +76,26 @@
                 android:id="@+id/btn_model_edit"
                 android:layout_width="36dp"
                 android:layout_height="36dp"
+                android:minWidth="48dp"
+                android:minHeight="48dp"
                 android:text="✎"
                 android:textSize="16sp"
                 android:textColor="@color/primary"
                 android:gravity="center"
+                android:contentDescription="编辑模型"
                 android:background="?android:attr/selectableItemBackgroundBorderless" />
 
             <TextView
                 android:id="@+id/btn_model_delete"
                 android:layout_width="36dp"
                 android:layout_height="36dp"
+                android:minWidth="48dp"
+                android:minHeight="48dp"
                 android:text="✕"
                 android:textSize="14sp"
                 android:textColor="@color/incorrect_red"
                 android:gravity="center"
+                android:contentDescription="删除模型"
                 android:background="?android:attr/selectableItemBackgroundBorderless" />
         </LinearLayout>
     </LinearLayout>

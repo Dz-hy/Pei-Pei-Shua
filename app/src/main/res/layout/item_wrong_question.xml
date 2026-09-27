@@ -71,7 +71,7 @@
                     android:layout_height="wrap_content"
                     android:text="答案: A"
                     android:textSize="11sp"
-                    android:textColor="#4CAF50"
+                    android:textColor="@color/correct_green"
                     android:layout_marginStart="10dp"
                     android:visibility="gone" />
 
