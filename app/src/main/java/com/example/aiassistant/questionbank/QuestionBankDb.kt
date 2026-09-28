@@ -8,13 +8,17 @@ import com.tencent.wcdb.database.SQLiteOpenHelper
 import org.json.JSONArray
 import org.json.JSONObject
 import java.security.MessageDigest
+import com.example.aiassistant.sync.SyncData
+import com.example.aiassistant.sync.SyncProtocol.DS_SESSIONS
+import com.example.aiassistant.sync.SyncProtocol.DS_COMPLETED
+import com.example.aiassistant.sync.SyncProtocol.DS_ANNOTATIONS
 
 class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VERSION) {
 
     companion object {
         private const val TAG = "QuestionBankDb"
         private const val DB_NAME = "question_bank_v2.db"
-        private const val DB_VERSION = 8
+        private const val DB_VERSION = 9
 
         const val T_MODULES = "modules"
         const val T_QUESTIONS = "questions"
@@ -232,6 +236,11 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
             // 云同步：sessions 同步身份 sync_key（数字 id 跨设备必撞号）+ 墓碑表
             db.execSQL("ALTER TABLE $T_SESSIONS ADD COLUMN sync_key TEXT DEFAULT ''")
             createSyncSchema(db)
+        }
+        if (oldVersion < 9) {
+            // 云同步：旧批注行无修改时间（updated_at 为 null），以当前时间为初值
+            // 否则 LWW 合并时 updatedAt=0 永远赢不了任何有正时间戳的行，旧批注被静默丢弃
+            db.execSQL("UPDATE $T_ANNOTATIONS SET updated_at = ? WHERE COALESCE(updated_at, 0) = 0", arrayOf(System.currentTimeMillis().toString()))
         }
     }
 
@@ -537,7 +546,20 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
         val db = writableDatabase
         db.beginTransaction()
         try {
-            // 用模块子查询删除，避免题目数超过 SQLite 999 个绑定参数上限
+            // 墓碑先行：批量记录被级联删除的同步数据行，否则同步时会被旧远端文件复活
+            val now = System.currentTimeMillis()
+            // 批注墓碑
+            db.rawQuery("SELECT question_id FROM $T_ANNOTATIONS WHERE question_id NOT IN (SELECT id FROM $T_QUESTIONS)", null).use { c ->
+                while (c.moveToNext()) SyncData.addTombstone(db, DS_ANNOTATIONS, c.getString(0), now)
+            }
+            // 完成记录墓碑
+            db.rawQuery("SELECT question_id FROM completed_questions WHERE question_id NOT IN (SELECT id FROM $T_QUESTIONS)", null).use { c ->
+                while (c.moveToNext()) SyncData.addTombstone(db, DS_COMPLETED, c.getString(0), now)
+            }
+            // 训练记录墓碑（sessions 的 sync_key 才是业务键）
+            db.rawQuery("SELECT COALESCE(sync_key,'') FROM $T_SESSIONS WHERE module_id = ? OR module_id IN (SELECT id FROM $T_MODULES WHERE parent_id = ?)", arrayOf(moduleId, moduleId)).use { c ->
+                while (c.moveToNext()) { val k = c.getString(0); if (k.isNotBlank()) SyncData.addTombstone(db, DS_SESSIONS, k, now) }
+            }
             db.execSQL(
                 "DELETE FROM $T_QUESTIONS WHERE module_id IN " +
                 "(SELECT id FROM $T_MODULES WHERE id = ? OR parent_id = ?)",
@@ -794,6 +816,15 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
     }
 
     fun resetCompletedQuestionsByRange(moduleId: String, rateMin: Int, rateMax: Int) {
+        // 墓碑先行：记录被删除的 question_id，否则同步时会被旧远端文件复活
+        val now = System.currentTimeMillis()
+        writableDatabase.rawQuery(
+            "SELECT question_id FROM completed_questions WHERE question_id IN " +
+            "(SELECT id FROM $T_QUESTIONS WHERE module_id = ? AND rate >= ? AND rate <= ?)",
+            arrayOf(moduleId, rateMin.toString(), rateMax.toString())
+        ).use { c ->
+            while (c.moveToNext()) SyncData.addTombstone(writableDatabase, DS_COMPLETED, c.getString(0), now)
+        }
         writableDatabase.execSQL(
             "DELETE FROM completed_questions WHERE question_id IN (" +
             "SELECT id FROM $T_QUESTIONS WHERE module_id = ? AND rate >= ? AND rate <= ?)",
@@ -871,7 +902,14 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
     }
 
     fun deletePracticeSession(id: Long) {
+        // 墓碑先行：本地删除必须留下 deleted 标记，否则同步时会被旧远端文件复活
+        val syncKey = readableDatabase.rawQuery(
+            "SELECT COALESCE(sync_key,'') FROM $T_SESSIONS WHERE id = ?", arrayOf(id.toString())
+        ).use { c -> if (c.moveToFirst()) c.getString(0) else "" }
         writableDatabase.delete(T_SESSIONS, "id = ?", arrayOf(id.toString()))
+        if (syncKey.isNotBlank()) {
+            addTombstone(writableDatabase, DS_SESSIONS, syncKey, System.currentTimeMillis())
+        }
     }
 
     /** 全部训练快照导出为 JSON 数组（备份用）；questions_json 走分块读防游标窗口溢出 */

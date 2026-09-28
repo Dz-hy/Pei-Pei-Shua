@@ -6,6 +6,7 @@ import com.tencent.wcdb.database.SQLiteDatabase
 import com.tencent.wcdb.database.SQLiteOpenHelper
 import org.json.JSONArray
 import org.json.JSONObject
+import com.example.aiassistant.sync.SyncData
 
 /**
  * 错题快照编解码：完整 Question 结构（含 stemHtml/选项html/材料），错题重做时可直接当题库题用。
@@ -214,15 +215,9 @@ class WrongQuestionDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, nul
         values.put("updated_at", System.currentTimeMillis())
         writableDatabase.update(T_WRONG, values, "id = ?", arrayOf(id))
     }
-
     fun delete(id: String) {
         // 墓碑先行：本地删除必须留下 deleted 标记，否则同步时会被旧远端文件复活
-        val tomb = ContentValues().apply {
-            put("dataset", "wrong_questions")
-            put("row_id", id)
-            put("updated_at", System.currentTimeMillis())
-        }
-        writableDatabase.insertWithOnConflict("sync_tombstones", null, tomb, SQLiteDatabase.CONFLICT_REPLACE)
+        SyncData.addTombstone(writableDatabase, "wrong_questions", id, System.currentTimeMillis())
         writableDatabase.delete(T_WRONG, "id = ?", arrayOf(id))
     }
 

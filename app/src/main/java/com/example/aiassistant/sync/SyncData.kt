@@ -46,6 +46,7 @@ object SyncData {
         return out
     }
 
+    /** 写墓碑：跨库可调（WrongQuestionDb 和 QuestionBankDb 的删除路径都用） */
     fun addTombstone(db: SQLiteDatabase, dataset: String, rowId: String, at: Long) {
         val v = ContentValues().apply {
             put("dataset", dataset); put("row_id", rowId); put("updated_at", at)
