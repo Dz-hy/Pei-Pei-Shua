@@ -344,7 +344,11 @@ class AiModelFragment : Fragment() {
         Thread {
             val (done, total) = try {
                 val db = com.example.aiassistant.questionbank.QuestionBankDb(ctx)
-                db.countVectorized() to db.countAllQuestions()
+                try {
+                    db.countVectorized() to db.countAllQuestions()
+                } finally {
+                    db.close()
+                }
             } catch (e: Exception) {
                 -1 to -1
             }

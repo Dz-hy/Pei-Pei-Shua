@@ -526,10 +526,10 @@ object OpenAIApiService {
 
                 try {
                     val responseStr = body.string()
-                    android.util.Log.d("AIAssistantAPI", "onResponse: Raw API JSON Response length: ${responseStr.length}, preview: ${responseStr.take(200)}")
+                    if (BuildConfig.DEBUG) android.util.Log.d("AIAssistantAPI", "onResponse: Raw API JSON Response length: ${responseStr.length}, preview: ${responseStr.take(200)}")
 
                     val parsedText = parseResponseStr(responseStr, apiType)
-                    android.util.Log.d("AIAssistantAPI", "onResponse: Parsed output length: ${parsedText.length}, preview: ${parsedText.take(150)}")
+                    if (BuildConfig.DEBUG) android.util.Log.d("AIAssistantAPI", "onResponse: Parsed output length: ${parsedText.length}, preview: ${parsedText.take(150)}")
 
                     if (gen != requestGeneration) return
                     if (parsedText.isEmpty()) {
@@ -983,7 +983,7 @@ object OpenAIApiService {
                                     put("content", toolResultContent)
                                 }
                                 messages.put(toolResultMsg)
-                                android.util.Log.d("AIAssistantAPI", "Anthropic tool_result 消息: $toolResultMsg")
+                                if (BuildConfig.DEBUG) android.util.Log.d("AIAssistantAPI", "Anthropic tool_result 消息: $toolResultMsg")
                             } else {
                                 // OpenAI/Gemini 格式：每个 tool_result 是单独的消息
                                 for ((toolCallId, content) in toolResults) {
@@ -1187,7 +1187,7 @@ object OpenAIApiService {
                     if (contentArr != null) {
                         // 保留所有 content 块（包括 text 和 tool_use）
                         put("content", contentArr)
-                        android.util.Log.d("AIAssistantAPI", "Anthropic assistant 消息 content: $contentArr")
+                        if (BuildConfig.DEBUG) android.util.Log.d("AIAssistantAPI", "Anthropic assistant 消息 content: $contentArr")
                     } else {
                         put("content", "")
                     }

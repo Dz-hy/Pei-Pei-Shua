@@ -136,6 +136,7 @@ class HomeFragment : Fragment() {
 
     override fun onDestroyView() {
         super.onDestroyView()
+        QuestionBankManager.removeOnReadyListener(bankReadyListener)
         QuestionBankManager.removeOnBankDataChangedListener(bankDataChangedListener)
         TeacherManager.removeOnLoadedListener(teacherLoadedListener)
     }

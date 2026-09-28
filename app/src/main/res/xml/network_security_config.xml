@@ -2,15 +2,20 @@
 <!--
   明文 HTTP 已全局禁用（2026-09-20 盘点：全部 AI/OCR/时政/题库接口与图片均为 HTTPS，
   现有题库数据中的图片全部是 base64 data URI，无任何 http 外链）。
-  保留 user 证书锚点以便抓包调试（Clash/Charles 自签证书）。
+  release 构建只信任系统证书，防止恶意 CA 截获 AI key 和 WebDAV 凭据；
+  debug 构建通过 debug-overrides 保留 user 证书锚点以便抓包调试（Clash/Charles 自签证书）。
 -->
 <network-security-config>
     <base-config cleartextTrafficPermitted="false">
         <trust-anchors>
             <certificates src="system" />
-            <certificates src="user" />
         </trust-anchors>
     </base-config>
+    <debug-overrides>
+        <trust-anchors>
+            <certificates src="user" />
+        </trust-anchors>
+    </debug-overrides>
     <!-- 云同步联调：模拟器宿主机回环（minidav 测试服务器）；生产 WebDAV（坚果云）走 HTTPS 不受影响 -->
     <domain-config cleartextTrafficPermitted="true">
         <domain includeSubdomains="false">10.0.2.2</domain>

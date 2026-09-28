@@ -136,127 +136,147 @@ object SyncData {
     }
 
     private fun exportWrong(context: Context, blobs: MutableMap<String, ByteArray>): List<SyncRow> {
-        val db = WrongQuestionDb(context).readableDatabase
-        val tomb = tombstones(db, DS_WRONG)
-        val out = mutableListOf<SyncRow>()
-        db.rawQuery(
-            "SELECT id, timestamp, image_path, ocr_text, snapshot, bank_question_id, summary, is_summarized, annotation_json, wrong_count, mastered, COALESCE(updated_at, 0) FROM wrong_questions",
-            arrayOf()
-        ).use { c ->
-            while (c.moveToNext()) {
-                val id = c.getString(0)
-                val updatedAt = if (c.getLong(11) > 0) c.getLong(11) else c.getLong(1)
-                val data = JSONObject().apply {
-                    put("id", id)
-                    put("timestamp", c.getLong(1))
-                    put("image_path", "")
-                    put("ocr_text", c.getString(3) ?: "")
-                    put("snapshot", c.getString(4) ?: "")
-                    put("bank_question_id", c.getString(5) ?: "")
-                    put("summary", c.getString(6) ?: "")
-                    put("is_summarized", c.getInt(7))
-                    put("annotation_json", c.getString(8) ?: "")
-                    put("wrong_count", c.getInt(9))
-                    put("mastered", c.getInt(10))
-                }
-                // 截图文件：读字节 -> data.image_blob = hex（对端按约定下载还原为文件）
-                val imgPath = c.getString(2) ?: ""
-                if (imgPath.isNotBlank()) {
-                    val f = File(imgPath)
-                    if (f.exists() && f.length() > 0) {
-                        val bytes = f.readBytes()
-                        blobs[sha256Hex(bytes)] = bytes
-                        data.put("image_blob", sha256Hex(bytes))
-                        data.put("image_mime", if (imgPath.endsWith(".png")) "image/png" else "image/jpeg")
+        val helper = WrongQuestionDb(context)
+        val db = helper.readableDatabase
+        try {
+            val tomb = tombstones(db, DS_WRONG)
+            val out = mutableListOf<SyncRow>()
+            db.rawQuery(
+                "SELECT id, timestamp, image_path, ocr_text, snapshot, bank_question_id, summary, is_summarized, annotation_json, wrong_count, mastered, COALESCE(updated_at, 0) FROM wrong_questions",
+                arrayOf()
+            ).use { c ->
+                while (c.moveToNext()) {
+                    val id = c.getString(0)
+                    val updatedAt = if (c.getLong(11) > 0) c.getLong(11) else c.getLong(1)
+                    val data = JSONObject().apply {
+                        put("id", id)
+                        put("timestamp", c.getLong(1))
+                        put("image_path", "")
+                        put("ocr_text", c.getString(3) ?: "")
+                        put("snapshot", c.getString(4) ?: "")
+                        put("bank_question_id", c.getString(5) ?: "")
+                        put("summary", c.getString(6) ?: "")
+                        put("is_summarized", c.getInt(7))
+                        put("annotation_json", c.getString(8) ?: "")
+                        put("wrong_count", c.getInt(9))
+                        put("mastered", c.getInt(10))
                     }
+                    // 截图文件：读字节 -> data.image_blob = hex（对端按约定下载还原为文件）
+                    val imgPath = c.getString(2) ?: ""
+                    if (imgPath.isNotBlank()) {
+                        val f = File(imgPath)
+                        if (f.exists() && f.length() > 0) {
+                            val bytes = f.readBytes()
+                            blobs[sha256Hex(bytes)] = bytes
+                            data.put("image_blob", sha256Hex(bytes))
+                            data.put("image_mime", if (imgPath.endsWith(".png")) "image/png" else "image/jpeg")
+                        }
+                    }
+                    if (tomb[id] != null) continue   // 本地已删且有墓碑：不再导出（墓碑单独随行输出）
+                    out.add(row(id, updatedAt, data, blobs))
                 }
-                if (tomb[id] != null) continue   // 本地已删且有墓碑：不再导出（墓碑单独随行输出）
-                out.add(row(id, updatedAt, data, blobs))
             }
+            // 墓碑以 deleted 行形式参与合并
+            for ((id, at) in tomb) out.add(SyncRow(id, at, true, JSONObject()))
+            return out
+        } finally {
+            helper.close()
         }
-        // 墓碑以 deleted 行形式参与合并
-        for ((id, at) in tomb) out.add(SyncRow(id, at, true, JSONObject()))
-        return out
     }
 
     private fun exportSessions(context: Context): List<SyncRow> {
-        val db = QuestionBankDb(context).writableDatabase
-        val deviceId = SyncPrefs.deviceId(context)
-        val tomb = tombstones(db, DS_SESSIONS)
-        val out = mutableListOf<SyncRow>()
-        // questions_json 不参与导出全文读取的风险：sessions 行较小（v2 极简），直接读
-        db.rawQuery(
-            "SELECT id, COALESCE(sync_key,''), finished_at, date_str, module_id, module_name, is_wrong_practice, question_count, correct_count, wrong_count, elapsed_ms, rate_min, rate_max, questions_json FROM practice_sessions",
-            arrayOf()
-        ).use { c ->
-            while (c.moveToNext()) {
-                val localId = c.getLong(0)
-                var syncKey = c.getString(1)
-                if (syncKey.isBlank()) {
-                    syncKey = "$deviceId:$localId"   // §4.1：导出时回填并持久化，已带 key 的行永不改写
-                    val v = ContentValues().apply { put("sync_key", syncKey) }
-                    db.update("practice_sessions", v, "id = ? AND COALESCE(sync_key,'') = ''", arrayOf(localId.toString()))
+        val helper = QuestionBankDb(context)
+        val db = helper.writableDatabase
+        try {
+            val deviceId = SyncPrefs.deviceId(context)
+            val tomb = tombstones(db, DS_SESSIONS)
+            val out = mutableListOf<SyncRow>()
+            // questions_json 不参与导出全文读取的风险：sessions 行较小（v2 极简），直接读
+            db.rawQuery(
+                "SELECT id, COALESCE(sync_key,''), finished_at, date_str, module_id, module_name, is_wrong_practice, question_count, correct_count, wrong_count, elapsed_ms, rate_min, rate_max, questions_json FROM practice_sessions",
+                arrayOf()
+            ).use { c ->
+                while (c.moveToNext()) {
+                    val localId = c.getLong(0)
+                    var syncKey = c.getString(1)
+                    if (syncKey.isBlank()) {
+                        syncKey = "$deviceId:$localId"   // §4.1：导出时回填并持久化，已带 key 的行永不改写
+                        val v = ContentValues().apply { put("sync_key", syncKey) }
+                        db.update("practice_sessions", v, "id = ? AND COALESCE(sync_key,'') = ''", arrayOf(localId.toString()))
+                    }
+                    val data = JSONObject().apply {
+                        put("id", localId)
+                        put("sync_key", syncKey)
+                        put("finished_at", c.getLong(2))
+                        put("date_str", c.getString(3) ?: "")
+                        put("module_id", c.getString(4) ?: "")
+                        put("module_name", c.getString(5) ?: "")
+                        put("is_wrong_practice", c.getInt(6))
+                        put("question_count", c.getInt(7))
+                        put("correct_count", c.getInt(8))
+                        put("wrong_count", c.getInt(9))
+                        put("elapsed_ms", c.getLong(10))
+                        put("rate_min", c.getInt(11))
+                        put("rate_max", c.getInt(12))
+                        put("questions_json", c.getString(13) ?: "[]")
+                    }
+                    if (tomb[syncKey] != null) continue
+                    out.add(row(syncKey, c.getLong(2), data, mutableMapOf()))
                 }
-                val data = JSONObject().apply {
-                    put("id", localId)
-                    put("sync_key", syncKey)
-                    put("finished_at", c.getLong(2))
-                    put("date_str", c.getString(3) ?: "")
-                    put("module_id", c.getString(4) ?: "")
-                    put("module_name", c.getString(5) ?: "")
-                    put("is_wrong_practice", c.getInt(6))
-                    put("question_count", c.getInt(7))
-                    put("correct_count", c.getInt(8))
-                    put("wrong_count", c.getInt(9))
-                    put("elapsed_ms", c.getLong(10))
-                    put("rate_min", c.getInt(11))
-                    put("rate_max", c.getInt(12))
-                    put("questions_json", c.getString(13) ?: "[]")
-                }
-                if (tomb[syncKey] != null) continue
-                out.add(row(syncKey, c.getLong(2), data, mutableMapOf()))
             }
+            for ((k, at) in tomb) out.add(SyncRow(k, at, true, JSONObject()))
+            return out
+        } finally {
+            helper.close()
         }
-        for ((k, at) in tomb) out.add(SyncRow(k, at, true, JSONObject()))
-        return out
     }
 
     private fun exportCompleted(context: Context): List<SyncRow> {
-        val db = QuestionBankDb(context).readableDatabase
-        val tomb = tombstones(db, DS_COMPLETED)
-        val out = mutableListOf<SyncRow>()
-        db.rawQuery("SELECT question_id, completed_at FROM completed_questions", arrayOf()).use { c ->
-            while (c.moveToNext()) {
-                val qid = c.getString(0)
-                val at = c.getLong(1)
-                if (tomb[qid] != null) continue
-                out.add(row(qid, at, JSONObject().apply {
-                    put("question_id", qid); put("completed_at", at)
-                }, mutableMapOf()))
+        val helper = QuestionBankDb(context)
+        val db = helper.readableDatabase
+        try {
+            val tomb = tombstones(db, DS_COMPLETED)
+            val out = mutableListOf<SyncRow>()
+            db.rawQuery("SELECT question_id, completed_at FROM completed_questions", arrayOf()).use { c ->
+                while (c.moveToNext()) {
+                    val qid = c.getString(0)
+                    val at = c.getLong(1)
+                    if (tomb[qid] != null) continue
+                    out.add(row(qid, at, JSONObject().apply {
+                        put("question_id", qid); put("completed_at", at)
+                    }, mutableMapOf()))
+                }
             }
+            for ((k, at) in tomb) out.add(SyncRow(k, at, true, JSONObject()))
+            return out
+        } finally {
+            helper.close()
         }
-        for ((k, at) in tomb) out.add(SyncRow(k, at, true, JSONObject()))
-        return out
     }
 
     private fun exportAnnotations(context: Context): List<SyncRow> {
-        val db = QuestionBankDb(context).readableDatabase
-        val tomb = tombstones(db, DS_ANNOTATIONS)
-        val out = mutableListOf<SyncRow>()
-        db.rawQuery("SELECT question_id, strokes, COALESCE(updated_at, 0) FROM question_annotations", arrayOf()).use { c ->
-            while (c.moveToNext()) {
-                val qid = c.getString(0)
-                val at = c.getLong(2)
-                if (tomb[qid] != null) continue
-                out.add(row(qid, at, JSONObject().apply {
-                    put("question_id", qid)
-                    put("strokes", c.getString(1) ?: "")
-                    put("updated_at", at)
-                }, mutableMapOf()))
+        val helper = QuestionBankDb(context)
+        val db = helper.readableDatabase
+        try {
+            val tomb = tombstones(db, DS_ANNOTATIONS)
+            val out = mutableListOf<SyncRow>()
+            db.rawQuery("SELECT question_id, strokes, COALESCE(updated_at, 0) FROM question_annotations", arrayOf()).use { c ->
+                while (c.moveToNext()) {
+                    val qid = c.getString(0)
+                    val at = c.getLong(2)
+                    if (tomb[qid] != null) continue
+                    out.add(row(qid, at, JSONObject().apply {
+                        put("question_id", qid)
+                        put("strokes", c.getString(1) ?: "")
+                        put("updated_at", at)
+                    }, mutableMapOf()))
+                }
             }
+            for ((k, at) in tomb) out.add(SyncRow(k, at, true, JSONObject()))
+            return out
+        } finally {
+            helper.close()
         }
-        for ((k, at) in tomb) out.add(SyncRow(k, at, true, JSONObject()))
-        return out
     }
 
     /** api_keys 单行；内容相对上次同步快照有变化 -> updated_at 提为 now（否则远端 LWW 会覆盖本地新改的 key） */
@@ -295,125 +315,145 @@ object SyncData {
     }
 
     private fun applyWrong(context: Context, rows: List<SyncRow>, dav: SyncWebDav?) {
-        val db = WrongQuestionDb(context).writableDatabase
-        val cache = blobCacheDir(context)
-        for (r in rows) {
-            if (r.deleted) {
-                val existing = db.rawQuery("SELECT image_path FROM wrong_questions WHERE id = ?", arrayOf(r.key)).use { c ->
-                    if (c.moveToFirst()) c.getString(0) ?: "" else null
+        val helper = WrongQuestionDb(context)
+        val db = helper.writableDatabase
+        try {
+            val cache = blobCacheDir(context)
+            for (r in rows) {
+                if (r.deleted) {
+                    val existing = db.rawQuery("SELECT image_path FROM wrong_questions WHERE id = ?", arrayOf(r.key)).use { c ->
+                        if (c.moveToFirst()) c.getString(0) ?: "" else null
+                    }
+                    if (existing != null) {
+                        if (existing.isNotBlank()) try { File(existing).delete() } catch (_: Exception) {}
+                        db.delete("wrong_questions", "id = ?", arrayOf(r.key))
+                    }
+                    addTombstone(db, DS_WRONG, r.key, r.updatedAt)
+                    continue
                 }
-                if (existing != null) {
-                    if (existing.isNotBlank()) try { File(existing).delete() } catch (_: Exception) {}
-                    db.delete("wrong_questions", "id = ?", arrayOf(r.key))
+                val d = JSONObject(restoreBlobs(r.data.toString(), dav, cache))
+                // 截图文件还原：image_blob 有而本地无 -> 下载写回 filesDir/wrong_questions/wq_<id>.jpg
+                var imagePath = ""
+                val imgHex = d.optString("image_blob")
+                if (imgHex.isNotBlank()) {
+                    val bytes = fetchBlob(dav, cache, imgHex)
+                    if (bytes != null) {
+                        val ext = if (d.optString("image_mime") == "image/png") "png" else "jpg"
+                        val dir = File(context.filesDir, WRONG_IMG_DIR)
+                        if (!dir.exists()) dir.mkdirs()
+                        val f = File(dir, "wq_${r.key}.$ext")
+                        try { f.writeBytes(bytes) } catch (_: Exception) {}
+                        imagePath = f.absolutePath
+                    }
                 }
-                addTombstone(db, DS_WRONG, r.key, r.updatedAt)
-                continue
-            }
-            val d = JSONObject(restoreBlobs(r.data.toString(), dav, cache))
-            // 截图文件还原：image_blob 有而本地无 -> 下载写回 filesDir/wrong_questions/wq_<id>.jpg
-            var imagePath = ""
-            val imgHex = d.optString("image_blob")
-            if (imgHex.isNotBlank()) {
-                val bytes = fetchBlob(dav, cache, imgHex)
-                if (bytes != null) {
-                    val ext = if (d.optString("image_mime") == "image/png") "png" else "jpg"
-                    val dir = File(context.filesDir, WRONG_IMG_DIR)
-                    if (!dir.exists()) dir.mkdirs()
-                    val f = File(dir, "wq_${r.key}.$ext")
-                    try { f.writeBytes(bytes) } catch (_: Exception) {}
-                    imagePath = f.absolutePath
+                val v = ContentValues().apply {
+                    put("id", r.key)
+                    put("timestamp", d.optLong("timestamp", r.updatedAt))
+                    put("image_path", imagePath)
+                    put("ocr_text", d.optString("ocr_text"))
+                    put("snapshot", d.optString("snapshot"))
+                    put("bank_question_id", d.optString("bank_question_id"))
+                    put("summary", d.optString("summary"))
+                    put("is_summarized", d.optInt("is_summarized", 0))
+                    put("annotation_json", d.optString("annotation_json"))
+                    put("wrong_count", d.optInt("wrong_count", 1))
+                    put("mastered", d.optInt("mastered", 0))
+                    put("updated_at", r.updatedAt)
                 }
+                db.insertWithOnConflict("wrong_questions", null, v, SQLiteDatabase.CONFLICT_REPLACE)
+                deleteTombstone(db, DS_WRONG, r.key)
             }
-            val v = ContentValues().apply {
-                put("id", r.key)
-                put("timestamp", d.optLong("timestamp", r.updatedAt))
-                put("image_path", imagePath)
-                put("ocr_text", d.optString("ocr_text"))
-                put("snapshot", d.optString("snapshot"))
-                put("bank_question_id", d.optString("bank_question_id"))
-                put("summary", d.optString("summary"))
-                put("is_summarized", d.optInt("is_summarized", 0))
-                put("annotation_json", d.optString("annotation_json"))
-                put("wrong_count", d.optInt("wrong_count", 1))
-                put("mastered", d.optInt("mastered", 0))
-                put("updated_at", r.updatedAt)
-            }
-            db.insertWithOnConflict("wrong_questions", null, v, SQLiteDatabase.CONFLICT_REPLACE)
-            deleteTombstone(db, DS_WRONG, r.key)
+        } finally {
+            helper.close()
         }
     }
 
     private fun applySessions(context: Context, rows: List<SyncRow>) {
-        val db = QuestionBankDb(context).writableDatabase
-        for (r in rows) {
-            if (r.deleted) {
-                db.delete("practice_sessions", "COALESCE(sync_key,'') = ?", arrayOf(r.key))
-                addTombstone(db, DS_SESSIONS, r.key, r.updatedAt)
-                continue
+        val helper = QuestionBankDb(context)
+        val db = helper.writableDatabase
+        try {
+            for (r in rows) {
+                if (r.deleted) {
+                    db.delete("practice_sessions", "COALESCE(sync_key,'') = ?", arrayOf(r.key))
+                    addTombstone(db, DS_SESSIONS, r.key, r.updatedAt)
+                    continue
+                }
+                val d = r.data
+                val existingId = db.rawQuery(
+                    "SELECT id FROM practice_sessions WHERE COALESCE(sync_key,'') = ?", arrayOf(r.key)
+                ).use { c -> if (c.moveToFirst()) c.getLong(0) else null }
+                val v = ContentValues().apply {
+                    put("finished_at", d.optLong("finished_at", r.updatedAt))
+                    put("date_str", d.optString("date_str"))
+                    put("module_id", d.optString("module_id"))
+                    put("module_name", d.optString("module_name"))
+                    put("is_wrong_practice", d.optInt("is_wrong_practice", 0))
+                    put("question_count", d.optInt("question_count", 0))
+                    put("correct_count", d.optInt("correct_count", 0))
+                    put("wrong_count", d.optInt("wrong_count", 0))
+                    put("elapsed_ms", d.optLong("elapsed_ms", 0))
+                    put("rate_min", d.optInt("rate_min", 0))
+                    put("rate_max", d.optInt("rate_max", 100))
+                    put("questions_json", d.optString("questions_json", "[]"))
+                    put("sync_key", r.key)
+                }
+                if (existingId != null) {
+                    db.update("practice_sessions", v, "id = ?", arrayOf(existingId.toString()))
+                } else {
+                    // 不带远端数字 id（本地 AUTOINCREMENT 自增）；同步身份只认 sync_key
+                    db.insert("practice_sessions", null, v)
+                }
+                deleteTombstone(db, DS_SESSIONS, r.key)
             }
-            val d = r.data
-            val existingId = db.rawQuery(
-                "SELECT id FROM practice_sessions WHERE COALESCE(sync_key,'') = ?", arrayOf(r.key)
-            ).use { c -> if (c.moveToFirst()) c.getLong(0) else null }
-            val v = ContentValues().apply {
-                put("finished_at", d.optLong("finished_at", r.updatedAt))
-                put("date_str", d.optString("date_str"))
-                put("module_id", d.optString("module_id"))
-                put("module_name", d.optString("module_name"))
-                put("is_wrong_practice", d.optInt("is_wrong_practice", 0))
-                put("question_count", d.optInt("question_count", 0))
-                put("correct_count", d.optInt("correct_count", 0))
-                put("wrong_count", d.optInt("wrong_count", 0))
-                put("elapsed_ms", d.optLong("elapsed_ms", 0))
-                put("rate_min", d.optInt("rate_min", 0))
-                put("rate_max", d.optInt("rate_max", 100))
-                put("questions_json", d.optString("questions_json", "[]"))
-                put("sync_key", r.key)
-            }
-            if (existingId != null) {
-                db.update("practice_sessions", v, "id = ?", arrayOf(existingId.toString()))
-            } else {
-                // 不带远端数字 id（本地 AUTOINCREMENT 自增）；同步身份只认 sync_key
-                db.insert("practice_sessions", null, v)
-            }
-            deleteTombstone(db, DS_SESSIONS, r.key)
+        } finally {
+            helper.close()
         }
     }
 
     private fun applyCompleted(context: Context, rows: List<SyncRow>) {
-        val db = QuestionBankDb(context).writableDatabase
-        for (r in rows) {
-            if (r.deleted) {
-                db.delete("completed_questions", "question_id = ?", arrayOf(r.key))
-                addTombstone(db, DS_COMPLETED, r.key, r.updatedAt)
-                continue
+        val helper = QuestionBankDb(context)
+        val db = helper.writableDatabase
+        try {
+            for (r in rows) {
+                if (r.deleted) {
+                    db.delete("completed_questions", "question_id = ?", arrayOf(r.key))
+                    addTombstone(db, DS_COMPLETED, r.key, r.updatedAt)
+                    continue
+                }
+                val v = ContentValues().apply {
+                    put("question_id", r.key)
+                    put("completed_at", r.data.optLong("completed_at", r.updatedAt))
+                }
+                db.insertWithOnConflict("completed_questions", null, v, SQLiteDatabase.CONFLICT_REPLACE)
+                deleteTombstone(db, DS_COMPLETED, r.key)
             }
-            val v = ContentValues().apply {
-                put("question_id", r.key)
-                put("completed_at", r.data.optLong("completed_at", r.updatedAt))
-            }
-            db.insertWithOnConflict("completed_questions", null, v, SQLiteDatabase.CONFLICT_REPLACE)
-            deleteTombstone(db, DS_COMPLETED, r.key)
+        } finally {
+            helper.close()
         }
     }
 
     private fun applyAnnotations(context: Context, rows: List<SyncRow>, dav: SyncWebDav?) {
-        val db = QuestionBankDb(context).writableDatabase
-        val cache = blobCacheDir(context)
-        for (r in rows) {
-            if (r.deleted) {
-                db.delete("question_annotations", "question_id = ?", arrayOf(r.key))
-                addTombstone(db, DS_ANNOTATIONS, r.key, r.updatedAt)
-                continue
+        val helper = QuestionBankDb(context)
+        val db = helper.writableDatabase
+        try {
+            val cache = blobCacheDir(context)
+            for (r in rows) {
+                if (r.deleted) {
+                    db.delete("question_annotations", "question_id = ?", arrayOf(r.key))
+                    addTombstone(db, DS_ANNOTATIONS, r.key, r.updatedAt)
+                    continue
+                }
+                val d = JSONObject(restoreBlobs(r.data.toString(), dav, cache))
+                val v = ContentValues().apply {
+                    put("question_id", r.key)
+                    put("strokes", d.optString("strokes"))
+                    put("updated_at", maxOf(r.updatedAt, d.optLong("updated_at", 0)))
+                }
+                db.insertWithOnConflict("question_annotations", null, v, SQLiteDatabase.CONFLICT_REPLACE)
+                deleteTombstone(db, DS_ANNOTATIONS, r.key)
             }
-            val d = JSONObject(restoreBlobs(r.data.toString(), dav, cache))
-            val v = ContentValues().apply {
-                put("question_id", r.key)
-                put("strokes", d.optString("strokes"))
-                put("updated_at", maxOf(r.updatedAt, d.optLong("updated_at", 0)))
-            }
-            db.insertWithOnConflict("question_annotations", null, v, SQLiteDatabase.CONFLICT_REPLACE)
-            deleteTombstone(db, DS_ANNOTATIONS, r.key)
+        } finally {
+            helper.close()
         }
     }
 

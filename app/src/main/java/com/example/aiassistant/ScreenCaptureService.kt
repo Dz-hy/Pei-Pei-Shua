@@ -931,7 +931,7 @@ class ScreenCaptureService : Service() {
     ) {
         if (isDictOcrMode) {
             isDictOcrMode = false
-            Log.i(TAG, "词典识词模式触发，OCR文本前100字=${ocrText.take(100)}")
+            if (BuildConfig.DEBUG) Log.i(TAG, "词典识词模式触发，OCR文本前100字=${ocrText.take(100)}")
             mainHandler.post { hideBallProgress() }
             performDictOcrSearch(ocrText, requestId)
             return
@@ -942,12 +942,12 @@ class ScreenCaptureService : Service() {
 
         // 题库 FTS+LCS 全库检索放后台线程执行（入口含主线程：重新分析按钮/渲染失败重试），
         // 完成后回主线程启动故障转移链
-        Log.i(TAG, "题库查询: 文本前80字=${ocrText.take(80)}")
+        if (BuildConfig.DEBUG) Log.i(TAG, "题库查询: 文本前80字=${ocrText.take(80)}")
         QuestionBankManager.searchAsync(ocrText) { bankMatch ->
             if (currentRequestId != requestId) return@searchAsync
             mainHandler.post {
                 if (bankMatch != null) {
-                    Log.i(TAG, "题库命中: ${bankMatch.id}, 答案=${bankMatch.answer}")
+                    if (BuildConfig.DEBUG) Log.i(TAG, "题库命中: ${bankMatch.id}, 答案=${bankMatch.answer}")
                 } else {
                     Log.i(TAG, "题库未命中 (已加载=${QuestionBankManager.isLoaded()}, 文本长度=${ocrText.length})")
                 }

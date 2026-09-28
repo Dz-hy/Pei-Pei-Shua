@@ -908,7 +908,7 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
         ).use { c -> if (c.moveToFirst()) c.getString(0) else "" }
         writableDatabase.delete(T_SESSIONS, "id = ?", arrayOf(id.toString()))
         if (syncKey.isNotBlank()) {
-            addTombstone(writableDatabase, DS_SESSIONS, syncKey, System.currentTimeMillis())
+            SyncData.addTombstone(writableDatabase, DS_SESSIONS, syncKey, System.currentTimeMillis())
         }
     }
 

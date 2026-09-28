@@ -132,7 +132,12 @@ object WrongQuestionManager {
         val appCtx = context.applicationContext
         Thread {
             val stats = getStats(appCtx)
-            android.os.Handler(android.os.Looper.getMainLooper()).post { onResult(stats.first, stats.second) }
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                val activity = context as? android.app.Activity
+                if (activity == null || !activity.isDestroyed) {
+                    onResult(stats.first, stats.second)
+                }
+            }
         }.start()
     }
 

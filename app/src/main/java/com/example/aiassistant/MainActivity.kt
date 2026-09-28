@@ -228,52 +228,59 @@ class MainActivity : AppCompatActivity(), HomeFragment.ServiceControlListener {
     }
 
     private fun getOrCreateHomeFragment(): Fragment {
-        if (homeFragment == null) {
-            homeFragment = supportFragmentManager.findFragmentByTag("home") as? HomeFragment ?: HomeFragment()
+        return homeFragment ?: run {
+            val f = supportFragmentManager.findFragmentByTag("home") as? HomeFragment ?: HomeFragment()
+            homeFragment = f
+            f
         }
-        return homeFragment!!
     }
 
     private fun getOrCreateAiModelFragment(): Fragment {
-        if (aiModelFragment == null) {
-            aiModelFragment = supportFragmentManager.findFragmentByTag("ai_model") as? AiModelFragment ?: AiModelFragment()
+        return aiModelFragment ?: run {
+            val f = supportFragmentManager.findFragmentByTag("ai_model") as? AiModelFragment ?: AiModelFragment()
+            aiModelFragment = f
+            f
         }
-        return aiModelFragment!!
     }
 
     private fun getOrCreateOcrModelFragment(): Fragment {
-        if (ocrModelFragment == null) {
-            ocrModelFragment = supportFragmentManager.findFragmentByTag("ocr_model") as? OcrModelFragment ?: OcrModelFragment()
+        return ocrModelFragment ?: run {
+            val f = supportFragmentManager.findFragmentByTag("ocr_model") as? OcrModelFragment ?: OcrModelFragment()
+            ocrModelFragment = f
+            f
         }
-        return ocrModelFragment!!
     }
 
     internal fun getOrCreatePromptFragment(): Fragment {
-        if (promptFragment == null) {
-            promptFragment = supportFragmentManager.findFragmentByTag("prompt") as? PromptManageFragment ?: PromptManageFragment()
+        return promptFragment ?: run {
+            val f = supportFragmentManager.findFragmentByTag("prompt") as? PromptManageFragment ?: PromptManageFragment()
+            promptFragment = f
+            f
         }
-        return promptFragment!!
     }
 
     private fun getOrCreateKnowledgeFragment(): Fragment {
-        if (knowledgeFragment == null) {
-            knowledgeFragment = supportFragmentManager.findFragmentByTag("knowledge") as? KnowledgeCardFragment ?: KnowledgeCardFragment()
+        return knowledgeFragment ?: run {
+            val f = supportFragmentManager.findFragmentByTag("knowledge") as? KnowledgeCardFragment ?: KnowledgeCardFragment()
+            knowledgeFragment = f
+            f
         }
-        return knowledgeFragment!!
     }
 
     private fun getOrCreatePlanFragment(): Fragment {
-        if (planFragment == null) {
-            planFragment = supportFragmentManager.findFragmentByTag("plan") as? PlanFragment ?: PlanFragment()
+        return planFragment ?: run {
+            val f = supportFragmentManager.findFragmentByTag("plan") as? PlanFragment ?: PlanFragment()
+            planFragment = f
+            f
         }
-        return planFragment!!
     }
 
     private fun getOrCreatePomodoroFragment(): Fragment {
-        if (pomodoroFragment == null) {
-            pomodoroFragment = supportFragmentManager.findFragmentByTag("pomodoro") as? PomodoroFragment ?: PomodoroFragment()
+        return pomodoroFragment ?: run {
+            val f = supportFragmentManager.findFragmentByTag("pomodoro") as? PomodoroFragment ?: PomodoroFragment()
+            pomodoroFragment = f
+            f
         }
-        return pomodoroFragment!!
     }
 
     // ── ServiceControlListener 实现 ───────────────────────────────────

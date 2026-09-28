@@ -48,6 +48,7 @@ private class PromptAdapter(
         val tvVisionBadge: TextView = view.findViewById(R.id.tv_vision_badge)
         val etPrompt: TextInputEditText = view.findViewById(R.id.et_type_prompt)
         val btnReset: MaterialButton = view.findViewById(R.id.btn_reset_prompt)
+        val saveHandler: android.os.Handler = android.os.Handler(android.os.Looper.getMainLooper())
         var currentType: QuestionType? = null
         var ignoreTextChange = false
         var currentWatcher: TextWatcher? = null
@@ -74,8 +75,6 @@ private class PromptAdapter(
         holder.ignoreTextChange = true
         holder.etPrompt.setText(TeacherManager.getPrompt(ctx, type))
         holder.ignoreTextChange = false
-
-        val saveHandler = android.os.Handler(android.os.Looper.getMainLooper())
         var saveRunnable: Runnable? = null
         val watcher = object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
@@ -85,14 +84,14 @@ private class PromptAdapter(
                 val t = holder.currentType ?: return
                 val text = s?.toString()?.trim() ?: ""
                 val teacher = TeacherManager.activeTeacher
-                saveRunnable?.let { saveHandler.removeCallbacks(it) }
+                saveRunnable?.let { holder.saveHandler.removeCallbacks(it) }
                 // 清空 = 移除覆盖层恢复默认，否则旧 prompt 会一直残留
                 saveRunnable = if (text.isNotEmpty()) {
                     Runnable { TeacherManager.setOverlay(ctx, teacher.id, t, text) }
                 } else {
                     Runnable { TeacherManager.removeOverlay(ctx, teacher.id, t) }
                 }
-                saveHandler.postDelayed(saveRunnable!!, 300)
+                holder.saveHandler.postDelayed(saveRunnable!!, 300)
             }
         }
         holder.currentWatcher = watcher

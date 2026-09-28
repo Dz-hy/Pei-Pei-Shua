@@ -20,6 +20,7 @@ import android.view.ViewGroup
 import android.widget.EditText
 import android.widget.ImageView
 import android.widget.LinearLayout
+import com.example.aiassistant.BuildConfig
 import com.example.aiassistant.MarkdownRenderer
 import android.widget.ProgressBar
 import android.widget.TextView
@@ -650,7 +651,7 @@ class WrongQuestionDetailActivity : AppCompatActivity() {
                         thinkingBudget = cfg.thinkingBudget,
                         tools = toolsArray,
                         onToolCall = { toolName ->
-                            android.util.Log.d("WrongQuestionAI", "AI 正在调用工具：$toolName")
+                            if (BuildConfig.DEBUG) android.util.Log.d("WrongQuestionAI", "AI 正在调用工具：$toolName")
                         },
                         onComplete = onComplete,
                         onError = { /* 已由 onStructuredError 接管 */ },
