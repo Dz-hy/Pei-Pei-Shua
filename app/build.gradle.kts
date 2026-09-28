@@ -33,10 +33,11 @@ android {
 
     signingConfigs {
         create("release") {
-            storeFile = file("../debug.keystore")
-            storePassword = "android"
-            keyAlias = "androiddebugkey"
-            keyPassword = "android"
+            storeFile = file("../release.keystore")
+            // CI 通过环境变量注入；本地开发从 ~/.gradle/gradle.properties 或环境变量读取
+            storePassword = System.getenv("RELEASE_STORE_PASSWORD") ?: project.findProperty("RELEASE_STORE_PASSWORD") as String? ?: ""
+            keyAlias = "peipeishua"
+            keyPassword = System.getenv("RELEASE_KEY_PASSWORD") ?: project.findProperty("RELEASE_KEY_PASSWORD") as String? ?: ""
         }
     }
 

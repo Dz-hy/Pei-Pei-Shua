@@ -3,6 +3,9 @@
 /local.properties
 .DS_Store
 /build
+*.keystore
+*.jks
+/build
 /build-zen
 /app/build-zen
 /captures
