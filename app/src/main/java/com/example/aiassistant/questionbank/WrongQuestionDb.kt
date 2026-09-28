@@ -90,7 +90,7 @@ class WrongQuestionDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, nul
 
     companion object {
         private const val DB_NAME = "wrong_questions_v2.db"
-        private const val DB_VERSION = 1
+        private const val DB_VERSION = 2
         private const val T_WRONG = "wrong_questions"
         private const val T_META = "meta"
     }
@@ -108,13 +108,34 @@ class WrongQuestionDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, nul
                 is_summarized INTEGER DEFAULT 0,
                 annotation_json TEXT DEFAULT '',
                 wrong_count INTEGER DEFAULT 1,
-                mastered INTEGER DEFAULT 0
+                mastered INTEGER DEFAULT 0,
+                updated_at INTEGER DEFAULT 0
             )
         """)
         db.execSQL("CREATE TABLE IF NOT EXISTS $T_META (key TEXT PRIMARY KEY, value TEXT)")
+        createSyncSchema(db)
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {}
+    /** 云同步辅助结构（docs/sync-protocol.md §9-1）：行级修改时间 + 墓碑表 */
+    private fun createSyncSchema(db: SQLiteDatabase) {
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS sync_tombstones (
+                dataset TEXT NOT NULL,
+                row_id TEXT NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (dataset, row_id)
+            )
+        """)
+    }
+
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion < 2) {
+            // 旧行没有修改时间：以收录时间（timestamp）为初值，语义最接近真实 LWW
+            db.execSQL("ALTER TABLE $T_WRONG ADD COLUMN updated_at INTEGER DEFAULT 0")
+            db.execSQL("UPDATE $T_WRONG SET updated_at = timestamp WHERE COALESCE(updated_at, 0) = 0")
+            createSyncSchema(db)
+        }
+    }
 
     /** 总数与未总结数（COUNT 下推到 SQL，避免首页为了两个数字全表加载快照 JSON） */
     fun counts(): Pair<Int, Int> {
@@ -185,15 +206,23 @@ class WrongQuestionDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, nul
     }
 
     fun updateColumn(id: String, column: String, value: String) {
-        val values = ContentValues().apply { put(column, value) }
+        val values = ContentValues().apply { put(column, value); put("updated_at", System.currentTimeMillis()) }
         writableDatabase.update(T_WRONG, values, "id = ?", arrayOf(id))
     }
 
     fun updateColumns(id: String, values: ContentValues) {
+        values.put("updated_at", System.currentTimeMillis())
         writableDatabase.update(T_WRONG, values, "id = ?", arrayOf(id))
     }
 
     fun delete(id: String) {
+        // 墓碑先行：本地删除必须留下 deleted 标记，否则同步时会被旧远端文件复活
+        val tomb = ContentValues().apply {
+            put("dataset", "wrong_questions")
+            put("row_id", id)
+            put("updated_at", System.currentTimeMillis())
+        }
+        writableDatabase.insertWithOnConflict("sync_tombstones", null, tomb, SQLiteDatabase.CONFLICT_REPLACE)
         writableDatabase.delete(T_WRONG, "id = ?", arrayOf(id))
     }
 
@@ -224,6 +253,7 @@ class WrongQuestionDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, nul
             put("annotation_json", q.annotationJson)
             put("wrong_count", q.wrongCount)
             put("mastered", if (q.mastered) 1 else 0)
+            put("updated_at", q.timestamp)
         }
     }
 }

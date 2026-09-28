@@ -27,6 +27,7 @@ __MACOSX/
 /test_aar_classes/
 /com/
 /docs/
+!/docs/sync-protocol.md
 /归档/
 /高频800词/
 /高频800词记忆版.md

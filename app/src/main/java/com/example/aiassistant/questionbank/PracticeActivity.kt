@@ -976,6 +976,8 @@ try {
 
         applyResult(questions[currentIndex], selectedOptions[currentIndex])
         updateProgress()
+        // 云同步关键节点：交卷后推一轮（docs/sync-protocol.md §8；未配置 WebDAV 时静默跳过，30s 去抖）
+        com.example.aiassistant.sync.SyncEngine.schedule(this)
 
         // 交卷瞬间反馈：选项区轻微明暗呼吸，突出对错色块
         layoutOptions.animate().alpha(0.55f).setDuration(80).withEndAction {

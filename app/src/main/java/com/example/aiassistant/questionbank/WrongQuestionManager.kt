@@ -165,6 +165,7 @@ object WrongQuestionManager {
                 put("mastered", 0)
             }
             db.updateColumns(existing.id, values)
+            com.example.aiassistant.sync.SyncEngine.schedule(context)
             return false
         }
         addFromBank(context, question, null)
@@ -189,6 +190,7 @@ object WrongQuestionManager {
         getDb(context).insert(newQuestion)
         // 计时联动：记录"第几题 + 该题已用时"（未在计时则为空操作）
         com.example.aiassistant.TimerEngine.noteWrongCapture()
+        com.example.aiassistant.sync.SyncEngine.schedule(context)
         return newQuestion
     }
 
@@ -208,6 +210,7 @@ object WrongQuestionManager {
         getDb(context).insert(newQuestion)
         // 计时联动：记录"第几题 + 该题已用时"（未在计时则为空操作）
         com.example.aiassistant.TimerEngine.noteWrongCapture()
+        com.example.aiassistant.sync.SyncEngine.schedule(context)
         return newQuestion
     }
 

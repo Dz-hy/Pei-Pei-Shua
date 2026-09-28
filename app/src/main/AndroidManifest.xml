@@ -51,6 +51,13 @@
             </intent-filter>
         </activity>
 
+        <!-- 云同步设置 -->
+        <activity
+            android:name=".sync.SyncSettingsActivity"
+            android:exported="false"
+            android:theme="@style/Theme.AIAssistant"
+            android:windowSoftInputMode="adjustResize" />
+
         <!-- 知识卡片列表 -->
         <activity
             android:name=".knowledge.KnowledgeCardListActivity"

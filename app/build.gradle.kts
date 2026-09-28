@@ -37,6 +37,13 @@ android {
     }
 
     buildTypes {
+        debug {
+            // debug 必须与 release 同一套签名（仓库内 keystore）：两者同包名，签名不一致时
+            // release 覆盖安装 debug 会被系统拒绝（INSTALL_FAILED_UPDATE_INCOMPATIBLE），
+            // 用户只能卸载重装、数据全丢。默认的 debug 签名是各构建机器 ~/.android 下
+            // 随机生成的 keystore（CI runner 每次构建都不同），绝不能用于分发。
+            signingConfig = signingConfigs.getByName("release")
+        }
         release {
             isMinifyEnabled = true
             signingConfig = signingConfigs.getByName("release")

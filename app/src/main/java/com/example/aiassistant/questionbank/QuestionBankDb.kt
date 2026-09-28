@@ -14,7 +14,7 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
     companion object {
         private const val TAG = "QuestionBankDb"
         private const val DB_NAME = "question_bank_v2.db"
-        private const val DB_VERSION = 7
+        private const val DB_VERSION = 8
 
         const val T_MODULES = "modules"
         const val T_QUESTIONS = "questions"
@@ -160,10 +160,25 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
                 elapsed_ms INTEGER DEFAULT 0,
                 rate_min INTEGER DEFAULT 0,
                 rate_max INTEGER DEFAULT 100,
-                questions_json TEXT DEFAULT '[]'
+                questions_json TEXT DEFAULT '[]',
+                sync_key TEXT DEFAULT ''
             )
         """)
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_practice_sessions_date ON $T_SESSIONS(date_str)")
+        createSyncSchema(db)
+    }
+
+    /** 云同步辅助结构（协议 docs/sync-protocol.md §9-1）：sync_key 唯一索引 + 墓碑表 */
+    private fun createSyncSchema(db: SQLiteDatabase) {
+        db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS idx_practice_sessions_sync_key ON $T_SESSIONS(sync_key) WHERE sync_key != ''")
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS sync_tombstones (
+                dataset TEXT NOT NULL,
+                row_id TEXT NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (dataset, row_id)
+            )
+        """)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -212,6 +227,11 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
                 )
             """)
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_practice_sessions_date ON $T_SESSIONS(date_str)")
+        }
+        if (oldVersion < 8) {
+            // 云同步：sessions 同步身份 sync_key（数字 id 跨设备必撞号）+ 墓碑表
+            db.execSQL("ALTER TABLE $T_SESSIONS ADD COLUMN sync_key TEXT DEFAULT ''")
+            createSyncSchema(db)
         }
     }
 

@@ -82,6 +82,10 @@ class AiModelFragment : Fragment() {
             showTeacherDialog()
         }
 
+        view.findViewById<MaterialButton>(R.id.btn_sync_settings).setOnClickListener {
+            startActivity(android.content.Intent(requireContext(), com.example.aiassistant.sync.SyncSettingsActivity::class.java))
+        }
+
         // 拖动排序：按住卡片右侧 ≡ 手柄上下拖动，顺序即故障转移优先级
         touchHelper = ItemTouchHelper(object : ItemTouchHelper.Callback() {
             override fun getMovementFlags(rv: RecyclerView, vh: RecyclerView.ViewHolder): Int =

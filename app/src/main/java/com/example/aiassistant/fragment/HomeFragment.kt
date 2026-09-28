@@ -110,6 +110,9 @@ class HomeFragment : Fragment() {
         val container = (view as? ViewGroup)?.getChildAt(0) as? ViewGroup
         container?.let { animateEntrance(it) }
         LaunchPerf.mark("Home.onViewCreated done")
+
+        // 云同步关键节点：启动后延迟拉推一轮（避开冷启动窗口；未配置 WebDAV 静默跳过）
+        view.postDelayed({ com.example.aiassistant.sync.SyncEngine.schedule(requireContext()) }, 8_000)
     }
 
     override fun onResume() {
