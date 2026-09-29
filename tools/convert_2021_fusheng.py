@@ -4,27 +4,41 @@
 数据来源拼装：
 - 解析文本/答案 ← tools/ocr_work/ocr_result.json（人工 OCR，36 页，135 题答案行齐全）
   按 "N、正确答案：X" 切题；"选择X选项" 为兜底答案句；页脚/页码行剔除。
-- 数量关系(61-75)+判断推理(76-115) 的解析图 ← 解析 PDF 对应页整页渲染（dpi 110），
+- 数量关系(61-75)+判断推理(76-115) 的解析图 ← **按题裁切**本题范围内的扫描页
+  （scan_crop：本地 RapidOCR 定位题界 → 只裁本题解析，跨页分段）。
   这些题解析含公式与图形，OCR 文本无法表达；其余部分纯文字，OCR 文本已足够。
 - 题干/分类 ← 题干 PDF（复用 bank_converter.pdf_to_questions，文字版）。
 
 产出: out/2021国考行测副省级.json + report（并入批量合并文件）。
 用法: python tools/convert_2021_fusheng.py
 """
-import base64
 import json
 import re
 import sys
 from pathlib import Path
 
+# Windows 控制台默认 GBK，本脚本含中文/emoji 输出，统一成 UTF-8 避免 UnicodeEncodeError
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bank_converter import (RE_OPT, checked_write, compose_analysis, parse_stem,
                             pdf_to_questions, RE_NOISE)
+import scan_crop
 
 BASE = Path(__file__).resolve().parent
 OUT = BASE / "历年真题" / "out"
 NAME = "2021国考行测副省级"
-IMG_PAGES = set(range(61, 116))  # 数量关系+判断推理：解析附整页图
+IMG_QUESTIONS = set(range(61, 116))  # 数量关系+判断推理：解析附按题裁图
+ANALYSIS_PDF = BASE / "历年真题" / \
+    "2021年国家公务员考试《行测》真题（副省级）参考答案及解析...pdf"
+STEM_PDF = BASE / "历年真题" / "2021年国家公务员考试《行测》真题（副省级）.pdf"
+IMAGES_DIR = BASE / "ocr_work" / "images"
+LINE_CACHE = BASE / "ocr_work" / "rapid_lines.json"
+MAX_ANALYSIS_IMG_H = 1200  # App 端 BitmapFactory 采样阈值：超过就被降成 1/2 分辨率
 
 
 def load_ocr():
@@ -71,31 +85,48 @@ def extract_answer(text: str):
     return answer, body.strip()
 
 
-def render_pages(pdf, pages):
-    """PDF 页整页渲染为 data URL。扫描页是照片型内容，用 JPEG(dpi110, q75，单图约100KB)；
-    PNG 在扫描页上会达到 600KB+/页，55 题累积约 30MB，过重。"""
-    import fitz
-    urls = []
-    for pno in sorted(set(pages)):
-        pix = pdf[pno - 1].get_pixmap(dpi=110)
-        if pix.alpha:
-            pix = fitz.Pixmap(fitz.csRGB, pix)
-        data = base64.b64encode(pix.tobytes("jpg", jpg_quality=75)).decode("ascii")
-        urls.append(f"data:image/jpeg;base64,{data}")
-    return urls
+def _open_image(data_url: str):
+    """data URL → PIL Image（只读尺寸，用于报告统计）。"""
+    import base64
+    import io
+
+    from PIL import Image
+    raw = base64.b64decode(data_url.split("base64,", 1)[1])
+    return Image.open(io.BytesIO(raw))
+
+
+def build_images(pdf, page_of, nums):
+    """本题的解析配图：只含本题答案与解析（跨页自动分段）。
+
+    旧做法把整页渲染进解析，一图连带同页多题的答案与解析（跨页题是两大页），
+    观感差且无法核对答案。这里改为按题裁切，定位细节见 scan_crop。
+
+    → (crops {题号: [data URL]}, fallbacks [(题号, 原因)])
+    """
+    crops, warnings = scan_crop.build_analysis_images(
+        pdf, IMAGES_DIR, LINE_CACHE, nums, page_of)
+    fallbacks = []
+    for num, reason in warnings:
+        pgs = sorted({page_of[num], page_of.get(num + 1, page_of[num])})
+        fallbacks.append((num, f"{reason}（第 {pgs} 页）"))
+        crops[num] = scan_crop.render_whole_pages(pdf, pgs)
+    return crops, fallbacks
 
 
 def main():
     # 题干侧（文字版 PDF，复用主转换器）
-    stems, sections, _ = pdf_to_questions(str(BASE / "历年真题" /
-        "2021年国家公务员考试《行测》真题（副省级）.pdf"), "stem")
-    # 解析侧：OCR 文本 + 扫描页图
+    stems, sections, _ = pdf_to_questions(str(STEM_PDF), "stem")
+    # 解析侧：OCR 文本 + 按题裁图
     ocr_qs, qpage = load_ocr()
     import fitz
-    pdf = fitz.open(str(BASE / "历年真题" /
-        "2021年国家公务员考试《行测》真题（副省级）参考答案及解析...pdf"))
+    pdf = fitz.open(str(ANALYSIS_PDF))
+
+    # 按题裁图一次性生成（RapidOCR 行几何有缓存，重跑很快）
+    img_nums = sorted(n for n in stems if n in IMG_QUESTIONS and n in qpage)
+    crops, fallbacks = build_images(pdf, qpage, img_nums)
 
     items, skipped = [], []
+    crop_stats = []      # [(题号, 图数, 最高px, 总KB)]
     for num in sorted(stems):
         if num not in ocr_qs:
             skipped.append((num, "OCR 中无此题"))
@@ -109,11 +140,13 @@ def main():
         if len(p["options"]) < 2:
             skipped.append((num, f"仅识别到 {len(p['options'])} 个选项"))
             continue
-        ana_imgs = []
-        if num in IMG_PAGES:
-            # 解析跨页时带上延续页（下一题的起始页），保证延续到页首的公式/图形不丢
-            nxt = qpage.get(num + 1, qpage[num])
-            ana_imgs = render_pages(pdf, sorted({qpage[num], nxt}))
+        ana_imgs = crops.get(num, [])
+        if ana_imgs:
+            # 统计配图几何与原始字节数（base64 约膨胀 4/3，报告里报解码后的真实体积，
+            # 与 audit_bank_images.py 的口径一致）
+            sizes = [im.size for im in map(_open_image, ana_imgs)]
+            crop_stats.append((num, len(ana_imgs), max(s[1] for s in sizes),
+                               sum(len(u) * 3 // 4 for u in ana_imgs)))
         items.append({
             "key": f"custom_{NAME}_{num}",
             "title": p["stem"],
@@ -130,15 +163,32 @@ def main():
         })
 
     json_path = checked_write(OUT, NAME + ".json", json.dumps(items, ensure_ascii=False, indent=2))
+    total_bytes = sum(c[3] for c in crop_stats)
+    over = [c for c in crop_stats if c[2] > MAX_ANALYSIS_IMG_H]
     report = [f"# 转换报告：{NAME}（OCR+扫描图混合）", "",
               f"- 题干：文字版 PDF，{len(stems)} 题；解析：OCR 文本（ocr_result.json，135 题答案行）",
               f"- 成功导入：**{len(items)}** 题 | 跳过：**{len(skipped)}** 题",
-              f"- 数量关系(61-75)+判断推理(76-115)：解析正文后附扫描页整页图（dpi110）", ""]
+              f"- 数量关系(61-75)+判断推理(76-115)：解析正文后附**按题裁切**的扫描图"
+              f"（{len(crop_stats)} 题 / {sum(c[1] for c in crop_stats)} 图 / "
+              f"{total_bytes/1e6:.1f}MB，dpi140 按 `N、正确答案` 题界裁切，跨页自动分段）",
+              f"- 单图最高 {max((c[2] for c in crop_stats), default=0)}px"
+              f"（阈值 {MAX_ANALYSIS_IMG_H}px，超过会被 App 端 1/2 采样）", ""]
+    if over:
+        report += [f"⚠️ 以下 {len(over)} 题配图超过 {MAX_ANALYSIS_IMG_H}px：", "",
+                   "| 题号 | 图数 | 最高px |", "|---|---|---|"] + \
+                  [f"| {n} | {c} | {h} |" for n, c, h, _ in over] + [""]
+    if fallbacks:
+        report += [f"⚠️ 以下 {len(fallbacks)} 题未能按题裁切，已回退整页图（需人工确认）：", "",
+                   "| 题号 | 原因 |", "|---|---|"] + \
+                  [f"| {n} | {r} |" for n, r in fallbacks] + [""]
     if skipped:
-        report += ["| 题号 | 原因 |", "|---|---|"] + [f"| {n} | {r} |" for n, r in skipped]
+        report += ["## 跳过清单", "", "| 题号 | 原因 |", "|---|---|"] + \
+                  [f"| {n} | {r} |" for n, r in skipped]
     checked_write(OUT, NAME + "_report.md", "\n".join(report))
     pdf.close()
-    print(f"✅ {NAME}: {len(items)} 题（跳过 {len(skipped)}）")
+    print(f"✅ {NAME}: {len(items)} 题（跳过 {len(skipped)}）；"
+          f"裁图 {len(crop_stats)} 题/{sum(c[1] for c in crop_stats)} 图/"
+          f"{total_bytes/1e6:.1f}MB，兜底 {len(fallbacks)} 题")
 
 
 if __name__ == "__main__":

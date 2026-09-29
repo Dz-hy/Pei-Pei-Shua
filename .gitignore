@@ -46,3 +46,8 @@ tools/ocr_work/
 # 密钥与 Python 运行时（不入库）
 tools/ocr_config.json
 __pycache__/
+
+# Rust / Tauri 桌面端构建产物（约 6GB，无源码，绝不入库）
+/core/target/
+/desktop/src-tauri/target/
+/desktop/src-tauri/gen/

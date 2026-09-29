@@ -5,10 +5,10 @@ description: 把真题试卷（题干+解析）转成陪陪刷 App 可导入的�
 
 # 陪陪刷题库转换管线
 
-所有脚本都在 `tools/` 下运行。Python 依赖：`pymupdf`（必装，import 名 fitz）、`python-docx`（仅 docx 输入需要）、`requests`（仅百度 OCR 需要）。
+所有脚本都在 `tools/` 下运行。Python 依赖：`pymupdf`（必装，import 名 fitz）、`python-docx`（仅 docx 输入需要）、`requests`（仅百度 OCR 需要）、`rapidocr-onnxruntime`（仅扫描件按题裁图需要）。
 
 ```bash
-pip install pymupdf python-docx requests
+pip install pymupdf python-docx requests rapidocr-onnxruntime
 ```
 
 ## 目录布局
@@ -16,8 +16,11 @@ pip install pymupdf python-docx requests
 | 路径 | 内容 |
 |---|---|
 | `bank_converter.py` | 核心转换器：题干文件 + 解析文件 成对 → `<name>.json` + `<name>_report.md` |
+| `scan_crop.py` | **扫描版解析册按题裁图**：本地 RapidOCR 定位题界 → 只裁本题解析（跨页分段）。供 `convert_2021_fusheng.py` 用，也可独立调试 |
+| `verify_crops_ocr.py` | 验收：把每题配图重新 OCR，检出「混入其它题号」的越界配图（改裁图逻辑后必跑） |
+| `audit_bank_images.py` | 审计各卷配图数量/体积，标出异常大的图（防止整页图回归） |
 | `convert_papers_batch.py` | 批量转换 `tools/历年真题/` 全部国考卷（年份×级别自动配对），末尾合并出 `历年真题/out/真题全套2021-2026.json` |
-| `convert_2021_fusheng.py` | 2021 副省级特例（解析是纯扫描件，OCR 文本+扫描页图专用脚本），参照它处理扫描件场景 |
+| `convert_2021_fusheng.py` | 2021 副省级特例（解析是纯扫描件，OCR 文本 + `scan_crop` 按题裁图），参照它处理扫描件场景 |
 | `probe_pdf.py` | 探查 PDF 有没有文本层——转换前先跑，省得对扫描件白转 |
 | `pdf_to_images.py` | PDF → 逐页 PNG/JPEG（dpi=300，超百度 OCR 大小限制自动转 JPEG） |
 | `baidu_ocr2.py` | 百度 OCR 高精度版（requests 直连，断点续跑）。`baidu_ocr.py` 是废弃的老 SDK 版 |
@@ -118,7 +121,38 @@ python tools/baidu_ocr2.py ocr_work/images
 
 产出 `ocr_work/ocr_result.txt` + `ocr_result.json`（`{页文件名: [行...]}`）。
 
-然后把 OCR 文本接进转换器——**照抄 `convert_2021_fusheng.py` 的模式**：`load_ocr()` 按题号切题 → `extract_answer()` 提取答案和正文 → 数量关系/判断推理这类含公式图的部分把对应 PDF 页渲染成图挂到解析末尾。脚本的 `NAME` 常量要和批量脚本里的卷名 key 一致，才会被 `convert_papers_batch.py` 特判合并。
+然后把 OCR 文本接进转换器——**照抄 `convert_2021_fusheng.py` 的模式**：`load_ocr()` 按题号切题 → `extract_answer()` 提取答案和正文 → 含公式图的部分用 `scan_crop` **按题裁图**挂到解析末尾。脚本的 `NAME` 常量要和批量脚本里的卷名 key 一致，才会被 `convert_papers_batch.py` 特判合并。
+
+### ⚠️ 解析配图必须「按题裁切」，不能整页渲染
+
+**2021 副省级曾踩过的坑**：把本题所在**整页**渲染挂到解析末尾，于是第 81 题的解析里带着同页 77~81 题 + 下一页 82~86 题的**全部答案与解析**（跨页题是整整两大页，318KB），既影响观感又没法核对答案。全套卷里只有这一卷中招（69 图 / 11MB，其余卷最大单图 188KB 且都是单题小图）。
+
+**正确做法**：用 `scan_crop.build_analysis_images()`。它用**本地 RapidOCR**（`rapidocr-onnxruntime`，不是百度）在 300dpi 页图上定位 `N、正确答案` 起始行，再按「本题起始行 → 下一条更大题号起始行」裁切；跨页自动分段，页脚页码与页顶装饰横线剔除。
+
+```python
+from scan_crop import build_analysis_images
+crops, warnings = build_analysis_images(pdf, IMAGES_DIR, LINE_CACHE, nums, page_of)
+# crops = {题号: [data URL, ...]}；warnings 里的题需回退整页图并在报告里告警
+```
+
+设计要点（改 `scan_crop.py` 前先读）：
+
+- **dpi=140**：595.3pt 页宽 → 1158px，刚好低于 App 端 `HtmlAnalysis.decodeB64` 的 **1200px 采样阈值**，不会被降成 1/2 分辨率。
+- **单图高度上限 1180px**：超过就在**文本行间隙**切（`plan_cuts`），避免把整行文字劈成两半；无可用间隙才硬切兜底。
+- **RapidOCR 行几何缓存在 `ocr_work/rapid_lines.json`**：首次全量约 85s/16 页，之后重跑瞬时。
+- **跨页续段从「装饰横线之后第一行墨迹」起裁**（`_content_top`）：这批扫描页顶部有条贯通横线（300dpi 下 y≈79~92，宽占 85.9%），固定 padding 会把紧贴边框的表格上边框切掉（第 18 页实测）。
+- **本题在起始页就结束时，续段为空要 `break` 保留已收集的段**，别把整题判成定位失败退回整页图（否则重新引入本 bug）。
+- 定位失败时报告会列出「回退整页图」告警；**正常应 0 条**，非 0 必须人工核对。
+
+改完自查（越界数应为 0）：
+
+```bash
+python tools/verify_crops_ocr.py                      # out/ 下所有卷
+python tools/verify_crops_ocr.py 2021国考行测副省级    # 单卷
+python tools/audit_bank_images.py                     # 各卷配图数量/体积速览
+```
+
+`verify_crops_ocr.py` 把每题配图重新 OCR 一遍，出现**其它题号**的 `N、正确答案` 即报错并返回非 0（可挂 CI）。`audit_bank_images.py` 用于横向比对——某卷「配图总量 / 单图体积」突然变大，通常是整页图回归（2021 副省级修前为 69 图 / 11MB / 单图 187KB，修后 67 图 / 3.6MB / 单图 110KB）。单图超 150KB 会被标出，但**不代表有问题**：正常单题公式长图（如 2025 副省级 135 题，1640×1025）本身就有 188KB。
 
 ## 场景 C：个别题答案在源文件里丢了
 

@@ -33,6 +33,14 @@ import sys
 from collections import Counter
 from pathlib import Path
 
+# Windows 控制台默认 GBK，脚本结尾会 print ✅/📋 等字符，不改编码会以 UnicodeEncodeError
+# 收尾、把已成功的转换误报成失败（退出码 1）。统一成 UTF-8 输出。
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 # 题号起头: 行首 1~3 位数字 + (. 、 ．)。分隔符后不接数字，除非紧跟 19xx/20xx 年份
 #（兼容 "8.2025 年…" 紧贴年份的真题排版，同时排除 "869.5 万元" 这类小数）
 RE_QNUM = re.compile(r"^\s*(\d{1,3})\s*[.、．]\s*(?:(?!\d)|(?=(?:19|20)\d{2}(?!\d)))")
