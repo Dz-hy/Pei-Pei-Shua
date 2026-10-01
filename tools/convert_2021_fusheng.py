@@ -72,9 +72,12 @@ def load_ocr():
 
 
 def extract_answer(text: str):
-    """OCR 题块 → (答案, 解析正文)。答案句式：正确答案：X / 选择X选项。"""
+    """OCR 题块 → (答案, 解析正文)。答案句式：正确答案：X / 选择X选项（OCR 丢冒号兜底）。"""
     m = re.search(r"正确答案\s*[:：]\s*([A-Ha-h])", text)
     answer = m.group(1).upper() if m else None
+    if answer is None:  # "正确答案 B"（冒号被 OCR 丢掉）→ 退回"选择X选项"句式
+        m = re.search(r"选择\s*([A-Ha-h])\s*选项", text)
+        answer = m.group(1).upper() if m else None
     body = text
     m2 = re.search(r"^\s*解析\s*$", text, re.M)
     if m2:
@@ -120,10 +123,12 @@ def main():
     ocr_qs, qpage = load_ocr()
     import fitz
     pdf = fitz.open(str(ANALYSIS_PDF))
-
-    # 按题裁图一次性生成（RapidOCR 行几何有缓存，重跑很快）
-    img_nums = sorted(n for n in stems if n in IMG_QUESTIONS and n in qpage)
-    crops, fallbacks = build_images(pdf, qpage, img_nums)
+    try:
+        # 按题裁图一次性生成（RapidOCR 行几何有缓存，重跑很快）
+        img_nums = sorted(n for n in stems if n in IMG_QUESTIONS and n in qpage)
+        crops, fallbacks = build_images(pdf, qpage, img_nums)
+    finally:
+        pdf.close()  # 裁图异常时也释放句柄（pdf 仅在此处使用）
 
     items, skipped = [], []
     crop_stats = []      # [(题号, 图数, 最高px, 总KB)]
@@ -185,7 +190,6 @@ def main():
         report += ["## 跳过清单", "", "| 题号 | 原因 |", "|---|---|"] + \
                   [f"| {n} | {r} |" for n, r in skipped]
     checked_write(OUT, NAME + "_report.md", "\n".join(report))
-    pdf.close()
     print(f"✅ {NAME}: {len(items)} 题（跳过 {len(skipped)}）；"
           f"裁图 {len(crop_stats)} 题/{sum(c[1] for c in crop_stats)} 图/"
           f"{total_bytes/1e6:.1f}MB，兜底 {len(fallbacks)} 题")

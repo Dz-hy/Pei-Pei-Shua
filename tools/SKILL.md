@@ -119,6 +119,8 @@ python tools/baidu_ocr2.py ocr_work/images --limit 2
 python tools/baidu_ocr2.py ocr_work/images
 ```
 
+> **断点键已升级**：`ocr_work/state.json` 的断点键从裸文件名升级为 **`来源目录::内容指纹::文件名`**（同图换目录/重命名不再误判已识别）。旧全局 state.json 的裸文件名条目作废但保留不删；升级后**首次 OCR 会全量重识别（产生一次计费）**。废弃版 `baidu_ocr.py` 也已同步升级断点键，并兼容读取 `baidu_ocr2.py --with-position` 写入的 `{"text": ..}` dict 状态项。
+
 产出 `ocr_work/ocr_result.txt` + `ocr_result.json`（`{页文件名: [行...]}`）。
 
 然后把 OCR 文本接进转换器——**照抄 `convert_2021_fusheng.py` 的模式**：`load_ocr()` 按题号切题 → `extract_answer()` 提取答案和正文 → 含公式图的部分用 `scan_crop` **按题裁图**挂到解析末尾。脚本的 `NAME` 常量要和批量脚本里的卷名 key 一致，才会被 `convert_papers_batch.py` 特判合并。

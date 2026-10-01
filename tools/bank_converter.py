@@ -127,10 +127,18 @@ MIN_IMG_PT = 30  # 短边小于该值(pt)的图视为页眉/水印/杂点，跳�
 
 
 def read_plaintext_lines(path: str) -> list:
-    """txt/docx 读取为非空文本行列表。"""
+    """txt/docx 读取为非空文本行列表。txt 先按 UTF-8 严格解码、失败再按 GBK
+    （Windows 记事本 ANSI 默认编码），避免 errors="ignore" 把中文静默吞成乱码。"""
     ext = Path(path).suffix.lower()
     if ext == ".txt":
-        raw = Path(path).read_text(encoding="utf-8", errors="ignore")
+        data = Path(path).read_bytes()
+        try:
+            raw = data.decode("utf-8")
+        except UnicodeDecodeError:
+            try:
+                raw = data.decode("gbk")
+            except UnicodeDecodeError:
+                sys.exit(f"无法识别 txt 编码（需 UTF-8 或 ANSI/GBK）: {path}")
     elif ext == ".docx":
         import docx
         d = docx.Document(path)
@@ -395,6 +403,7 @@ def _formula_option_urls(doc, questions):
         urls = _render_micro(doc, micro)
         if urls:
             q["images"] = q["images"] + urls
+            del q["micro"]  # 已消费，残留微图兜底归位时不再重复渲染
             hit.append(num)
     return hit
 
@@ -642,17 +651,30 @@ def pdf_to_questions(path: str, side: str):
             elif side == "analysis":
                 pre_buffer.append(text)  # 正文前的卷名/快速对答案表，留给答案表解析
             # 题干侧 current 为空 = 卷首标题/说明，丢弃
-    finally:
-        pass
 
-    formula_hits = []
-    try:
-        if side == "analysis" and pre_buffer:
-            stats["batch_answers"] = _parse_batch_answers("\n".join(pre_buffer))
-        formula_hits = _formula_option_urls(doc, questions)
-    except Exception:
         formula_hits = []
-    doc.close()
+        if side == "analysis" and pre_buffer:
+            try:
+                stats["batch_answers"] = _parse_batch_answers("\n".join(pre_buffer))
+            except Exception as exc:  # 失败记入 stats 供报告提示，不静默降级
+                stats["batch_answers_error"] = f"{type(exc).__name__}: {exc}"
+        try:
+            formula_hits = _formula_option_urls(doc, questions)
+        except Exception as exc:
+            stats["formula_error"] = f"{type(exc).__name__}: {exc}"
+            formula_hits = []
+        # 选项带文字的题，其题干微图（正文内嵌小公式/符号图）不会被公式选项判定消费：
+        # 按普通图归位到题干图，避免静默丢弃
+        for q in questions.values():
+            micro = q.pop("micro", None)
+            if not micro:
+                continue
+            for pno, bbox in micro:
+                url = _image_data_url(doc, 0, doc[pno], bbox, cache)
+                if url is not None:
+                    q["images"].append(url)
+    finally:
+        doc.close()
     if formula_hits:
         stats["formula_option_nums"] = formula_hits
 
@@ -861,8 +883,9 @@ def convert(stem_path: str, analysis_path: str, name: str, out_dir: Path,
         stem_imgs = stems[num]["images"]
         ana_imgs = analyses[num]["images"]
         p = parse_stem(stems[num]["text"], bool(stem_imgs))
-        if is_judge and len(p["options"]) < 2:
-            # 判断题题干无选项行（√/×或"表述正确"判定）：统一补 A=正确/B=错误
+        if is_judge and not any(p["options"]):
+            # 判断题题干无选项行（√/×或"表述正确"判定；带图题 parse_stem 填的是
+            # 空串占位）：统一补 A=正确/B=错误
             p["options"] = ["正确", "错误"]
         if len(p["options"]) < 2:  # 有图的题在 parse_stem 内已补足空选项
             skipped.append((num, f"仅识别到 {len(p['options'])} 个选项，需≥2"))
@@ -954,6 +977,8 @@ def build_report(name, stem_path, analysis_path, stems, analyses, items, skipped
     unassigned = stem_stats.get("unassigned_images", 0) + ana_stats.get("unassigned_images", 0)
     dups = sorted(set(stem_stats.get("dup_nums", []) + ana_stats.get("dup_nums", [])))
     formula = sorted(stem_stats.get("formula_option_nums", []))
+    formula_err = stem_stats.get("formula_error") or ana_stats.get("formula_error")
+    batch_err = ana_stats.get("batch_answers_error")
     if batch_mismatch:
         lines += ["## 与快速对答案表不一致（请人工核对）", "",
                   "| 题号 | 解析提取 | 批量表 |", "|---|---|---|"]
@@ -963,8 +988,12 @@ def build_report(name, stem_path, analysis_path, stems, analyses, items, skipped
         lines += ["## 人工补录答案（源文件答案字母缺失，请人工核对）", ""]
         lines += [f"- 第 {n} 题：{a}" for n, a in sorted(overrides_used)]
         lines.append("")
-    if unassigned or dups or formula:
+    if unassigned or dups or formula or formula_err or batch_err:
         lines += ["## 转换提示", ""]
+        if formula_err:
+            lines.append(f"- ⚠️ 公式选项图渲染异常（相关题的选项图可能缺失，请人工核对）：{formula_err}")
+        if batch_err:
+            lines.append(f"- ⚠️ 「快速对答案」批量答案表解析异常（该表未生效）：{batch_err}")
         if formula:
             lines.append(f"- 公式选项题（选项为公式图，已整块渲染进题干图、选项留空）：{formula}")
         if unassigned:

@@ -6,11 +6,12 @@
 === 使用前准备 ===
 1. 安装依赖:
        pip install requests
-2. 配置密钥（三选一，优先级从高到低）:
+2. 配置密钥（推荐环境变量或配置文件，避免密钥进入 shell 历史与进程列表）:
        a) 环境变量:  BAIDU_OCR_API_KEY / BAIDU_OCR_SECRET_KEY
        b) 本目录下建 ocr_config.json:
             {"api_key": "...", "secret_key": "..."}
-       c) 命令行参数: --api-key X --secret-key Y
+   注意: 不要把密钥写在命令行参数里（--api-key/--secret-key 会留在 shell
+   历史与进程列表中）；脚本虽仍支持该方式，但仅限临时使用，用后尽快轮换。
 
 === 使用 ===
     # 先跑 2 页试试水（强烈建议先做）
@@ -35,6 +36,7 @@ import sys
 import os
 import io
 import json
+import hashlib
 import time
 import base64
 import argparse
@@ -43,7 +45,10 @@ import ipaddress
 from pathlib import Path
 from urllib.parse import urlparse
 
+# GBK 控制台下中文/emoji 不乱码；_prev_* 持有旧流，避免同进程多模块重包装互踩 close
+_prev_stdout = sys.stdout
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+_prev_stderr = sys.stderr
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 try:
@@ -186,6 +191,17 @@ def save_state(state):
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 
+def state_key(image_dir, fname):
+    """断点续跑键 = 来源目录 + 图片内容指纹 + 文件名。
+
+    旧版键是裸文件名，换一本书后同名页会静默复用上一本书的识别文本。
+    旧 state.json 里的裸文件名条目因此不再参与匹配（保留不删，等价作废）。
+    """
+    with open(os.path.join(image_dir, fname), "rb") as f:
+        digest = hashlib.sha256(f.read()).hexdigest()
+    return "%s::%s::%s" % (os.path.normcase(os.path.abspath(image_dir)), digest, fname)
+
+
 # --------------------------------------------------------------------------
 def recognize(token, api, img_path, retry=3):
     # SSRF 防护：仅允许百度 OCR 域名，解析 IP 并阻断私网/环回/链路本地地址
@@ -229,6 +245,11 @@ def recognize(token, api, img_path, retry=3):
                 if code in (17, 18, 19) and attempt < retry - 1:
                     time.sleep(3 * (attempt + 1))
                     continue
+                if code == 282811:
+                    # 空白页/纯图片页未检测到文字是正常结果：按空文本记录并继续，
+                    # 不再中止整批（该页也入 state，续跑时自动跳过）
+                    print("    该页未检测到文字（可能为空白页），按空文本处理")
+                    return [], res
                 raise RuntimeError(hint_for(code, res.get("error_msg", "")))
 
             words = res.get("words_result", [])
@@ -264,8 +285,9 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     ap.add_argument("image_dir", help="图片所在目录")
-    ap.add_argument("-o", "--output", default="ocr_work/ocr_result.txt",
-                    help="输出文本路径")
+    ap.add_argument("-o", "--output",
+                    default=str(BASE_DIR / "ocr_work" / "ocr_result.txt"),
+                    help="输出文本路径（默认: 脚本目录下 ocr_work/ocr_result.txt）")
     ap.add_argument("--limit", type=int, default=0,
                     help="最多处理多少页（0=全部），建议先设 2 试跑")
     ap.add_argument("--qps", type=float, default=2.0,
@@ -310,10 +332,19 @@ def main():
         files = files[:args.limit]
 
     state = {} if args.no_resume else load_state()
+    keys = {}
+    for fname in files:
+        try:
+            keys[fname] = state_key(args.image_dir, fname)
+        except OSError as e:
+            # 图片已删/不可读：给必不命中的键使其进入待识别列表，
+            # 由逐页 try/except 报错并保存进度，不让整个脚本未捕获崩溃
+            print("警告: 无法计算图片指纹 %s (%s)" % (fname, e))
+            keys[fname] = "!unreadable::%s" % fname
     out_path = check_under_base(args.output, "输出路径")
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    todo = [f for f in files if f not in state]
+    todo = [f for f in files if keys[f] not in state]
     skipped = len(files) - len(todo)
 
     print("=" * 62)
@@ -336,7 +367,7 @@ def main():
             print("[%d/%d] %s ..." % (idx, len(todo), fname), end=" ", flush=True)
             try:
                 lines, _ = recognize(token, args.api, path)
-                state[fname] = lines
+                state[keys[fname]] = lines
                 print("OK，%d 行" % len(lines))
             except Exception as e:
                 print()
@@ -351,24 +382,25 @@ def main():
     # 输出纯文本
     with out_path.open("w", encoding="utf-8") as f:
         for fname in files:
-            if fname not in state:
+            if keys[fname] not in state:
                 continue
             f.write("=" * 62 + "\n")
             f.write("### %s\n" % fname)
             f.write("=" * 62 + "\n")
-            for item in state[fname]:
+            for item in state[keys[fname]]:
                 f.write((item["text"] if isinstance(item, dict) else item) + "\n")
             f.write("\n")
 
     json_path = out_path.with_suffix(".json")
     with json_path.open("w", encoding="utf-8") as f:
-        json.dump({f: state[f] for f in files if f in state},
+        json.dump({fn: state[keys[fn]] for fn in files if keys[fn] in state},
                   f, ensure_ascii=False, indent=2)
 
-    total_lines = sum(len(state[f]) for f in files if f in state)
+    done = [fn for fn in files if keys[fn] in state]
+    total_lines = sum(len(state[keys[fn]]) for fn in done)
     print()
     print("=" * 62)
-    print("完成！共 %d 页，%d 行" % (len([f for f in files if f in state]), total_lines))
+    print("完成！共 %d 页，%d 行" % (len(done), total_lines))
     print("文本: %s" % args.output)
     print("JSON: %s" % json_path)
     print("=" * 62)

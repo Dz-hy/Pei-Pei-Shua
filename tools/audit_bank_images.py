@@ -22,7 +22,34 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 BASE = os.path.dirname(os.path.abspath(__file__))
 DIRS = [os.path.join(BASE, "历年真题", "out"), os.path.join(BASE, "省考真题", "out")]
 RE_DATA = re.compile(r"data:image/[^;]+;base64,([A-Za-z0-9+/=]+)")
+RE_YEARS = re.compile(r"\d{4}-\d{4}")   # 合并卷文件名带年份区间（如 广东省考真题2024-2026）
 WARN_KB = 150
+
+
+def is_combined(name: str):
+    """合并卷由单卷拼成、图片与单卷完全重复，跳过以免重复统计。"""
+    return "全套" in name or bool(RE_YEARS.search(name))
+
+
+def _out_dirs(argv):
+    """→ --out 指定的目录列表：支持 `--out 目录` 与 `--out=目录`，缺参报错退出。"""
+    vals, i = [], 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--out":
+            if i + 1 >= len(argv):
+                sys.exit("错误: --out 后面要跟目录参数")
+            vals.append(argv[i + 1])
+            i += 2
+        elif a.startswith("--out="):
+            d = a.split("=", 1)[1]
+            if not d:
+                sys.exit("错误: --out= 后面不能为空")
+            vals.append(d)
+            i += 1
+        else:
+            i += 1
+    return vals
 
 
 def audit(path):
@@ -42,13 +69,12 @@ def audit(path):
 
 
 def main():
-    dirs = DIRS
-    if "--out" in sys.argv:
-        dirs = [sys.argv[sys.argv.index("--out") + 1]]
+    outs = _out_dirs(sys.argv[1:])
+    dirs = outs if outs else DIRS
     rows = []
     for d in dirs:
         for p in sorted(glob.glob(os.path.join(d, "*.json"))):
-            if "全套" in os.path.basename(p):
+            if is_combined(os.path.basename(p)):
                 continue
             r = audit(p)
             if r:

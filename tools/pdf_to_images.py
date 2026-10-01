@@ -18,6 +18,8 @@ import fitz  # PyMuPDF
 
 # 百度 OCR 限制：base64 编码后 < 4MB，即原始字节 < 约 3MB
 MAX_BYTES = 3 * 1024 * 1024
+# 体积超标时改存 JPEG 的压缩质量
+JPG_QUALITY = 85
 
 # 允许读写的边界：脚本所在目录（tools/），命令行传入的路径不得越出
 BASE_DIR = Path(__file__).resolve().parent
@@ -46,6 +48,8 @@ def main():
         print("找不到文件:", pdf_path)
         return 1
 
+    out_dir.mkdir(parents=True, exist_ok=True)
+
     print("源文件:", pdf_path)
     print("输出目录:", out_dir)
     print("DPI:", dpi)
@@ -72,7 +76,7 @@ def main():
         if size > MAX_BYTES:
             png_path.unlink()
             jpg_path = out_dir / (name + ".jpg")
-            pix.save(str(jpg_path), jpg_quality=quality)
+            pix.save(str(jpg_path), jpg_quality=JPG_QUALITY)
             size = jpg_path.stat().st_size
             fmt = "jpeg"
             final_path = jpg_path

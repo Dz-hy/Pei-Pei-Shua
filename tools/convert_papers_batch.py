@@ -39,6 +39,7 @@ def main():
     files = sorted(BASE.glob("*.pdf"))
     combined = []
     summary = []
+    failed = []  # 转换异常被隔离跳过的卷
     for year in YEARS:
         for level_re, level_name in LEVELS:
             year_files = [f for f in files if year in f.name and re.search(level_re, f.name)]
@@ -48,30 +49,49 @@ def main():
                 continue
             name = f"{year}国考行测{level_name}"
             if year == "2021" and level_name == "副省级":
-                _json_path = convert_2021_fusheng.OUT / (convert_2021_fusheng.NAME + ".json")
-                _n = len(json.loads(_json_path.read_text(encoding="utf-8"))) \
-                    if _json_path.exists() else 0
-                if _n == 0:
+                # 无条件重跑专用脚本再取数（RapidOCR 行几何有缓存，重跑很快），
+                # 避免上游 OCR/裁图更新后把旧 JSON 静默并入合并卷
+                try:
                     convert_2021_fusheng.main()
-                combined.extend(json.loads(_json_path.read_text(encoding="utf-8")))
-                summary.append((name, _n, 0, "专用脚本 convert_2021_fusheng.py", ""))
+                    _json_path = convert_2021_fusheng.OUT / (convert_2021_fusheng.NAME + ".json")
+                    _items = json.loads(_json_path.read_text(encoding="utf-8"))
+                    combined.extend(_items)
+                    summary.append((name, len(_items), 0, "专用脚本 convert_2021_fusheng.py", ""))
+                except Exception as exc:
+                    failed.append(name)
+                    print(f"⚠️ {name}: 专用脚本异常 {type(exc).__name__}: {exc}，跳过该卷")
                 continue
             if len(stems) != 1 or len(anas) != 1:
                 print(f"⚠️ {year} {level_name}: 配对异常 "
                       f"stems={[f.name for f in stems]} anas={[f.name for f in anas]}，跳过")
                 continue
-            json_path, report_path, ok, skip = convert(str(stems[0]), str(anas[0]), name, OUT,
-                                                       ANSWER_OVERRIDES.get(name))
+            try:
+                json_path, report_path, ok, skip = convert(str(stems[0]), str(anas[0]), name, OUT,
+                                                           ANSWER_OVERRIDES.get(name))
+            except Exception as exc:
+                failed.append(name)
+                print(f"⚠️ {name}: 转换异常 {type(exc).__name__}: {exc}，跳过该卷")
+                continue
             summary.append((name, ok, skip, stems[0].name, anas[0].name))
             if ok:
                 combined.extend(json.loads(json_path.read_text(encoding="utf-8")))
-    combined_path = OUT / "真题全套2021-2026.json"
-    combined_path.write_text(json.dumps(combined, ensure_ascii=False, indent=2), encoding="utf-8")
+    if not summary and not failed:
+        print("❌ 未匹配到任何试卷（检查 tools/历年真题/ 下 PDF 文件名的年份/级别词）")
+        sys.exit(1)
 
     print()
     for name, ok, skip, stem, ana in summary:
         print(f"{name:22s} {ok:3d} 题（跳过 {skip:2d}）  ← {stem[:26]} / {ana[:26]}")
+    if failed:
+        print(f"\n⚠️ 以下 {len(failed)} 卷转换失败已跳过: {'、'.join(failed)}")
+    if not combined:
+        print("❌ 无任何题目产出，不写合并文件")
+        sys.exit(1)
+    combined_path = OUT / "真题全套2021-2026.json"
+    combined_path.write_text(json.dumps(combined, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\n✅ 合并文件: {combined_path}（{len(combined)} 题）")
+    if failed:
+        sys.exit(1)  # 合并文件不完整，让自动化调用方感知失败
 
 
 if __name__ == "__main__":

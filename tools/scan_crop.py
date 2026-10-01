@@ -86,6 +86,9 @@ class LineIndex:
         self.cache_path = Path(cache_path)
         self._engine = engine
         self._cache = {}
+        # 缓存键只有页图文件名，须配指纹（宽/高/字节数）防页图重渲染改 dpi
+        # 或换一本书复用同名 page_NNN 后旧坐标被静默命中
+        self._meta = {}
         self._loaded = False
         self._marks = {}
 
@@ -95,7 +98,9 @@ class LineIndex:
         p = self.cache_path
         if p.is_file():
             try:
-                self._cache = json.loads(p.read_text(encoding="utf-8"))
+                data = json.loads(p.read_text(encoding="utf-8"))
+                self._meta = data.pop("__meta__", {})
+                self._cache = data
             except Exception:
                 self._cache = {}
         self._loaded = True
@@ -103,8 +108,16 @@ class LineIndex:
     def save(self):
         self._ensure()
         self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+        data = dict(self._cache)
+        data["__meta__"] = self._meta
         self.cache_path.write_text(
-            json.dumps(self._cache, ensure_ascii=False, indent=1), encoding="utf-8")
+            json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+
+    @staticmethod
+    def _stamp(img: Path):
+        """页图指纹：重渲染改 dpi 或换书后宽高/字节数必变，缓存随之失效。"""
+        with Image.open(img) as im:
+            return [im.width, im.height, img.stat().st_size]
 
     def lines(self, pno: int):
         self._ensure()
@@ -112,11 +125,18 @@ class LineIndex:
         if img is None:
             return []
         if img.name in self._cache:
-            return self._cache[img.name]
+            stamp = self._meta.get(img.name)
+            if stamp is None:
+                # 旧版条目无指纹：当前页图与坐标已核验一致，补记指纹即可，不必整卷重 OCR
+                self._meta[img.name] = self._stamp(img)
+                return self._cache[img.name]
+            if stamp == self._stamp(img):
+                return self._cache[img.name]
         if self._engine is None:
             self._engine = _get_engine()
         lines = _ocr_one_page(self._engine, img)
         self._cache[img.name] = lines
+        self._meta[img.name] = self._stamp(img)
         return lines
 
     def image_path(self, pno: int):
@@ -139,16 +159,21 @@ class LineIndex:
 # ------------------------------------------------------------------ 裁切区域计算
 
 def _content_bottom(lines, page_h_px: float, gap: float):
-    """页内容下边界：剔除页脚页码（"-20-" / "22" 之类）后取最后一行之下。"""
+    """页内容下边界：剔除页脚页码（"-20-" / "22" 之类）后取最后一行之下。
+
+    页码只认页底 5% 内的（实测本册页码在 97.4% 处）：旧判据 10% 会把
+    页底的裸数字正文行（数量关系/资料分析的演算值，如第 30 页 92.4% 处的
+    「259」）误当页码，从其上方静默截断解析。
+    """
     foot = [y0 for y0, _y1, t in lines
-            if y0 > page_h_px * 0.90 and RE_FOOTER.match(t.strip())]
+            if y0 > page_h_px * 0.95 and RE_FOOTER.match(t.strip())]
     if foot:
         return min(foot) - gap
     return page_h_px
 
 
 def _content_top(img_path, pad: float = 6.0, scan_px: int = 200,
-                 ink_frac: float = 0.02):
+                 ink_frac: float = 0.002):
     """页内容上边界：跳过页顶装饰横线（跨页续段会带上它，影响观感）。
 
     这些扫描页顶部有一条贯通横线（实测 300dpi 下 y=79~92，宽占 85.9%），
@@ -158,14 +183,13 @@ def _content_top(img_path, pad: float = 6.0, scan_px: int = 200,
     收尾不按固定 padding，而是取横带之后**第一行有墨迹**的位置——这样
     正文是文字时只裁掉装饰线（正常留白），是表格时不会切掉表格上边框
     （实测第 18 页上边框在 121px、表头文字在 127px，固定 padding 会切掉边框）。
+    墨迹阈值须很小（0.002≈2481px 页宽下 5 个暗像素）：横带后首行常是
+    短收尾句/表格/公式行，首行暗像素占比仅 0.0024~0.02，旧值 0.02 会让
+    content_top 落到行中部、把首行削掉大半；调低只会多留几行空白，无风险。
     """
-    try:
-        import numpy as np
-        from PIL import Image
-        with Image.open(img_path) as im:
-            gray = np.asarray(im.convert("L"))[:scan_px]
-    except Exception:
-        return 0.0
+    import numpy as np
+    with Image.open(img_path) as im:
+        gray = np.asarray(im.convert("L"))[:scan_px]
     dark = (gray < 128).mean(axis=1)
     rows = dark > 0.3
     band_end = -1
@@ -206,7 +230,10 @@ def regions_for(num: int, page_of: dict, idx: LineIndex, doc,
     while pno <= p_limit:
         lines = idx.lines(pno)
         if not lines:
-            return regions or None
+            # 页图缺失（或整页无行）无法保证本题解析完整：返回已收集的部分段
+            # 会静默缺尾，按定位失败处理，交给调用方整页兜底并告警
+            # （首页缺图时 regions 为空，原本也是走这条 None 路径）。
+            return None
         page_h_px = doc[pno - 1].rect.y1 * OCR_DPI / 72.0
         if pno == p_start:
             start_mark = idx.marks(pno).get(num)

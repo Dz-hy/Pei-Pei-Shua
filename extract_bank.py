@@ -110,7 +110,8 @@ def parse_options_from_lines(lines):
         if not stripped:
             continue
         # 尝试匹配单行多选项: "A.xxx B.xxx C.xxx D.xxx"
-        multi = re.findall(r'([A-D])[\.\．、]([^A-D]*?)(?=[A-D][\.\．、]|$)', stripped)
+        # 选项文本允许含 A-D 字母（DNA/维生素A 等），只在「字母+分隔符」处切分
+        multi = re.findall(r'([A-D])[\.\．、](.*?)(?=[A-D][\.\．、]|$)', stripped)
         if len(multi) >= 2:
             for label, text in multi:
                 text = text.strip()
@@ -311,6 +312,10 @@ def build_keywords_from_question(q):
 
 def main():
     pilot = '--pilot' in sys.argv
+
+    # 输入缺失直接报错退出，不静默产出 total=0 的空题库（缺数据被报成成功）
+    if not os.path.isdir(QA_ROOT):
+        sys.exit(f'输入目录不存在: {QA_ROOT}（请先放置 qa_md 数据目录）')
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 

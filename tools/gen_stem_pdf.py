@@ -15,6 +15,14 @@ from pathlib import Path
 
 import fitz
 
+# Windows 控制台默认 GBK，脚本结尾会 print ✅ 等字符，不改编码会以 UnicodeEncodeError
+# 收尾、把已成功的生成误报成失败（退出码 1）。统一成 UTF-8 输出。
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 PAGE_W, PAGE_H = 595, 842  # A4
 MARGIN = 52
 FS = 11           # 正文字号
@@ -90,6 +98,11 @@ def main():
             w_px, h_px = rect.width, rect.height
             w_pt = min(IMG_MAX_W, w_px)
             h_pt = h_px * (w_pt / w_px)
+            # 高瘦图钳到页内可用高度、等比缩宽——越出页底的图会被 bank_converter
+            # 当整页背景/水印丢弃，图片链路级丢失
+            if h_pt > PAGE_H - MARGIN * 2:
+                w_pt *= (PAGE_H - MARGIN * 2) / h_pt
+                h_pt = PAGE_H - MARGIN * 2
             newline(h_pt + 10)
             x0 = MARGIN
             page.insert_image(fitz.Rect(x0, y, x0 + w_pt, y + h_pt), filename=str(img_path))

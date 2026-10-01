@@ -27,6 +27,12 @@ OUT_DIRS = [
 ]
 RE_DATA = re.compile(r"data:image/(?:jpeg|png);base64,([A-Za-z0-9+/=]+)")
 RE_MARK = re.compile(r"^\s*(\d{1,3})\s*[、,，.]\s*正确答案")
+RE_YEARS = re.compile(r"\d{4}-\d{4}")   # 合并卷文件名带年份区间（如 广东省考真题2024-2026）
+
+
+def is_combined(name: str):
+    """合并卷由单卷拼成、图片与单卷完全重复，跳过以免整卷重复 OCR。"""
+    return "全套" in name or bool(RE_YEARS.search(name))
 
 
 def question_num(key: str):
@@ -82,7 +88,7 @@ def main():
         files = []
         for d in OUT_DIRS:
             files.extend(sorted(f for f in glob.glob(os.path.join(d, "*.json"))
-                                if "全套" not in os.path.basename(f)))
+                                if not is_combined(os.path.basename(f))))
 
     try:
         from rapidocr_onnxruntime import RapidOCR
