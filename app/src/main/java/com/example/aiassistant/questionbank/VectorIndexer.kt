@@ -65,6 +65,16 @@ object VectorIndexer {
                         }
                     }
                     val vectors = OpenAIApiService.embedTextsBlocking(texts, baseUrl, key, model)
+                    // 服务端异常行为防护：返回条数不符或含空向量（缺项下标会被映射为空
+                    // FloatArray 而非抛错）时中止——空向量一旦入库即被断点续跑视为已完成，
+                    // 该题在清表重建前永久不可匹配；200+空 data 则同批零进展死循环
+                    val hasEmpty = vectors.any { it.isEmpty() }
+                    if (vectors.size != batch.size || hasEmpty) {
+                        throw IllegalStateException(
+                            "向量服务返回异常：请求 ${batch.size} 条，实际返回 ${vectors.size} 条" +
+                            (if (hasEmpty) "且含空向量" else "")
+                        )
+                    }
                     vectors.forEachIndexed { i, v -> db.saveVector(batch[i].id, v) }
                     onProgress(db.countVectorized(), total)
                 }

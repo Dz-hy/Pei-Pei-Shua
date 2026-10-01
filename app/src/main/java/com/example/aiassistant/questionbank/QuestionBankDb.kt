@@ -472,6 +472,10 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
                 // 不标记 imported：下次启动走"删除重导"自愈，避免残缺题库被永久固化
                 Log.e(TAG, "题库导入有 $failedFiles 个文件失败（成功 $total 题），下次启动将重新导入")
             }
+            // 事务必须无条件提交：WCDB 契约是未标记成功则 endTransaction 一律回滚，
+            // 否则全新安装题库永远为空、每次启动删库全量重导。"有失败不标记 imported"
+            // 的自愈语义由上面的条件分支保证，与事务提交无关
+            db.setTransactionSuccessful()
         } finally {
             db.endTransaction()
         }
@@ -548,14 +552,6 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
         try {
             // 墓碑先行：批量记录被级联删除的同步数据行，否则同步时会被旧远端文件复活
             val now = System.currentTimeMillis()
-            // 批注墓碑
-            db.rawQuery("SELECT question_id FROM $T_ANNOTATIONS WHERE question_id NOT IN (SELECT id FROM $T_QUESTIONS)", null).use { c ->
-                while (c.moveToNext()) SyncData.addTombstone(db, DS_ANNOTATIONS, c.getString(0), now)
-            }
-            // 完成记录墓碑
-            db.rawQuery("SELECT question_id FROM completed_questions WHERE question_id NOT IN (SELECT id FROM $T_QUESTIONS)", null).use { c ->
-                while (c.moveToNext()) SyncData.addTombstone(db, DS_COMPLETED, c.getString(0), now)
-            }
             // 训练记录墓碑（sessions 的 sync_key 才是业务键）
             db.rawQuery("SELECT COALESCE(sync_key,'') FROM $T_SESSIONS WHERE module_id = ? OR module_id IN (SELECT id FROM $T_MODULES WHERE parent_id = ?)", arrayOf(moduleId, moduleId)).use { c ->
                 while (c.moveToNext()) { val k = c.getString(0); if (k.isNotBlank()) SyncData.addTombstone(db, DS_SESSIONS, k, now) }
@@ -565,6 +561,15 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
                 "(SELECT id FROM $T_MODULES WHERE id = ? OR parent_id = ?)",
                 arrayOf(moduleId, moduleId)
             )
+            // 批注/完成记录墓碑：必须在删题之后查——NOT IN (SELECT id FROM questions) 此刻
+            // 恰好选中随本次级联孤立的行（外加历史孤儿行）；若在删题前查只会命中原有孤儿，
+            // 本次真正被级联删除的行拿不到墓碑，同步时会被旧远端文件复活
+            db.rawQuery("SELECT question_id FROM $T_ANNOTATIONS WHERE question_id NOT IN (SELECT id FROM $T_QUESTIONS)", null).use { c ->
+                while (c.moveToNext()) SyncData.addTombstone(db, DS_ANNOTATIONS, c.getString(0), now)
+            }
+            db.rawQuery("SELECT question_id FROM completed_questions WHERE question_id NOT IN (SELECT id FROM $T_QUESTIONS)", null).use { c ->
+                while (c.moveToNext()) SyncData.addTombstone(db, DS_COMPLETED, c.getString(0), now)
+            }
             db.execSQL("DELETE FROM $T_FTS WHERE id NOT IN (SELECT id FROM $T_QUESTIONS)")
             db.execSQL("DELETE FROM $T_VECTORS WHERE question_id NOT IN (SELECT id FROM $T_QUESTIONS)")
             db.execSQL("DELETE FROM $T_ANNOTATIONS WHERE question_id NOT IN (SELECT id FROM $T_QUESTIONS)")
@@ -902,13 +907,21 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
     }
 
     fun deletePracticeSession(id: Long) {
-        // 墓碑先行：本地删除必须留下 deleted 标记，否则同步时会被旧远端文件复活
-        val syncKey = readableDatabase.rawQuery(
-            "SELECT COALESCE(sync_key,'') FROM $T_SESSIONS WHERE id = ?", arrayOf(id.toString())
-        ).use { c -> if (c.moveToFirst()) c.getString(0) else "" }
-        writableDatabase.delete(T_SESSIONS, "id = ?", arrayOf(id.toString()))
-        if (syncKey.isNotBlank()) {
-            SyncData.addTombstone(writableDatabase, DS_SESSIONS, syncKey, System.currentTimeMillis())
+        val db = writableDatabase
+        // 事务包裹 + 墓碑先行：本地删除必须留下 deleted 标记，否则同步时会被旧远端文件复活。
+        // 两步独立写不包事务的话，进程在删行与写墓碑之间被杀会丢墓碑、删除被同步静默撤销
+        db.beginTransaction()
+        try {
+            val syncKey = db.rawQuery(
+                "SELECT COALESCE(sync_key,'') FROM $T_SESSIONS WHERE id = ?", arrayOf(id.toString())
+            ).use { c -> if (c.moveToFirst()) c.getString(0) else "" }
+            if (syncKey.isNotBlank()) {
+                SyncData.addTombstone(db, DS_SESSIONS, syncKey, System.currentTimeMillis())
+            }
+            db.delete(T_SESSIONS, "id = ?", arrayOf(id.toString()))
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
         }
     }
 

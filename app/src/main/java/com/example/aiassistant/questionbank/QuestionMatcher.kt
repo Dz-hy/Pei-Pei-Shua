@@ -43,6 +43,17 @@ object QuestionMatcher {
     }
 
     fun matchBlocking(context: Context, ocrText: String, materialText: String? = null): MatchResult {
+        // 整体兜底：任何库异常（典型如导入热刷新关闭连接竞态）都不得逃逸——本函数运行在
+        // match() 的裸线程上（错题详情"重新匹配"也走此链），上层无捕获，未捕获即崩溃进程
+        return try {
+            matchBlockingUnguarded(context, ocrText, materialText)
+        } catch (e: Exception) {
+            e.printStackTrace()
+            MatchResult(null, CONF_NONE)
+        }
+    }
+
+    private fun matchBlockingUnguarded(context: Context, ocrText: String, materialText: String?): MatchResult {
         val cleaned = ocrText.trim().take(OCR_MAX_LEN)
         if (cleaned.isBlank()) return MatchResult(null, CONF_NONE)
 
@@ -90,13 +101,19 @@ object QuestionMatcher {
                 .take(VECTOR_TOP_K)
             if (sims.isEmpty()) return MatchResult(null, CONF_NONE, materialMatched = materialMatched)
 
-            var candidates = sims.mapNotNull { QuestionBankManager.getQuestionById(it.first) }
-            // 材料段框到了：候选过滤到同一材料组（题干选项再像、材料不同判非）
-            if (materialGroupId != null) {
-                candidates = candidates.filter { it.materialId == materialGroupId }
+            // 题目与相似度配对携带（mapNotNull/filter 保序：sims 降序即组内降序）
+            val matched = sims.mapNotNull { (id, sim) ->
+                QuestionBankManager.getQuestionById(id)?.let { it to sim }
             }
-            if (candidates.isEmpty()) return MatchResult(null, CONF_NONE, materialMatched = materialMatched)
-            val bestSim = sims.first().second
+            // 材料段框到了：候选过滤到同一材料组（题干选项再像、材料不同判非）
+            val inGroup = if (materialGroupId != null) {
+                matched.filter { it.first.materialId == materialGroupId }
+            } else matched
+            if (inGroup.isEmpty()) return MatchResult(null, CONF_NONE, materialMatched = materialMatched)
+            // 自动阈值裁决必须用组内 top1 自身的相似度：全局 top1 可能是被过滤掉的
+            // 其他材料组候选（跨卷同题干），拿它的分数会误把低相似同组题直接自动收录
+            val bestSim = inGroup.first().second
+            val candidates = inGroup.map { it.first }
 
             // 相似度直接过自动阈值：不再耗 LLM
             if (bestSim >= AppPreferences.getMatchVectorAutoThreshold(context)) {

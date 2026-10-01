@@ -8,7 +8,7 @@ object QuestionBankManager {
 
     private const val TAG = "QuestionBankManager"
 
-    private var db: QuestionBankDb? = null
+    @Volatile private var db: QuestionBankDb? = null
     private val executor = Executors.newSingleThreadExecutor()
     @Volatile private var ready = false
     @Volatile private var importing = false
@@ -110,9 +110,28 @@ object QuestionBankManager {
 
     fun isLoaded(): Boolean = ready
 
-    fun getModules(): List<QuestionModule> {
-        return db?.getModules() ?: emptyList()
+    /**
+     * 共享连接读兜底：reloadDatabaseAfterImport / init 会在 executor 线程关闭并更换连接，
+     * 并发读线程（截图匹配、刷题抽题等直读共享连接）可能恰好拿到已关闭的旧连接——
+     * WCDB 对已关闭连接抛 IllegalStateException，而调用方多为裸线程、无捕获，会崩溃进程。
+     * 这里捕获后改读当前新连接重试一次（读操作幂等），仍失败则返回 fallback。
+     */
+    private fun <T> readShared(fallback: T, op: (QuestionBankDb) -> T): T {
+        val first = db ?: return fallback
+        return try {
+            op(first)
+        } catch (e: IllegalStateException) {
+            val second = db ?: return fallback
+            try {
+                op(second)
+            } catch (e2: IllegalStateException) {
+                Log.e(TAG, "共享连接读取失败（连接已被热刷新更换）: ${e2.message}")
+                fallback
+            }
+        }
     }
+
+    fun getModules(): List<QuestionModule> = readShared(emptyList()) { it.getModules() }
 
     /**
      * 外部题库导入成功后调用（导入线程）：丢弃旧连接并重开。
@@ -165,43 +184,34 @@ object QuestionBankManager {
         }
     }
 
-    fun getQuestionsByModule(moduleId: String): List<Question> {
-        return db?.getQuestionsByModule(moduleId) ?: emptyList()
-    }
+    fun getQuestionsByModule(moduleId: String): List<Question> =
+        readShared(emptyList()) { it.getQuestionsByModule(moduleId) }
 
-    fun getQuestionsByModuleAndDifficulty(moduleId: String, difficulty: String, limit: Int): List<Question> {
-        return db?.getQuestionsByModuleAndDifficulty(moduleId, difficulty, limit) ?: emptyList()
-    }
+    fun getQuestionsByModuleAndDifficulty(moduleId: String, difficulty: String, limit: Int): List<Question> =
+        readShared(emptyList()) { it.getQuestionsByModuleAndDifficulty(moduleId, difficulty, limit) }
 
-    fun getMaterialQuestions(materialId: String): List<Question> {
-        return db?.getMaterialQuestions(materialId) ?: emptyList()
-    }
+    fun getMaterialQuestions(materialId: String): List<Question> =
+        readShared(emptyList()) { it.getMaterialQuestions(materialId) }
 
-    fun getQuestionById(id: String): Question? {
-        return db?.getQuestionById(id)
-    }
+    fun getQuestionById(id: String): Question? = readShared(null) { it.getQuestionById(id) }
 
     /** 共享连接读透传（错题三级匹配链用）：材料组检索，避免另开一条库连接 */
-    fun findMaterialByText(text: String): String? = db?.findMaterialByText(text)
+    fun findMaterialByText(text: String): String? = readShared(null) { it.findMaterialByText(text) }
 
     /** 共享连接读透传（VectorCache 用）：全量向量表 */
-    fun loadAllVectors(): Map<String, FloatArray> = db?.loadAllVectors() ?: emptyMap()
+    fun loadAllVectors(): Map<String, FloatArray> = readShared(emptyMap()) { it.loadAllVectors() }
 
-    fun getQuestionCountByModule(moduleId: String): Int {
-        return db?.getQuestionCountByModule(moduleId) ?: 0
-    }
+    fun getQuestionCountByModule(moduleId: String): Int =
+        readShared(0) { it.getQuestionCountByModule(moduleId) }
 
-    fun getQuestionCountByModuleAndDifficulty(moduleId: String, difficulty: String): Int {
-        return db?.getQuestionCountByModuleAndDifficulty(moduleId, difficulty) ?: 0
-    }
+    fun getQuestionCountByModuleAndDifficulty(moduleId: String, difficulty: String): Int =
+        readShared(0) { it.getQuestionCountByModuleAndDifficulty(moduleId, difficulty) }
 
-    fun getQuestionsByRateRange(moduleId: String, rateMin: Int, rateMax: Int, limit: Int): List<Question> {
-        return db?.getQuestionsByRateRange(moduleId, rateMin, rateMax, limit) ?: emptyList()
-    }
+    fun getQuestionsByRateRange(moduleId: String, rateMin: Int, rateMax: Int, limit: Int): List<Question> =
+        readShared(emptyList()) { it.getQuestionsByRateRange(moduleId, rateMin, rateMax, limit) }
 
-    fun getQuestionCountByRateRange(moduleId: String, rateMin: Int, rateMax: Int): Int {
-        return db?.getQuestionCountByRateRange(moduleId, rateMin, rateMax) ?: 0
-    }
+    fun getQuestionCountByRateRange(moduleId: String, rateMin: Int, rateMax: Int): Int =
+        readShared(0) { it.getQuestionCountByRateRange(moduleId, rateMin, rateMax) }
 
     fun markQuestionCompleted(questionId: String) {
         executor.execute {
@@ -209,9 +219,7 @@ object QuestionBankManager {
         }
     }
 
-    fun search(ocrText: String): Question? {
-        return db?.search(ocrText)
-    }
+    fun search(ocrText: String): Question? = readShared(null) { it.search(ocrText) }
 
     fun searchAsync(ocrText: String, onResult: (Question?) -> Unit) {
         executor.execute {
@@ -228,14 +236,21 @@ object QuestionBankManager {
     }
 
     /** 读取题目手写批注笔画 JSON，无记录返回 null */
-    fun getAnnotation(questionId: String): String? {
-        return db?.getAnnotation(questionId)
+    fun getAnnotation(questionId: String): String? = readShared(null) { it.getAnnotation(questionId) }
+
+    /** 获取题目所属模块名称（同步版，勿在主线程渲染路径调用，见 getQuestionModuleNameAsync） */
+    fun getQuestionModuleName(questionId: String): String? {
+        return readShared(null) { d ->
+            val moduleId = d.getQuestionModuleId(questionId) ?: return@readShared null
+            d.getModuleName(moduleId)
+        }
     }
 
-    /** 获取题目所属模块名称 */
-    fun getQuestionModuleName(questionId: String): String? {
-        val moduleId = db?.getQuestionModuleId(questionId) ?: return null
-        return db?.getModuleName(moduleId)
+    /** 异步版：错题详情页主线程渲染路径在用同步版，构成主线程 DB I/O——应改走此方法 */
+    fun getQuestionModuleNameAsync(questionId: String, onResult: (String?) -> Unit) {
+        executor.execute {
+            onResult(getQuestionModuleName(questionId))
+        }
     }
 
     // ── 训练会话（计划表-做题历史） ───────────────────────────────────
