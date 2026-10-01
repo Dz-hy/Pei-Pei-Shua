@@ -31,9 +31,21 @@ class KnowledgeCardDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, nul
         const val COL_UPDATED_AT = "updated_at"
     }
 
+    override fun onConfigure(db: SQLiteDatabase) {
+        super.onConfigure(db)
+        // 开启外键约束，保证 cards.category 引用完整性
+        db.setForeignKeyConstraintsEnabled(true)
+    }
+
     override fun onCreate(db: SQLiteDatabase) {
+        createTables(db)
+        insertPresetCategories(db)
+    }
+
+    /** 建表（IF NOT EXISTS，onCreate 与 onUpgrade 共用，保证迁移不破坏已有数据） */
+    private fun createTables(db: SQLiteDatabase) {
         db.execSQL("""
-            CREATE TABLE $T_CATEGORIES (
+            CREATE TABLE IF NOT EXISTS $T_CATEGORIES (
                 $COL_CAT_ID TEXT PRIMARY KEY,
                 $COL_CAT_NAME TEXT NOT NULL,
                 $COL_CAT_ICON TEXT NOT NULL,
@@ -43,7 +55,7 @@ class KnowledgeCardDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, nul
         """)
 
         db.execSQL("""
-            CREATE TABLE $T_CARDS (
+            CREATE TABLE IF NOT EXISTS $T_CARDS (
                 $COL_ID INTEGER PRIMARY KEY AUTOINCREMENT,
                 $COL_CATEGORY TEXT NOT NULL,
                 $COL_TITLE TEXT NOT NULL,
@@ -56,9 +68,11 @@ class KnowledgeCardDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, nul
             )
         """)
 
-        db.execSQL("CREATE INDEX idx_cards_category ON $T_CARDS($COL_CATEGORY)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_cards_category ON $T_CARDS($COL_CATEGORY)")
+    }
 
-        // 插入预设分类
+    private fun insertPresetCategories(db: SQLiteDatabase) {
+        // 插入预设分类（OR IGNORE：迁移时补充缺失分类，不覆盖已有数据）
         val presets = listOf(
             Triple("idiom", "高频成语", "📖"),
             Triple("current_affairs", "时政刷题", "📰"),
@@ -70,16 +84,17 @@ class KnowledgeCardDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, nul
         )
         presets.forEachIndexed { index, (id, name, icon) ->
             db.execSQL(
-                "INSERT INTO $T_CATEGORIES ($COL_CAT_ID, $COL_CAT_NAME, $COL_CAT_ICON, $COL_CAT_VISIBLE, $COL_CAT_SORT) VALUES (?, ?, ?, 1, ?)",
+                "INSERT OR IGNORE INTO $T_CATEGORIES ($COL_CAT_ID, $COL_CAT_NAME, $COL_CAT_ICON, $COL_CAT_VISIBLE, $COL_CAT_SORT) VALUES (?, ?, ?, 1, ?)",
                 arrayOf(id, name, icon, index)
             )
         }
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        db.execSQL("DROP TABLE IF EXISTS $T_CARDS")
-        db.execSQL("DROP TABLE IF EXISTS $T_CATEGORIES")
-        onCreate(db)
+        // 非破坏式迁移：只补建缺失的表/索引与预设分类，绝不清空用户数据；
+        // 后续版本新增列时，在此按 oldVersion 逐级 ALTER TABLE ... ADD COLUMN 兜底
+        createTables(db)
+        insertPresetCategories(db)
     }
 
     // ── 分类操作 ──────────────────────────────────────────────────────
@@ -155,7 +170,7 @@ class KnowledgeCardDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, nul
         val list = mutableListOf<KnowledgeCard>()
         readableDatabase.query(
             T_CARDS, null, "$COL_CATEGORY = ?", arrayOf(categoryId),
-            null, null, "$COL_UPDATED_AT DESC",
+            null, null, "$COL_UPDATED_AT DESC, $COL_ID DESC",
             "$offset, ${pageSize + 1}"
         ).use { cursor ->
             while (cursor.moveToNext()) {
@@ -172,13 +187,13 @@ class KnowledgeCardDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, nul
      */
     fun searchCards(categoryId: String, keyword: String, page: Int, pageSize: Int = 20): Pair<List<KnowledgeCard>, Boolean> {
         val offset = page * pageSize
-        val like = "%$keyword%"
+        val like = "%${escapeLike(keyword)}%"
         val list = mutableListOf<KnowledgeCard>()
         readableDatabase.query(
             T_CARDS, null,
-            "$COL_CATEGORY = ? AND ($COL_TITLE LIKE ? OR $COL_CONTENT LIKE ?)",
+            "$COL_CATEGORY = ? AND ($COL_TITLE LIKE ? ESCAPE '\\' OR $COL_CONTENT LIKE ? ESCAPE '\\')",
             arrayOf(categoryId, like, like),
-            null, null, "$COL_UPDATED_AT DESC",
+            null, null, "$COL_UPDATED_AT DESC, $COL_ID DESC",
             "$offset, ${pageSize + 1}"
         ).use { cursor ->
             while (cursor.moveToNext()) {
@@ -196,6 +211,19 @@ class KnowledgeCardDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, nul
     fun getCardCount(categoryId: String): Int {
         readableDatabase.rawQuery(
             "SELECT COUNT(*) FROM $T_CARDS WHERE $COL_CATEGORY = ?", arrayOf(categoryId)
+        ).use { cursor ->
+            return if (cursor.moveToFirst()) cursor.getInt(0) else 0
+        }
+    }
+
+    /**
+     * 获取分类下匹配关键词的卡片总数
+     */
+    fun searchCardCount(categoryId: String, keyword: String): Int {
+        val like = "%${escapeLike(keyword)}%"
+        readableDatabase.rawQuery(
+            "SELECT COUNT(*) FROM $T_CARDS WHERE $COL_CATEGORY = ? AND ($COL_TITLE LIKE ? ESCAPE '\\' OR $COL_CONTENT LIKE ? ESCAPE '\\')",
+            arrayOf(categoryId, like, like)
         ).use { cursor ->
             return if (cursor.moveToFirst()) cursor.getInt(0) else 0
         }
@@ -394,6 +422,10 @@ class KnowledgeCardDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, nul
     }
 
     // ── 工具方法 ──────────────────────────────────────────────────────
+
+    /** 转义 LIKE 通配符（\ % _），配合 ESCAPE '\' 使用，避免用户输入被当作通配符 */
+    private fun escapeLike(keyword: String): String =
+        keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
     private fun cursorToCard(cursor: android.database.Cursor): KnowledgeCard {
         return KnowledgeCard(

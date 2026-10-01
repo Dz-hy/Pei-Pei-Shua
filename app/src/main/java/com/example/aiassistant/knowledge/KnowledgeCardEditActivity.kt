@@ -13,6 +13,7 @@ class KnowledgeCardEditActivity : AppCompatActivity() {
     private var cardId: Long = 0
     private lateinit var categoryId: String
     private var isEdit = false
+    private var saving = false  // 防止异步保存期间重复点击造成重复插入
 
     private lateinit var etTitle: EditText
     private lateinit var etContent: EditText
@@ -26,6 +27,9 @@ class KnowledgeCardEditActivity : AppCompatActivity() {
         categoryId = intent.getStringExtra("category_id") ?: return finish()
         val categoryName = intent.getStringExtra("category_name") ?: ""
         isEdit = cardId > 0
+
+        // 进程被杀后本页可能被系统直接重建而不经过 MainActivity，先确保 Manager 已初始化
+        KnowledgeCardManager.init(this)
 
         etTitle = findViewById(R.id.et_title)
         etContent = findViewById(R.id.et_content)
@@ -45,21 +49,28 @@ class KnowledgeCardEditActivity : AppCompatActivity() {
     }
 
     private fun loadCard() {
-        val card = KnowledgeCardManager.getCard(cardId) ?: return
-        etTitle.setText(card.title)
-        etContent.setText(card.content)
+        val id = cardId
+        Thread {
+            val card = KnowledgeCardManager.getCard(id) ?: return@Thread
+            runOnUiThread {
+                if (isDestroyed || isFinishing) return@runOnUiThread
+                etTitle.setText(card.title)
+                etContent.setText(card.content)
 
-        // 解析 tags JSON 数组为逗号分隔
-        try {
-            val arr = org.json.JSONArray(card.tags)
-            val tags = (0 until arr.length()).map { arr.getString(it) }
-            etTags.setText(tags.joinToString(","))
-        } catch (_: Exception) {
-            etTags.setText("")
-        }
+                // 解析 tags JSON 数组为逗号分隔
+                try {
+                    val arr = org.json.JSONArray(card.tags)
+                    val tags = (0 until arr.length()).map { arr.getString(it) }
+                    etTags.setText(tags.joinToString(","))
+                } catch (_: Exception) {
+                    etTags.setText("")
+                }
+            }
+        }.start()
     }
 
     private fun saveCard() {
+        if (saving) return
         val title = etTitle.text.toString().trim()
         val content = etContent.text.toString().trim()
         val tagsInput = etTags.text.toString().trim()
@@ -91,14 +102,16 @@ class KnowledgeCardEditActivity : AppCompatActivity() {
             isCustom = true
         )
 
-        if (isEdit) {
-            KnowledgeCardManager.updateCard(card)
-            Toast.makeText(this, "已更新", Toast.LENGTH_SHORT).show()
-        } else {
-            KnowledgeCardManager.addCard(card)
-            Toast.makeText(this, "已添加", Toast.LENGTH_SHORT).show()
-        }
-        finish()
+        saving = true
+        val edit = isEdit
+        Thread {
+            if (edit) KnowledgeCardManager.updateCard(card) else KnowledgeCardManager.addCard(card)
+            runOnUiThread {
+                if (isDestroyed || isFinishing) return@runOnUiThread
+                Toast.makeText(this, if (edit) "已更新" else "已添加", Toast.LENGTH_SHORT).show()
+                finish()
+            }
+        }.start()
     }
 
     private fun confirmDelete() {
@@ -106,9 +119,15 @@ class KnowledgeCardEditActivity : AppCompatActivity() {
             .setTitle("删除卡片")
             .setMessage("确定删除这张卡片？")
             .setPositiveButton("删除") { _, _ ->
-                KnowledgeCardManager.deleteCard(cardId)
-                Toast.makeText(this, "已删除", Toast.LENGTH_SHORT).show()
-                finish()
+                val id = cardId
+                Thread {
+                    KnowledgeCardManager.deleteCard(id)
+                    runOnUiThread {
+                        if (isDestroyed || isFinishing) return@runOnUiThread
+                        Toast.makeText(this, "已删除", Toast.LENGTH_SHORT).show()
+                        finish()
+                    }
+                }.start()
             }
             .setNegativeButton("取消", null)
             .show()

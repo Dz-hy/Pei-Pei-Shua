@@ -65,6 +65,9 @@ class KnowledgeCardListActivity : AppCompatActivity() {
         categoryId = intent.getStringExtra("category_id") ?: return finish()
         categoryName = intent.getStringExtra("category_name") ?: ""
 
+        // 进程被杀后本页可能被系统直接重建而不经过 MainActivity，先确保 Manager 已初始化
+        KnowledgeCardManager.init(this)
+
         findViewById<TextView>(R.id.tv_title).text = categoryName
         findViewById<TextView>(R.id.btn_back).setOnClickListener {
             if (isSelectMode) exitSelectMode() else finish()
@@ -196,6 +199,12 @@ class KnowledgeCardListActivity : AppCompatActivity() {
         currentPage = 0
         hasMore = true
         loadGeneration++
+        if (isSelectMode) {
+            // 列表即将重建，清掉可能已不可见的陈旧选中项，避免误删与全选计数失真
+            selectedIds.clear()
+            adapter.setSelectedIds(selectedIds)
+            btnBatchDelete.text = "删除"
+        }
         adapter.clearData()
         loadPage()
     }
@@ -222,6 +231,7 @@ class KnowledgeCardListActivity : AppCompatActivity() {
                 KnowledgeCardManager.getCardsPaged(catId, page, pageSize)
             }
             val totalCount = KnowledgeCardManager.getCardCount(catId)
+            val matchCount = if (keyword.isNotEmpty()) KnowledgeCardManager.searchCardCount(catId, keyword) else totalCount
 
             runOnUiThread {
                 if (isDestroyed || isFinishing || gen != loadGeneration) return@runOnUiThread
@@ -238,7 +248,7 @@ class KnowledgeCardListActivity : AppCompatActivity() {
 
                 // 更新统计
                 tvCount.text = if (keyword.isNotEmpty()) {
-                    "搜索「$keyword」 ${adapter.itemCount}条结果"
+                    "搜索「$keyword」 共${matchCount}条结果"
                 } else {
                     "共${totalCount}条"
                 }
@@ -295,10 +305,16 @@ class KnowledgeCardListActivity : AppCompatActivity() {
             .setTitle("批量删除")
             .setMessage("确定删除选中的 ${selectedIds.size} 张卡片？")
             .setPositiveButton("删除") { _, _ ->
-                KnowledgeCardManager.deleteCards(selectedIds)
-                Toast.makeText(this, "已删除 ${selectedIds.size} 张卡片", Toast.LENGTH_SHORT).show()
-                exitSelectMode()
-                resetAndLoad()
+                val ids = selectedIds.toList()
+                Thread {
+                    KnowledgeCardManager.deleteCards(ids)
+                    runOnUiThread {
+                        if (isDestroyed || isFinishing) return@runOnUiThread
+                        Toast.makeText(this, "已删除 ${ids.size} 张卡片", Toast.LENGTH_SHORT).show()
+                        exitSelectMode()
+                        resetAndLoad()
+                    }
+                }.start()
             }
             .setNegativeButton("取消", null)
             .show()
@@ -313,10 +329,17 @@ class KnowledgeCardListActivity : AppCompatActivity() {
     }
 
     private fun exportCards() {
-        val json = KnowledgeCardManager.exportToJson(categoryId)
-        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        clipboard.setPrimaryClip(ClipData.newPlainText("knowledge_cards", json))
-        Toast.makeText(this, "已复制到剪贴板（JSON格式）", Toast.LENGTH_LONG).show()
+        val catId = categoryId
+        Thread {
+            // 全量读库+构建 JSON 可能耗时，放后台线程避免卡 UI
+            val json = KnowledgeCardManager.exportToJson(catId)
+            runOnUiThread {
+                if (isDestroyed || isFinishing) return@runOnUiThread
+                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                clipboard.setPrimaryClip(ClipData.newPlainText("knowledge_cards", json))
+                Toast.makeText(this, "已复制到剪贴板（JSON格式）", Toast.LENGTH_LONG).show()
+            }
+        }.start()
     }
 
     // ── Adapter ──────────────────────────────────────────────────────

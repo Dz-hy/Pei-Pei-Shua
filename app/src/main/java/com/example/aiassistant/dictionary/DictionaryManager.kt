@@ -21,6 +21,7 @@ object DictionaryManager {
     private val searchExecutor = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val readyListeners = mutableListOf<() -> Unit>()
+    private val errorListeners = mutableListOf<() -> Unit>()
 
     /** 搜索请求 ID，用于丢弃过期结果 */
     private val searchId = AtomicLong(0)
@@ -33,6 +34,15 @@ object DictionaryManager {
         synchronized(readyListeners) { readyListeners.remove(listener) }
     }
 
+    fun addOnErrorListener(listener: () -> Unit) {
+        synchronized(errorListeners) { errorListeners.add(listener) }
+    }
+
+    fun removeOnErrorListener(listener: () -> Unit) {
+        synchronized(errorListeners) { errorListeners.remove(listener) }
+    }
+
+    @Synchronized
     fun init(context: Context) {
         if (isLoaded || isLoading) {
             if (isLoaded) {
@@ -55,6 +65,7 @@ object DictionaryManager {
                 synchronized(readyListeners) { readyListeners.forEach { it() } }
             } catch (e: Throwable) {
                 Log.e(TAG, "词典加载失败", e)
+                synchronized(errorListeners) { errorListeners.forEach { it() } }
             } finally {
                 isLoading = false
             }
@@ -99,6 +110,10 @@ object DictionaryManager {
         return searchInternal(q)
     }
 
+    /** 转义 LIKE 通配符（\ % _），配合 ESCAPE '\' 使用，避免用户输入被当作通配符 */
+    private fun escapeLike(q: String): String =
+        q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
     /**
      * 核心搜索逻辑：基于 SQLite 数据库进行模糊匹配查询。
      */
@@ -113,8 +128,8 @@ object DictionaryManager {
             if (isChinese) {
                 // 1. 查汉字
                 database.rawQuery(
-                    "SELECT word, old_word, strokes, pinyin, radicals, explanation, more FROM ${DictionaryDb.T_WORDS} WHERE word LIKE ? LIMIT ?",
-                    arrayOf("$q%", MAX_RESULTS.toString())
+                    "SELECT word, old_word, strokes, pinyin, radicals, explanation, more FROM ${DictionaryDb.T_WORDS} WHERE word LIKE ? ESCAPE '\\' LIMIT ?",
+                    arrayOf("${escapeLike(q)}%", MAX_RESULTS.toString())
                 ).use { cursor ->
                     while (cursor.moveToNext()) {
                         resultItems.add(DictItem.WordItem(WordEntry(
@@ -131,8 +146,8 @@ object DictionaryManager {
 
                 // 2. 查词语
                 database.rawQuery(
-                    "SELECT ci, explanation FROM ${DictionaryDb.T_CI} WHERE ci LIKE ? LIMIT ?",
-                    arrayOf("$q%", MAX_RESULTS.toString())
+                    "SELECT ci, explanation FROM ${DictionaryDb.T_CI} WHERE ci LIKE ? ESCAPE '\\' LIMIT ?",
+                    arrayOf("${escapeLike(q)}%", MAX_RESULTS.toString())
                 ).use { cursor ->
                     while (cursor.moveToNext()) {
                         resultItems.add(DictItem.CiItem(CiEntry(
@@ -144,8 +159,8 @@ object DictionaryManager {
 
                 // 3. 查成语
                 database.rawQuery(
-                    "SELECT word, pinyin, abbreviation, explanation, derivation, example FROM ${DictionaryDb.T_IDIOMS} WHERE word LIKE ? LIMIT ?",
-                    arrayOf("$q%", MAX_RESULTS.toString())
+                    "SELECT word, pinyin, abbreviation, explanation, derivation, example FROM ${DictionaryDb.T_IDIOMS} WHERE word LIKE ? ESCAPE '\\' LIMIT ?",
+                    arrayOf("${escapeLike(q)}%", MAX_RESULTS.toString())
                 ).use { cursor ->
                     while (cursor.moveToNext()) {
                         resultItems.add(DictItem.IdiomItem(IdiomEntry(
@@ -161,8 +176,8 @@ object DictionaryManager {
 
                 // 4. 查歇后语
                 database.rawQuery(
-                    "SELECT riddle, answer FROM ${DictionaryDb.T_XIEHOUYU} WHERE riddle LIKE ? LIMIT ?",
-                    arrayOf("$q%", MAX_RESULTS.toString())
+                    "SELECT riddle, answer FROM ${DictionaryDb.T_XIEHOUYU} WHERE riddle LIKE ? ESCAPE '\\' LIMIT ?",
+                    arrayOf("${escapeLike(q)}%", MAX_RESULTS.toString())
                 ).use { cursor ->
                     while (cursor.moveToNext()) {
                         resultItems.add(DictItem.XiehouyuItem(XiehouyuEntry(
@@ -177,8 +192,8 @@ object DictionaryManager {
 
                 // 1. 查成语（缩写或拼音前缀）
                 database.rawQuery(
-                    "SELECT word, pinyin, abbreviation, explanation, derivation, example FROM ${DictionaryDb.T_IDIOMS} WHERE abbreviation LIKE ? OR replace(pinyin, ' ', '') LIKE ? LIMIT ?",
-                    arrayOf("$qLower%", "$qLower%", MAX_RESULTS.toString())
+                    "SELECT word, pinyin, abbreviation, explanation, derivation, example FROM ${DictionaryDb.T_IDIOMS} WHERE abbreviation LIKE ? ESCAPE '\\' OR replace(pinyin, ' ', '') LIKE ? ESCAPE '\\' LIMIT ?",
+                    arrayOf("${escapeLike(qLower)}%", "${escapeLike(qLower)}%", MAX_RESULTS.toString())
                 ).use { cursor ->
                     while (cursor.moveToNext()) {
                         resultItems.add(DictItem.IdiomItem(IdiomEntry(
@@ -194,8 +209,8 @@ object DictionaryManager {
 
                 // 2. 查汉字（拼音前缀）
                 database.rawQuery(
-                    "SELECT word, old_word, strokes, pinyin, radicals, explanation, more FROM ${DictionaryDb.T_WORDS} WHERE replace(pinyin, ' ', '') LIKE ? LIMIT ?",
-                    arrayOf("$qLower%", MAX_RESULTS.toString())
+                    "SELECT word, old_word, strokes, pinyin, radicals, explanation, more FROM ${DictionaryDb.T_WORDS} WHERE replace(pinyin, ' ', '') LIKE ? ESCAPE '\\' LIMIT ?",
+                    arrayOf("${escapeLike(qLower)}%", MAX_RESULTS.toString())
                 ).use { cursor ->
                     while (cursor.moveToNext()) {
                         resultItems.add(DictItem.WordItem(WordEntry(

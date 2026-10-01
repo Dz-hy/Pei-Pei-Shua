@@ -99,6 +99,7 @@ class DictionaryActivity : AppCompatActivity() {
         } else {
             showLoading(true)
             DictionaryManager.addOnReadyListener(readyListener)
+            DictionaryManager.addOnErrorListener(errorListener)
             DictionaryManager.init(this)
         }
     }
@@ -110,10 +111,19 @@ class DictionaryActivity : AppCompatActivity() {
         }
     }
 
+    private val errorListener: () -> Unit = {
+        runOnUiThread {
+            if (isDestroyed || isFinishing) return@runOnUiThread
+            showLoading(false)
+            android.widget.Toast.makeText(this, "词典数据加载失败，请稍后重试", android.widget.Toast.LENGTH_LONG).show()
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         searchRunnable?.let { handler.removeCallbacks(it) }
         DictionaryManager.removeOnReadyListener(readyListener)
+        DictionaryManager.removeOnErrorListener(errorListener)
     }
 
     private fun applyClipboardAndSearch() {
@@ -148,6 +158,8 @@ class DictionaryActivity : AppCompatActivity() {
         }
         showLoading(false)
         DictionaryManager.searchAsync(query) { result ->
+            // Activity 已销毁时丢弃在途结果，避免回调短暂持有已销毁的视图引用
+            if (isDestroyed || isFinishing) return@searchAsync
             if (result.isEmpty) {
                 layoutEmpty.visibility = View.VISIBLE
                 rvResults.visibility = View.GONE

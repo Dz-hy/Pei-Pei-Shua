@@ -48,6 +48,8 @@ class KnowledgeCardFragment : Fragment() {
 
     override fun onResume() {
         super.onResume()
+        // 进程被杀后本页可能被系统直接重建而不经过 MainActivity，先确保 Manager 已初始化
+        activity?.let { KnowledgeCardManager.init(it) }
         loadCategories()
     }
 
@@ -78,7 +80,7 @@ class KnowledgeCardFragment : Fragment() {
 
     private fun showImportInputDialog(category: KnowledgeCategory) {
         val input = android.widget.EditText(requireContext()).apply {
-            hint = "每行一条：标题,内容,标签（可选）"
+            hint = "每行一条：标题,内容,标签（可选）；标签写在最后一个逗号之后（1,000 这类数字里的逗号属内容）"
             setPadding(48, 32, 48, 32)
             minLines = 5
             gravity = android.view.Gravity.TOP
@@ -89,10 +91,17 @@ class KnowledgeCardFragment : Fragment() {
             .setView(input)
             .setPositiveButton("导入") { _, _ ->
                 val text = input.text.toString()
-                if (text.isNotBlank()) {
-                    val count = KnowledgeCardManager.importFromCsv(category.id, text)
-                    android.widget.Toast.makeText(requireContext(), "成功导入 $count 条", android.widget.Toast.LENGTH_SHORT).show()
-                    loadCategories()
+                val hostActivity = activity
+                if (text.isNotBlank() && hostActivity != null) {
+                    // 解析+批量插入可能耗时，放后台线程避免卡 UI
+                    Thread {
+                        val count = KnowledgeCardManager.importFromCsv(category.id, text)
+                        hostActivity.runOnUiThread {
+                            if (!isAdded) return@runOnUiThread
+                            android.widget.Toast.makeText(hostActivity, "成功导入 $count 条", android.widget.Toast.LENGTH_SHORT).show()
+                            loadCategories()
+                        }
+                    }.start()
                 }
             }
             .setNegativeButton("取消", null)
