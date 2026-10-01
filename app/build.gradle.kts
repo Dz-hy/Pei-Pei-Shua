@@ -6,6 +6,7 @@ plugins {
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
+import java.util.TimeZone
 
 buildDir = file("build-zen")
 
@@ -17,12 +18,16 @@ android {
         applicationId = "com.example.aiassistant"
         minSdk = 26
         targetSdk = 36
-        // versionCode 跨构建单调递增：(年-2025)*1e8 + MMddHHmm，2046 年内不会溢出 int
-        val buildCal = Calendar.getInstance()
+        // versionCode 跨构建单调递增：(年-2025)*1e8 + MMddHHmm，2046 年内不会溢出 int。
+        // 时区固定为 UTC：本地与 CI（UTC）构建同一时刻得到相同 versionCode，否则跨时区机器
+        // 同日交叉安装时可能出现「更新的构建 versionCode 更小」被系统按版本降级拒绝
+        val utc = TimeZone.getTimeZone("UTC")
+        val buildCal = Calendar.getInstance(utc)
+        val buildTimeFormat = SimpleDateFormat("MMddHHmm").apply { timeZone = utc }
         versionCode = (buildCal.get(Calendar.YEAR) - 2025) * 100_000_000 +
-            SimpleDateFormat("MMddHHmm").format(Date()).toInt()
+            buildTimeFormat.format(Date()).toInt()
         // 每次构建自动变化的版号（如 1.0.08292145），用于确认真机安装的是哪个构建
-        versionName = "1.0." + SimpleDateFormat("MMddHHmm").format(Date())
+        versionName = "1.0." + buildTimeFormat.format(Date())
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -31,13 +36,20 @@ android {
         buildConfig = true
     }
 
+    // 签名密码：CI 通过环境变量注入；本地开发从 ~/.gradle/gradle.properties 或环境变量读取
+    val releaseStorePassword = System.getenv("RELEASE_STORE_PASSWORD")
+        ?: project.findProperty("RELEASE_STORE_PASSWORD") as String?
+    val releaseKeyPassword = System.getenv("RELEASE_KEY_PASSWORD")
+        ?: project.findProperty("RELEASE_KEY_PASSWORD") as String?
+    // 两个密码都非空才认为 release 签名可用，否则 keytool 会报 keystore password was incorrect
+    val hasReleaseSigning = !releaseStorePassword.isNullOrEmpty() && !releaseKeyPassword.isNullOrEmpty()
+
     signingConfigs {
         create("release") {
             storeFile = file("../release.keystore")
-            // CI 通过环境变量注入；本地开发从 ~/.gradle/gradle.properties 或环境变量读取
-            storePassword = System.getenv("RELEASE_STORE_PASSWORD") ?: project.findProperty("RELEASE_STORE_PASSWORD") as String? ?: ""
+            storePassword = releaseStorePassword ?: ""
             keyAlias = "peipeishua"
-            keyPassword = System.getenv("RELEASE_KEY_PASSWORD") ?: project.findProperty("RELEASE_KEY_PASSWORD") as String? ?: ""
+            keyPassword = releaseKeyPassword ?: ""
         }
     }
 
@@ -47,7 +59,10 @@ android {
             // release 覆盖安装 debug 会被系统拒绝（INSTALL_FAILED_UPDATE_INCOMPATIBLE），
             // 用户只能卸载重装、数据全丢。默认的 debug 签名是各构建机器 ~/.android 下
             // 随机生成的 keystore（CI runner 每次构建都不同），绝不能用于分发。
-            signingConfig = signingConfigs.getByName("release")
+            // 例外：本机未配置签名密码时（CI 注入 env；本地可写 ~/.gradle/gradle.properties，
+            // 密码不能入仓库），回退默认 debug 签名，避免 packageDebug 直接构建失败。
+            signingConfig = if (hasReleaseSigning) signingConfigs.getByName("release")
+                else signingConfigs.getByName("debug")
         }
         release {
             isMinifyEnabled = true

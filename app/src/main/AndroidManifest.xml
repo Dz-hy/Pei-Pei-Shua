@@ -6,6 +6,9 @@
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <!-- 唤醒锁权限，防止后台冷冻 -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- 通知权限：Android 13+（targetSdk 36）缺失时 AppBlockerService 前台通知及
+         唯一的通知栏「停止拦截」按钮会被系统静默丢弃 -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- 前台服务权限 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <!-- 录屏前台服务权限 (Android 14+) -->
@@ -22,11 +25,23 @@
     <!-- 忽略电池优化，防止后台应用拦截线程被冻结或强杀 -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
-    <!-- 允许查询所有带 Launcher 的应用（番茄钟应用拦截 - 应用列表） -->
+    <!-- MOVE_TO_BACK 广播保护（签名级，本应用自动持有）：Android 12 及以下动态 receiver
+         无法标记 NOT_EXPORTED，凭此权限挡掉第三方应用伪造的切后台广播 -->
+    <permission
+        android:name="com.example.aiassistant.permission.RECEIVE_MOVE_TO_BACK"
+        android:protectionLevel="signature" />
+    <uses-permission android:name="com.example.aiassistant.permission.RECEIVE_MOVE_TO_BACK" />
+
+    <!-- 允许查询所有带 Launcher 的应用（番茄钟应用拦截 - 应用列表），
+         以及所有桌面（CATEGORY_HOME，AppBlockerService 动态识别需放行的桌面） -->
     <queries>
         <intent>
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.HOME" />
         </intent>
     </queries>
 

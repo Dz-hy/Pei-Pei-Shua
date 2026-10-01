@@ -100,6 +100,9 @@ private class PromptAdapter(
         holder.btnReset.setOnClickListener {
             val t = holder.currentType ?: return@setOnClickListener
             val teacher = TeacherManager.activeTeacher
+            // 先取消挂起的防抖保存，否则 300ms 内点重置会把旧文本重新写回覆盖层
+            saveRunnable?.let { holder.saveHandler.removeCallbacks(it) }
+            saveRunnable = null
             TeacherManager.removeOverlay(ctx, teacher.id, t)
             holder.ignoreTextChange = true
             holder.etPrompt.setText(teacher.getPrompt(t))

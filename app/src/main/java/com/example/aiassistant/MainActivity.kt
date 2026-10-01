@@ -109,12 +109,14 @@ class MainActivity : AppCompatActivity(), HomeFragment.ServiceControlListener {
         setupBottomNav(savedInstanceState)
         LaunchPerf.mark("setupBottomNav done")
 
-        // 注册 moveToBack 广播（AppBlockerService 在 overlay 被 Activity 盖住时发送）
+        // 注册 moveToBack 广播（AppBlockerService 在 overlay 被 Activity 盖住时发送）。
+        // Android 12 及以下动态 receiver 无法标记 NOT_EXPORTED，用签名权限挡掉第三方伪造广播
         val moveBackFilter = IntentFilter("com.example.aiassistant.MOVE_TO_BACK")
+        val moveBackPerm = "com.example.aiassistant.permission.RECEIVE_MOVE_TO_BACK"
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(moveToBackReceiver, moveBackFilter, Context.RECEIVER_NOT_EXPORTED)
+            registerReceiver(moveToBackReceiver, moveBackFilter, moveBackPerm, null, Context.RECEIVER_NOT_EXPORTED)
         } else {
-            registerReceiver(moveToBackReceiver, moveBackFilter)
+            registerReceiver(moveToBackReceiver, moveBackFilter, moveBackPerm, null)
         }
 
         // 处理启动 Intent（通知点击 / 悬浮球跳转）
@@ -169,6 +171,11 @@ class MainActivity : AppCompatActivity(), HomeFragment.ServiceControlListener {
             } else {
                 startPermissionFlow()
             }
+        }
+        // 遮罩「回到番茄钟」按钮 / AppBlocker 前台通知点击：直接落在番茄钟 tab。
+        // 冷启动时 setupBottomNav 已先执行，设置 selectedItemId 会触发既有监听器完成切换
+        if (intent.getBooleanExtra("open_pomodoro", false)) {
+            findViewById<NavigationBarView>(R.id.bottom_nav).selectedItemId = R.id.nav_pomodoro
         }
     }
 
@@ -293,14 +300,11 @@ class MainActivity : AppCompatActivity(), HomeFragment.ServiceControlListener {
         stopScreenCaptureService()
     }
 
+    // 服务与本界面同进程（Manifest 无 process 拆分），直接查服务的存活标记即可，
+    // 避免已废弃的 getRunningServices 在主线程做同步 binder IPC（每次回首页都会触发）
     override fun isServiceRunning(): Boolean =
         AppPreferences.isFloatEnabled(this) &&
-        com.example.aiassistant.ScreenCaptureService::class.java.let { cls ->
-            val manager = getSystemService(ACTIVITY_SERVICE) as android.app.ActivityManager
-            @Suppress("DEPRECATION")
-            manager.getRunningServices(Integer.MAX_VALUE)
-                ?.any { it.service.className == cls.name } == true
-        }
+            com.example.aiassistant.ScreenCaptureService.instance != null
 
     // ── 权限流程 ──────────────────────────────────────────────────────
 

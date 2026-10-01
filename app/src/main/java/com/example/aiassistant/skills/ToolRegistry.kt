@@ -74,7 +74,7 @@ object ToolRegistry {
     fun execute(context: Context, call: ToolCall): ToolResult {
         val tool = tools[call.name]
         if (tool == null) {
-            return ToolResult(call.id, "错误：未注册的工具 $call.name")
+            return ToolResult(call.id, "错误：未注册的工具 ${call.name}")
         }
         return try {
             val args = if (call.arguments.isNullOrBlank()) JSONObject()

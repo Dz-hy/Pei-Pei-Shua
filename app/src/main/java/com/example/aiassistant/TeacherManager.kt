@@ -16,6 +16,8 @@ import java.util.concurrent.Executors
  * 加载为后台异步（assets 读 7 份 prompt JSON 主线程要 ~90ms）：
  * init() 立即返回，加载完成前 activeTeacher 为 fallback、列表为空，
  * 完成后快照整体替换并回调 readyListeners（主线程）。
+ * getPrompt 在未初始化被调用时（悬浮球磁贴/服务路径冷启动，未经过 MainActivity）
+ * 会同步兜底加载一次，避免 AI 请求以空 system prompt 发出。
  */
 object TeacherManager {
 
@@ -55,24 +57,29 @@ object TeacherManager {
         if (loaded) return
         val appCtx = context.applicationContext
         executor.execute {
-            synchronized(lock) {
-                if (loaded) return@synchronized
-                val builtIn = mutableListOf<TeacherConfig>()
-                val imported = mutableListOf<TeacherConfig>()
-                loadBuiltIn(appCtx, builtIn)
-                loadImported(appCtx, imported)
-                val activeId = AppPreferences.getActiveTeacherId(appCtx)
-                builtInSnapshot = builtIn
-                importedSnapshot = imported
-                activeTeacher = allTeachers.find { it.id == activeId }
-                    ?: builtIn.firstOrNull() ?: createFallbackTeacher()
-                loaded = true
-                Log.d(TAG, "TeacherManager 初始化完成，当前老师：${activeTeacher.name} (${activeTeacher.id})，共 ${allTeachers.size} 位")
-            }
+            loadOnce(appCtx)
             mainHandler.post {
                 readyListeners.forEach { it() }
                 readyListeners.clear()
             }
+        }
+    }
+
+    /** 加载一次并整体替换快照（init 的后台线程与 getPrompt 的未初始化兜底共用） */
+    private fun loadOnce(context: Context) {
+        synchronized(lock) {
+            if (loaded) return
+            val builtIn = mutableListOf<TeacherConfig>()
+            val imported = mutableListOf<TeacherConfig>()
+            loadBuiltIn(context, builtIn)
+            loadImported(context, imported)
+            val activeId = AppPreferences.getActiveTeacherId(context)
+            builtInSnapshot = builtIn
+            importedSnapshot = imported
+            activeTeacher = allTeachers.find { it.id == activeId }
+                ?: builtIn.firstOrNull() ?: createFallbackTeacher()
+            loaded = true
+            Log.d(TAG, "TeacherManager 初始化完成，当前老师：${activeTeacher.name} (${activeTeacher.id})，共 ${allTeachers.size} 位")
         }
     }
 
@@ -86,9 +93,24 @@ object TeacherManager {
     // ── Prompt 获取（含覆盖层） ──────────────────────────────────────
 
     fun getPrompt(context: Context, type: QuestionType): String {
+        ensureLoaded(context)
         val overlay = getOverlay(context, activeTeacher.id, type)
         if (overlay != null) return overlay
         return activeTeacher.getPrompt(type)
+    }
+
+    /**
+     * 未初始化兜底：悬浮球磁贴/服务路径可先于 MainActivity 拉起进程（此时无人调用 init），
+     * 同步加载一次，保证取到的 prompt 不为空（assets 读取 ~90ms，仅未初始化时发生一次）。
+     */
+    private fun ensureLoaded(context: Context) {
+        if (loaded) return
+        Log.w(TAG, "TeacherManager 未初始化即请求 prompt，改为同步加载（本次进程未经过 MainActivity）")
+        loadOnce(context.applicationContext)
+        mainHandler.post {
+            readyListeners.forEach { it() }
+            readyListeners.clear()
+        }
     }
 
     // ── 覆盖层（用户编辑内置老师 prompt） ────────────────────────────
@@ -122,6 +144,9 @@ object TeacherManager {
 
     // ── 导入/导出 ────────────────────────────────────────────────────
 
+    /** 文件名消毒：导入写盘与删除文件共用同一规则，路径里不能出现原始 id（防路径穿越与写读不一致） */
+    private fun safeFileName(id: String): String = id.replace(Regex("[^a-zA-Z0-9_-]"), "_")
+
     fun importTeacher(context: Context, jsonString: String): Result<TeacherConfig> {
         return try {
             val json = JSONObject(jsonString.trim())
@@ -132,11 +157,12 @@ object TeacherManager {
             if (allTeachers.any { it.id == teacher.id }) {
                 return Result.failure(IllegalStateException("老师ID已存在：${teacher.id}"))
             }
-            // 保存到内部存储（消毒文件名，防止路径穿越）
-            val safeId = teacher.id.replace(Regex("[^a-zA-Z0-9_-]"), "_")
+            // 保存到内部存储（消毒文件名防路径穿越，与 deleteTeacher 的删除路径共用 safeFileName）。
+            // 写盘保持同步：写失败必须同步回传 Result.failure 让界面 Toast 提示，
+            // 若改后台静默写，失败时界面仍显示导入成功、配置会在重启后丢失；文件很小（单次 ~1-5ms）
             val dir = File(context.filesDir, IMPORTED_DIR)
             dir.mkdirs()
-            File(dir, "${safeId}.json").writeText(jsonString)
+            File(dir, "${safeFileName(teacher.id)}.json").writeText(jsonString)
             synchronized(lock) { importedSnapshot = importedSnapshot + teacher }
             Log.i(TAG, "导入老师成功：${teacher.name} (${teacher.id})")
             Result.success(teacher)
@@ -165,9 +191,15 @@ object TeacherManager {
                 activeTeacher = builtInSnapshot.firstOrNull() ?: createFallbackTeacher()
                 AppPreferences.setActiveTeacherId(context, activeTeacher.id)
             }
-            // 删除文件
-            val file = File(context.filesDir, "$IMPORTED_DIR/${teacherId}.json")
-            file.delete()
+            // 删除文件（与导入写盘一致用消毒后的文件名：原始 id 含非法字符或 .. 时，
+            // 用原始 id 拼路径会删错位置、删不掉文件导致重启后复活）
+            val appCtx = context.applicationContext
+            executor.execute {
+                val file = File(appCtx.filesDir, "$IMPORTED_DIR/${safeFileName(teacherId)}.json")
+                if (!file.delete() && file.exists()) {
+                    Log.w(TAG, "删除老师文件失败：${file.path}")
+                }
+            }
             removeAllOverlays(context, teacherId)
             Log.d(TAG, "删除老师：$teacherId")
         }

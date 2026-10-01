@@ -112,7 +112,9 @@ class HomeFragment : Fragment() {
         LaunchPerf.mark("Home.onViewCreated done")
 
         // 云同步关键节点：启动后延迟拉推一轮（避开冷启动窗口；未配置 WebDAV 静默跳过）
-        view.postDelayed({ com.example.aiassistant.sync.SyncEngine.schedule(requireContext()) }, 8_000)
+        // 提前捕获 applicationContext：detach 后该延迟任务照常执行，requireContext() 会抛 IllegalStateException
+        val syncCtx = requireContext().applicationContext
+        view.postDelayed({ com.example.aiassistant.sync.SyncEngine.schedule(syncCtx) }, 8_000)
     }
 
     override fun onResume() {

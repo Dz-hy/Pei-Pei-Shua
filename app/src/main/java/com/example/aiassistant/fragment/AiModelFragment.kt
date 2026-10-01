@@ -823,7 +823,8 @@ class AiModelFragment : Fragment() {
             
             for (i in 0 until arr.length()) {
                 val obj = arr.getJSONObject(i)
-                val id = obj.optString("id", "")
+                // 消毒文件名来源的 id：导入数据不可信，防文件名/路径注入（对齐 TeacherManager 导入老师的做法）
+                val id = obj.optString("id", "").replace(Regex("[^a-zA-Z0-9_-]"), "_")
                 if (obj.has("imageBase64") && id.isNotEmpty()) {
                     val base64Str = obj.getString("imageBase64")
                     try {
@@ -947,6 +948,9 @@ class AiModelFragment : Fragment() {
                 }
 
                 activity?.runOnUiThread {
+                    // 导出耗时可达数十秒，期间 Activity 可能已销毁（旋转/被回收），
+                    // 此时 dismiss 泄漏窗口或用旧 ctx 弹 Toast 都会崩，直接放弃回调
+                    if (!isAdded) return@runOnUiThread
                     dialog.dismiss()
                     val msg = buildString {
                         append("🎉 数据备份导出成功！")
@@ -958,6 +962,7 @@ class AiModelFragment : Fragment() {
             } catch (e: Exception) {
                 e.printStackTrace()
                 activity?.runOnUiThread {
+                    if (!isAdded) return@runOnUiThread
                     dialog.dismiss()
                     Toast.makeText(ctx, "导出失败: ${e.message}", Toast.LENGTH_SHORT).show()
                 }
@@ -1088,6 +1093,8 @@ class AiModelFragment : Fragment() {
                 }
 
                 activity?.runOnUiThread {
+                    // 大备份还原期间 Activity 可能已销毁：dismiss 泄漏窗口 / 旧 token 弹 AlertDialog 均会崩
+                    if (!isAdded) return@runOnUiThread
                     dialog.dismiss()
                     val sb = StringBuilder("🎉 备份数据已成功恢复：\n")
                     if (prefRestored) sb.append("• 系统配置已覆盖应用\n")
@@ -1109,6 +1116,7 @@ class AiModelFragment : Fragment() {
             } catch (e: Exception) {
                 e.printStackTrace()
                 activity?.runOnUiThread {
+                    if (!isAdded) return@runOnUiThread
                     dialog.dismiss()
                     Toast.makeText(ctx, "恢复失败: ${e.message}", Toast.LENGTH_LONG).show()
                 }
@@ -1213,6 +1221,8 @@ class AiModelFragment : Fragment() {
                 }
 
                 activity?.runOnUiThread {
+                    // 大题库导入期间 Activity 可能已销毁：dismiss 泄漏窗口 / 旧 token 弹 AlertDialog 均会崩
+                    if (!isAdded) return@runOnUiThread
                     dialog.dismiss()
                     if (count >= 0) {
                         com.example.aiassistant.questionbank.QuestionBankManager.reloadDatabaseAfterImport(ctx)
@@ -1235,6 +1245,7 @@ class AiModelFragment : Fragment() {
             } catch (e: Exception) {
                 e.printStackTrace()
                 activity?.runOnUiThread {
+                    if (!isAdded) return@runOnUiThread
                     dialog.dismiss()
                     Toast.makeText(ctx, "导入失败: ${e.message}", Toast.LENGTH_LONG).show()
                 }

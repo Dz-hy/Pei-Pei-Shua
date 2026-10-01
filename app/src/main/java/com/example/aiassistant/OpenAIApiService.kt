@@ -493,7 +493,9 @@ object OpenAIApiService {
                     val bodyStr = try { response.body?.string() } catch (_: Exception) { null } ?: "无响应体"
                     response.close()
 
-                    android.util.Log.e("AIAssistantAPI", "onResponse: API Error. HTTP Status: $statusCode, ResponseBody: $bodyStr")
+                    // 错误响应体是服务端原样返回内容，仅 DEBUG 记录（与下方 raw 响应日志同一保护）；release 只记状态码
+                    android.util.Log.e("AIAssistantAPI", "onResponse: API Error. HTTP Status: $statusCode")
+                    if (BuildConfig.DEBUG) android.util.Log.e("AIAssistantAPI", "onResponse: API Error. ResponseBody: $bodyStr")
 
                     // 对 429 进行延迟重试
                     if (statusCode == 429 && retryCount < 2) {
@@ -713,8 +715,13 @@ object OpenAIApiService {
                         if (content != null) {
                             val parts = content.optJSONArray("parts")
                             if (parts != null && parts.length() > 0) {
-                                val text = parts.optJSONObject(0)?.optString("text") ?: ""
-                                if (text.isNotEmpty()) return text
+                                // 拼接全部 text part：多 part 回复只取第一个会被静默截断
+                                val sb = StringBuilder()
+                                for (i in 0 until parts.length()) {
+                                    val t = parts.optJSONObject(i)?.optString("text") ?: ""
+                                    if (t.isNotEmpty()) sb.append(t)
+                                }
+                                if (sb.isNotEmpty()) return sb.toString()
                             }
                         }
                     }

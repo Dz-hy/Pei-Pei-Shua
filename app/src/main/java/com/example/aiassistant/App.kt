@@ -43,6 +43,13 @@ class App : Application() {
         } catch (e: Exception) {
             android.util.Log.e("App", "Failed to register BuiltInTools: ${e.message}")
         }
+        // 预热老师配置：悬浮球磁贴/番茄钟拦截服务冷启动路径可先于 MainActivity 取 prompt，
+        // 此处后台预加载（init 幂等且异步），让 getPrompt 的 ~90ms 主线程同步兜底几乎不被触发
+        try {
+            TeacherManager.init(this)
+        } catch (e: Exception) {
+            android.util.Log.e("App", "Failed to init TeacherManager: ${e.message}")
+        }
         LaunchPerf.mark("App.onCreate end")
 
         // targetSdk 36 在 Android 15+ 强制 edge-to-edge，所有页面内容会画到状态栏/手势条下面。

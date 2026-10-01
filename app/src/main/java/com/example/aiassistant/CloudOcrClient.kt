@@ -152,6 +152,8 @@ object CloudOcrClient {
         synchronized(this) { currentCall = call }
         call.enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
+                // 主动取消（如熄屏时 cancelCurrentRequest）不算失败，避免结果卡弹「云端 OCR 失败：Canceled」误报
+                if (call.isCanceled()) return
                 onError("云端 OCR 请求失败：${e.message}")
             }
 

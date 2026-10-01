@@ -711,7 +711,7 @@ object AppPreferences {
         prefs(context).edit().putString(KEY_CUSTOM_QUOTES, jsonArray.toString()).apply()
     }
 
-    /** 导出所有的 Preferences 配置数据为 JSON 字符串 */
+    /** 导出所有的 Preferences 配置数据为 JSON 字符串（Token/密钥脱敏，防止备份文件外泄连带泄露） */
     fun exportPreferencesJson(context: Context): String {
         return try {
             val all = prefs(context).all
@@ -720,13 +720,39 @@ object AppPreferences {
             obj.put("version", 1)
             val data = org.json.JSONObject()
             for ((key, value) in all) {
-                data.put(key, value)
+                // Token 明文不写入导出文件（导入恢复后留空，需用户重新填写）
+                if (key == KEY_API_KEY || key == KEY_EMB_KEY || key == KEY_CLOUD_OCR_TOKEN) continue
+                // 模型配置 JSON 内嵌的 apiKey 同样脱敏
+                if ((key == KEY_AI_MODELS || key == KEY_SHIZHENG_MODEL) && value is String) {
+                    data.put(key, stripEmbeddedApiKeys(value))
+                } else {
+                    data.put(key, value)
+                }
             }
             obj.put("data", data)
             obj.toString(2)
         } catch (e: Exception) {
             e.printStackTrace()
             ""
+        }
+    }
+
+    /** 导出脱敏：去掉模型配置 JSON（ai_models 数组 / shizheng_model 单对象）内嵌的 apiKey */
+    private fun stripEmbeddedApiKeys(json: String): String {
+        return try {
+            val arr = org.json.JSONArray(json)
+            for (i in 0 until arr.length()) {
+                arr.optJSONObject(i)?.put("apiKey", "")
+            }
+            arr.toString()
+        } catch (e: Exception) {
+            try {
+                val single = org.json.JSONObject(json)
+                single.put("apiKey", "")
+                single.toString()
+            } catch (e2: Exception) {
+                json
+            }
         }
     }
 
