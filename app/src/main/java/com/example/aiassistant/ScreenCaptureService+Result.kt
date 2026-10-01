@@ -449,19 +449,29 @@ internal fun ScreenCaptureService.clearDynamicSections(card: View) {
     }
 }
 
+/** 动态标签的 view tag 标记：跨次渲染（重新分析/渲染失败重试）先清旧再挂新，防成对重复与旧答案残留 */
+private const val VIEW_TAG_BANK_MATCH = "view_tag_bank_match"
+private const val VIEW_TAG_MODEL_ERROR = "view_tag_model_error"
+
 /** 在结果卡片顶部显示题库命中标签 */
 internal fun ScreenCaptureService.showBankMatchTag(card: View) {
-    val match = lastBankMatch ?: return
+    val match = lastBankMatch
+    val layoutTags = card.findViewById<LinearLayout>(R.id.layout_tags) ?: return
+    // 清掉上次渲染遗留的题库标签（本轮未命中时也不残留旧的「正确答案: X」）
+    for (i in layoutTags.childCount - 1 downTo 0) {
+        if (layoutTags.getChildAt(i).tag == VIEW_TAG_BANK_MATCH) layoutTags.removeViewAt(i)
+    }
+    if (match == null) return
     val d = resources.displayMetrics.density
     val dp6 = (6 * d).toInt()
     val dp3 = (3 * d).toInt()
     val dp4 = (4 * d).toInt()
 
-    val layoutTags = card.findViewById<LinearLayout>(R.id.layout_tags) ?: return
     layoutTags.visibility = View.VISIBLE
 
     // 题库命中标签（绿色）
     val bankTag = TextView(this).apply {
+        tag = VIEW_TAG_BANK_MATCH
         layoutParams = LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.WRAP_CONTENT,
             LinearLayout.LayoutParams.WRAP_CONTENT
@@ -476,6 +486,7 @@ internal fun ScreenCaptureService.showBankMatchTag(card: View) {
 
     // 答案标签（蓝色）
     val answerTag = TextView(this).apply {
+        tag = VIEW_TAG_BANK_MATCH
         layoutParams = LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.WRAP_CONTENT,
             LinearLayout.LayoutParams.WRAP_CONTENT
@@ -495,17 +506,23 @@ internal fun ScreenCaptureService.showBankMatchTag(card: View) {
 
 /** 在结果卡片顶部显示主模型故障告警标签（点击可查看详细故障诊断与排查指南） */
 internal fun ScreenCaptureService.showPrimaryModelErrorTag(card: View) {
-    val error = primaryModelError ?: return
+    val error = primaryModelError
+    val layoutTags = card.findViewById<LinearLayout>(R.id.layout_tags) ?: return
+    // 清掉上次渲染遗留的告警标签（本轮主模型正常时也不残留）
+    for (i in layoutTags.childCount - 1 downTo 0) {
+        if (layoutTags.getChildAt(i).tag == VIEW_TAG_MODEL_ERROR) layoutTags.removeViewAt(i)
+    }
+    if (error == null) return
     val d = resources.displayMetrics.density
     val dp6 = (6 * d).toInt()
     val dp3 = (3 * d).toInt()
     val dp4 = (4 * d).toInt()
 
-    val layoutTags = card.findViewById<LinearLayout>(R.id.layout_tags) ?: return
     layoutTags.visibility = View.VISIBLE
 
     // 故障告警标签（红色）
     val errorTag = TextView(this).apply {
+        tag = VIEW_TAG_MODEL_ERROR
         layoutParams = LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.WRAP_CONTENT,
             LinearLayout.LayoutParams.WRAP_CONTENT

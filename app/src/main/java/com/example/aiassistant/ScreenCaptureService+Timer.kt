@@ -561,14 +561,23 @@ internal fun ScreenCaptureService.showTimerResultCard(session: TimerSession) {
         dismissTimerResultCard()
         Toast.makeText(this, "已丢弃本次计时", Toast.LENGTH_SHORT).show()
     }
+    var saving = false   // 保存防抖：写库改异步后，insert 完成前快速连点不得重复入库
     view.findViewById<View>(R.id.btn_timer_save).setOnClickListener {
+        if (saving) return@setOnClickListener
         if (remaining.isEmpty()) {
             Toast.makeText(this, "没有题目记录可保存", Toast.LENGTH_SHORT).show()
             return@setOnClickListener
         }
-        TimerStore.saveSession(this, session.copy(questions = remaining.toList()))
-        dismissTimerResultCard()
-        Toast.makeText(this, "已保存计时记录（${remaining.size} 题）", Toast.LENGTH_SHORT).show()
+        // 写库放后台线程（与计时历史页读/删同口径），避免主线程同步 SQLite 写入（含首次建库开销）
+        saving = true
+        val toSave = session.copy(questions = remaining.toList())
+        Thread {
+            TimerStore.saveSession(this, toSave)
+            mainHandler.post {
+                dismissTimerResultCard()
+                Toast.makeText(this, "已保存计时记录（${toSave.questions.size} 题）", Toast.LENGTH_SHORT).show()
+            }
+        }.start()
     }
 
     refreshRows()

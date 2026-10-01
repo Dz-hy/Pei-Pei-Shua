@@ -108,9 +108,13 @@ internal fun ScreenCaptureService.renderHuashengPianDuanYueDu(card: View, json: 
     val qType = cleanHtmlText(jsonStr(json,"question_type", ""))
     val pType = cleanHtmlText(jsonStr(json,"passage_type", ""))
     val structArr = json.optJSONArray("structure_type")
-    // 清除之前动态添加的 structure 标签（保留 tvTagQ 和 tvTagP）
-    if (layoutTags != null && layoutTags.childCount > 2) {
-        layoutTags.removeViews(2, layoutTags.childCount - 2)
+    // 清除之前动态添加的标签（保留静态题型标签 tvTagQ/tvTagP）。
+    // 题库命中后 bankTag/answerTag 会插在行首，按位置 removeViews(2,…) 会把静态题型标签误删
+    if (layoutTags != null) {
+        for (i in layoutTags.childCount - 1 downTo 0) {
+            val child = layoutTags.getChildAt(i)
+            if (child !== tvTagQ && child !== tvTagP) layoutTags.removeViewAt(i)
+        }
     }
     if (qType.isNotEmpty() || pType.isNotEmpty() || (structArr != null && structArr.length() > 0)) {
         layoutTags?.visibility = View.VISIBLE

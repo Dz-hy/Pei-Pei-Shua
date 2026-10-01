@@ -327,6 +327,21 @@ internal fun ScreenCaptureService.onSmallBallClicked() {
 
     if (isCapturing || isSilentCapture) return
 
+    // MediaProjection 失效（如系统侧停止录屏）— 与主球点击一致：先自动恢复，失败再重新授权
+    if (imageReader == null || virtualDisplay == null || mediaProjection == null) {
+        if (!tryAutoRecoverMediaProjection()) {
+            if (!isRequestingConsent) {
+                isRequestingConsent = true
+                val consentIntent = android.content.Intent(this, MediaProjectionConsentActivity::class.java).apply {
+                    addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK or android.content.Intent.FLAG_ACTIVITY_MULTIPLE_TASK)
+                }
+                startActivity(consentIntent)
+            }
+            return
+        }
+        updateNotification()
+    }
+
     retryCount.set(0)
     isSilentCapture = true
     isCapturing = true

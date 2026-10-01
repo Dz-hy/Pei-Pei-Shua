@@ -113,6 +113,9 @@ internal fun ScreenCaptureService.grabFrame(): Bitmap? {
     }
 }
 
+/** 触屏合成色块（nudger）窗口引用：80ms 延迟移除任务会被 onDestroy 的 removeCallbacksAndMessages(null) 取消，销毁时须兜底移除 */
+internal var pendingNudgerView: View? = null
+
 /**
  * 强制触发一次屏幕合成：静态画面下系统不主动重绘，换上的新 surface 等不到帧。
  * 在底部手势条区域内瞬时添加/移除一个不透明小色块（被手势条遮挡，肉眼不可见），
@@ -120,6 +123,8 @@ internal fun ScreenCaptureService.grabFrame(): Bitmap? {
  */
 internal fun ScreenCaptureService.nudgeScreenComposition() {
     mainHandler.post {
+        // 80ms 移除窗口内再次抓帧时先移除旧色块，避免引用被顶掉后无人移除
+        removeNudgerWindow()
         var nudger: View? = null
         try {
             nudger = View(this)
@@ -137,13 +142,24 @@ internal fun ScreenCaptureService.nudgeScreenComposition() {
                 y = -dpToPx(1)
             }
             windowManager.addView(nudger, p)
+            pendingNudgerView = nudger
             mainHandler.postDelayed({
                 try { windowManager.removeView(nudger) } catch (_: Exception) {}
+                if (pendingNudgerView === nudger) pendingNudgerView = null
             }, 80)
         } catch (e: Exception) {
             try { nudger?.let { windowManager.removeView(it) } } catch (_: Exception) {}
+            if (pendingNudgerView === nudger) pendingNudgerView = null
         }
     }
+}
+
+/** 兜底移除触屏合成色块窗口（onDestroy 调用） */
+internal fun ScreenCaptureService.removeNudgerWindow() {
+    pendingNudgerView?.let {
+        try { windowManager.removeView(it) } catch (_: Exception) {}
+    }
+    pendingNudgerView = null
 }
 
 private fun acquireFrameWithRetry(reader: android.media.ImageReader, retries: Int, gapMs: Long): android.media.Image? {
@@ -273,6 +289,11 @@ internal fun ScreenCaptureService.scheduleCaptureTimeout() {
             Log.w(ScreenCaptureService.TAG, "Capture timed out after 30s — resetting isCapturing")
             isCapturing = false
             cancelCaptureTimeout()
+            // 撤下仍在前台的框选蒙层并回收其全屏截图，与取消路径（onCancelled）对齐；
+            // 否则超时后用户仍可确认选区触发 sendToAI，与复位后的状态机不一致
+            removeAreaOverlay()
+            areaOverlayBitmap?.let { if (!it.isRecycled) it.recycle() }
+            areaOverlayBitmap = null
             reattachFloatBall()
             Toast.makeText(this, "截图超时，请重试", Toast.LENGTH_SHORT).show()
         }
@@ -287,9 +308,13 @@ internal fun ScreenCaptureService.cancelCaptureTimeout() {
 
 // ── 区域选择覆盖层 ────────────────────────────────────────────────────
 
+/** 框选蒙层持有的全屏截图：确认/取消路径用完即回收并置空，超时路径兜底回收 */
+internal var areaOverlayBitmap: Bitmap? = null
+
 internal fun ScreenCaptureService.showAreaSelectionOverlay(fullBitmap: Bitmap, saveAsFixed: Boolean) {
     removeAreaOverlay()
 
+    areaOverlayBitmap = fullBitmap
     val overlay = AreaSelectionOverlay(
         context = this,
         onAreaSelected = { rect ->
@@ -302,6 +327,7 @@ internal fun ScreenCaptureService.showAreaSelectionOverlay(fullBitmap: Bitmap, s
 
             val cropped = cropBitmap(fullBitmap, rect)
             fullBitmap.recycle()
+            areaOverlayBitmap = null
             if (cropped != null) {
                 val shouldShowCard = !isSilentCapture && AppPreferences.getFloatClickAction(this) != AppPreferences.CLICK_ACTION_RECORD_WRONG
                 if (shouldShowCard) showResultCard()
@@ -322,6 +348,7 @@ internal fun ScreenCaptureService.showAreaSelectionOverlay(fullBitmap: Bitmap, s
             reattachFloatBall()
             reattachSmallBall()
             fullBitmap.recycle()
+            areaOverlayBitmap = null
         }
     )
 

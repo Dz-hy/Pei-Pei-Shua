@@ -330,9 +330,10 @@ class ScreenCaptureService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         instance = null
+        // 先移除计时结果卡窗口，再 reset 置空引用（reset 自身不 removeView，顺序反了窗口会残留在 WindowManager 上）
+        dismissTimerResultCard()
         TimerEngine.reset()
         lastImageBase64 = null
-        dismissTimerResultCard()
         mainHandler.removeCallbacksAndMessages(null)
         screenStateReceiver?.let {
             try { unregisterReceiver(it) } catch (_: Exception) {}
@@ -343,10 +344,15 @@ class ScreenCaptureService : Service() {
             orientationListener = null
         }
         dismissDictionaryOverlay()
+        dismissRecordConfirmOverlay()
+        pendingMaterialText = null
         dismissBallMenu()
+        removeNudgerWindow()
         removeFloatBall()
         removeSmallBall()
         removeAreaOverlay()
+        areaOverlayBitmap?.let { if (!it.isRecycled) it.recycle() }
+        areaOverlayBitmap = null
         removeResultCard()
         releaseMediaProjection()
         captureThread?.quitSafely()
@@ -368,6 +374,8 @@ class ScreenCaptureService : Service() {
     // ═════════════════════════════════════════════════════════════════════
 
     private fun setupMediaProjection(resultCode: Int, data: Intent) {
+        // 先释放旧实例：重授权/自动恢复时服务可能存活，避免旧 VirtualDisplay/ImageReader/MediaProjection 被静默覆盖泄漏
+        releaseMediaProjection()
         val manager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         mediaProjection = manager.getMediaProjection(resultCode, data)
         if (mediaProjection == null) {
@@ -375,21 +383,21 @@ class ScreenCaptureService : Service() {
             return
         }
 
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            mediaProjectionCallback = object : MediaProjection.Callback() {
-                override fun onStop() {
-                    Log.d(TAG, "MediaProjection stopped by system")
-                    mainHandler.post {
-                        // 释放旧资源
-                        releaseMediaProjection()
-                        // Android 14+ token 是一次性的，已被消耗，无法自动恢复
-                        // 用户下次点击悬浮球时会重新弹出授权
-                        updateNotificationForFailure()
-                    }
+        // 全部 API 级别都注册系统停止回调：系统侧停止录屏后释放并置空三字段，
+        // 让悬浮球/开始计时/锁屏恢复等入口的失效检测（判空）得以生效
+        mediaProjectionCallback = object : MediaProjection.Callback() {
+            override fun onStop() {
+                Log.d(TAG, "MediaProjection stopped by system")
+                mainHandler.post {
+                    // 释放旧资源
+                    releaseMediaProjection()
+                    // Android 14+ token 是一次性的，已被消耗，无法自动恢复；
+                    // API<34 凭据可复用，下次点击悬浮球/开始计时时会先走 tryAutoRecoverMediaProjection
+                    updateNotificationForFailure()
                 }
             }
-            mediaProjection!!.registerCallback(mediaProjectionCallback!!, mainHandler)
         }
+        mediaProjection!!.registerCallback(mediaProjectionCallback!!, mainHandler)
 
         imageReader = ImageReader.newInstance(
             screenWidth, screenHeight,
@@ -509,6 +517,8 @@ class ScreenCaptureService : Service() {
             isSilentCapture = false
             cancelCaptureTimeout()
             removeAreaOverlay()
+            areaOverlayBitmap?.let { if (!it.isRecycled) it.recycle() }
+            areaOverlayBitmap = null
             reattachFloatBall()
             reattachSmallBall()
         }
