@@ -39,6 +39,7 @@ class ShizhengActivity : AppCompatActivity() {
     private var allNews: List<NewsArticle> = emptyList()
     private var adapter: NewsAdapter? = null
     private var loadSeq = 0   // 列表异步加载序号：旧查询后到不覆盖新结果
+    private var statusSeq = 0 // 状态卡异步刷新序号：旧查询后到不覆盖新文案
 
     // 同步进度回调（主线程），onResume 注册 / onPause 注销
     private val syncListener: (String) -> Unit = { updateStatusText(it) }
@@ -214,14 +215,16 @@ class ShizhengActivity : AppCompatActivity() {
     }
 
     private fun updateStatusText(liveMessage: String) {
-        // 题数/错题数/未分类数是 3-4 个 COUNT 查询，挪后台避免每次回本页都卡主线程
+        // 题数/错题数/未分类数是 3-4 个 COUNT 查询，挪后台避免每次回本页都卡主线程；
+        // seq 防乱序：同步期间每条进度都触发一次刷新，旧查询后到不覆盖新文案（同 loadNews 的 loadSeq）
+        val seq = ++statusSeq
         Thread {
             val qCount = ShizhengManager.questionCount()
             val wCount = ShizhengManager.wrongCount()
             val lastSync = ShizhengManager.lastSyncText()
             val pending = ShizhengManager.unclassifiedCount()
             runOnUiThread {
-                if (isFinishing || isDestroyed) return@runOnUiThread
+                if (isFinishing || isDestroyed || seq != statusSeq) return@runOnUiThread
                 renderStatusText(qCount, wCount, lastSync, pending, liveMessage)
             }
         }.start()

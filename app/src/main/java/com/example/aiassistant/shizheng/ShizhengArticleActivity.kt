@@ -111,15 +111,12 @@ class ShizhengArticleActivity : AppCompatActivity() {
         btn.text = "总结中…"
         Toast.makeText(this, "AI 总结中，约需 1-2 分钟…", Toast.LENGTH_SHORT).show()
 
-        Thread {
-            val result = ShizhengManager.summarizeArticleManually(a.id)
-            article = ShizhengManager.getNews(a.id)
-            runOnUiThread {
-                summarizing = false
-                Toast.makeText(this, result, Toast.LENGTH_LONG).show()
-                render()
-            }
-        }.start()
+        ShizhengManager.summarizeArticleManuallyAsync(a.id) { result, refreshed ->
+            article = refreshed
+            summarizing = false
+            Toast.makeText(this, result, Toast.LENGTH_LONG).show()
+            render()
+        }
     }
 
     private fun render() {

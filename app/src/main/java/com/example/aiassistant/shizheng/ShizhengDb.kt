@@ -379,6 +379,20 @@ class ShizhengDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB
         return writableDatabase.delete(T_WRONG_RECORDS, "$COL_QUESTION_ID = ?", arrayOf(questionId.toString()))
     }
 
+    /** 重做答对后移出错题本：清除该题全部作答记录并写入本次答对记录（同一事务，防进程中途被杀只清未写） */
+    fun replaceWrongRecords(record: ShizhengWrongRecord): Long {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            db.delete(T_WRONG_RECORDS, "$COL_QUESTION_ID = ?", arrayOf(record.questionId.toString()))
+            val id = insertWrongRecord(record)
+            db.setTransactionSuccessful()
+            return id
+        } finally {
+            db.endTransaction()
+        }
+    }
+
     /** 某题最近一次作答记录 */
     fun getLatestRecord(questionId: Long): ShizhengWrongRecord? {
         readableDatabase.query(

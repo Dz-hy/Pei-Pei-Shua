@@ -106,9 +106,14 @@ class ShizhengWrongDetailActivity : AppCompatActivity() {
         val answerIndex = q.answer.firstOrNull()?.minus('A') ?: -1
         val isCorrect = selected == answerIndex
 
-        // 作答记录后台写库
+        // 作答记录后台写库；错题本按「存在答错记录」判定成员（ShizhengDb.getWrongQuestionIds），
+        // 答对时须清除该题历史错题记录才能真正移出错题本——清除与写入本次答对记录包在同一事务内，
+        // 防进程中途被杀出现记录已清而本次答对未写入
         val record = ShizhengWrongRecord(questionId = q.id, selected = selected, isCorrect = isCorrect)
-        Thread { ShizhengManager.insertWrongRecord(record) }.start()
+        Thread {
+            if (isCorrect) ShizhengManager.replaceWrongRecords(record)
+            else ShizhengManager.insertWrongRecord(record)
+        }.start()
 
         optionViews.forEachIndexed { j, tv ->
             when (j) {
@@ -137,10 +142,15 @@ class ShizhengWrongDetailActivity : AppCompatActivity() {
             .setTitle("移出错题本")
             .setMessage("将清除该题的全部作答记录，确定吗？")
             .setPositiveButton("确定") { _, _ ->
-                // 清记录后台写库，UI 即刻退出
-                Thread { ShizhengManager.clearWrongRecords(q.id) }.start()
-                Toast.makeText(this, "已移出错题本", Toast.LENGTH_SHORT).show()
-                finish()
+                // 清记录完成后再退出：返回列表 onResume 会立刻重查错题表，
+                // 先 finish 会与之竞态读到删除前的旧数据（同长按删除新闻的先删完再刷新）
+                Thread {
+                    ShizhengManager.clearWrongRecords(q.id)
+                    runOnUiThread {
+                        Toast.makeText(this, "已移出错题本", Toast.LENGTH_SHORT).show()
+                        finish()
+                    }
+                }.start()
             }
             .setNegativeButton("取消", null)
             .show()

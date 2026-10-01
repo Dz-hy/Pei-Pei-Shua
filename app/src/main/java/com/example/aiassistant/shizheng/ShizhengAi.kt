@@ -214,7 +214,10 @@ object ShizhengAi {
             }
 
             val json = callAiJson(context, prompt, sb.toString()) ?: return null
-            val arr = json.optJSONArray("selections") ?: return emptyMap()
+            // 缺 "selections" 键属结构不符（模型输出异常），按调用失败处理待下次同步重试；
+            // 「未选中任何文章」由模型显式输出 {"selections":[]}，二者不可混同——
+            // 否则剩余待分类文章不足 4 篇时会被逐篇 markSkipped 永久跳过
+            val arr = json.optJSONArray("selections") ?: return null
             for (i in 0 until arr.length()) {
                 val obj = arr.optJSONObject(i) ?: continue
                 val idx = obj.optInt("index", -1) - 1

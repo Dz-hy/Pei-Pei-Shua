@@ -265,6 +265,19 @@ object ShizhengManager {
         return "总结完成，并已生成 1 道题（已入库，可在练习中刷到）"
     }
 
+    /**
+     * 手动总结的入口（UI 调用）：派发到与同步相同的单线程 executor 串行执行。
+     * AI 请求全局互斥（后发请求会取消在途请求），与同步管线并发调用会互踩，
+     * 故不能另起裸 Thread 直调；总结完成、重查文章后在主线程回调。
+     */
+    fun summarizeArticleManuallyAsync(newsId: Long, onDone: (result: String, article: NewsArticle?) -> Unit) {
+        executor.execute {
+            val result = summarizeArticleManually(newsId)
+            val refreshed = getNews(newsId)
+            mainHandler.post { onDone(result, refreshed) }
+        }
+    }
+
     /** 精选 + 分类 + 出题 + 自检（对一批新文章） */
     private fun processArticles(source: String, articles: List<NewsArticle>, quota: Int) {
         val label = NewsSources.label(source)
@@ -365,17 +378,21 @@ object ShizhengManager {
             onResult(0, 0)
             return
         }
-        executor.execute {
+        // 用临时线程而非同步 executor：否则长同步期间这两个 COUNT 会被压后数分钟才刷新
+        Thread {
             val total = db.questionCount()
             val wrong = db.wrongCount()
             mainHandler.post { onResult(total, wrong) }
-        }
+        }.start()
     }
     fun getWrongQuestionIds(): List<Long> = db.getWrongQuestionIds()
 
     fun insertWrongRecord(record: ShizhengWrongRecord) { db.insertWrongRecord(record) }
     fun getLatestRecord(questionId: Long): ShizhengWrongRecord? = db.getLatestRecord(questionId)
     fun clearWrongRecords(questionId: Long): Int = db.clearWrongRecords(questionId)
+
+    /** 重做答对：清除该题全部作答记录并写入本次答对记录（同一事务，见 ShizhengDb.replaceWrongRecords） */
+    fun replaceWrongRecords(record: ShizhengWrongRecord) { db.replaceWrongRecords(record) }
 
     /** 删除时政新闻及其关联题目与作答记录 */
     fun deleteNews(newsId: Long) { db.deleteNews(newsId) }
