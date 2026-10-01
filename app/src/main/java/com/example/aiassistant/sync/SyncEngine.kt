@@ -51,6 +51,9 @@ object SyncEngine {
     private fun runSync(context: Context): SyncStats {
         val startedAt = System.currentTimeMillis()
         fun fail(msg: String): SyncStats = SyncStats(startedAt, System.currentTimeMillis(), false, msg)
+        // 网络异常(code=-1)报异常消息，其余报 HTTP 状态码——中途任何一步失败都按失败上报，
+        // 不刷新 lastSyncAt（数据集循环里失败一律按"无远端文件"继续会静默漏同步）
+        fun davErr(r: SyncWebDav.DavResponse): String = if (r.code == -1) r.message else "HTTP ${r.code}"
         if (!SyncPrefs.isConfigured(context)) return fail("未配置 WebDAV")
 
         val dav = SyncWebDav(SyncPrefs.webdavUrl(context), SyncPrefs.webdavUser(context), SyncPrefs.webdavPass(context))
@@ -75,40 +78,42 @@ object SyncEngine {
         )
 
         val stats = mutableListOf<DatasetStat>()
-        val allBlobs = mutableMapOf<String, ByteArray>()
 
-        // 3. 每数据集：PROPFIND 列文件 -> GET 非自己 -> 导出 -> 合并 -> 应用 -> PUT
+        // 3. 每数据集：PROPFIND 列文件 -> GET 非自己 -> 导出（blob 边导出边上传）-> 合并 -> 应用 -> PUT
         for (ds in ALL_DATASETS) {
             if (ds == DS_API_KEYS && !SyncPrefs.syncApiKeys(context)) continue
             try {
                 // 数据集子目录必须先存在（真实 WebDAV 对 PUT 到不存在父目录回 409）
                 val mkds = dav.mkcolRecursive(REMOTE_DIR, "datasets", ds)
+                if (mkds.code == -1) return fail("WebDAV 连接失败：${mkds.message}")
                 if (mkds.code >= 400 && !mkds.isExists) return fail("建目录失败 $ds HTTP ${mkds.code}")
                 val listing = dav.list("$REMOTE_DIR/datasets/$ds/")
-                val files = if (listing.ok) dav.parseNames(listing) else emptyList()
+                if (!listing.ok) return fail("拉取 $ds 列表失败：${davErr(listing)}")
+                val files = dav.parseNames(listing)
                 val remotes = mutableListOf<SyncRow>()
                 for (name in files) {
                     val fid = SyncWebDav.deviceIdFromFileName(name)
                     if (fid == deviceId || fid.isBlank()) continue
                     val resp = dav.get(SyncWebDav.datasetPath(ds, fid))
-                    if (!resp.ok) continue
+                    if (resp.code == 404) continue   // 列表后文件已被对端删掉：按无远端处理
+                    if (!resp.ok) return fail("拉取 $ds 失败：${davErr(resp)}")
                     val f = SyncFileCodec.decode(String(resp.body, Charsets.UTF_8)) ?: continue
                     remotes.addAll(f.rows)
                 }
-                val exported = SyncData.export(context, ds)
-                allBlobs.putAll(exported.pendingBlobs)
+                val exported = SyncData.export(context, ds, dav)
                 val merged = SyncMerge.merge(ds, exported.rows, remotes)
                 SyncData.apply(context, ds, merged, dav)
                 val own = SyncFile(deviceId, SyncPrefs.deviceName(context), System.currentTimeMillis(), merged)
-                dav.put(SyncWebDav.datasetPath(ds, deviceId), SyncFileCodec.encode(own).toByteArray(Charsets.UTF_8))
+                val pushed = dav.put(SyncWebDav.datasetPath(ds, deviceId), SyncFileCodec.encode(own).toByteArray(Charsets.UTF_8))
+                if (!pushed.ok) return fail("上传 $ds 失败：${davErr(pushed)}")
                 stats.add(DatasetStat(ds, merged.size, 0))
             } catch (e: Exception) {
                 return fail("${ds}: ${e.message ?: e.javaClass.simpleName}")
             }
         }
 
-        // 4. blob 上传（GET 探重，404 才传）
-        val uploaded = SyncData.uploadNewBlobs(dav, allBlobs)
+        // 4. blob 缓存按上限裁剪，防 filesDir/sync_blobs 随历史同步无限增长
+        SyncData.pruneBlobCache(context)
 
         SyncPrefs.setLastSyncAt(context, System.currentTimeMillis())
         return SyncStats(startedAt, System.currentTimeMillis(), true, null, stats)

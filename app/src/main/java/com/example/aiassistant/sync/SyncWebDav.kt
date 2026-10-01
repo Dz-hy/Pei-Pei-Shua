@@ -45,6 +45,10 @@ class SyncWebDav(baseUrl: String, user: String, pass: String) {
     fun get(path: String): DavResponse =
         exec(Request.Builder().url(root + path).withAuth().get().build())
 
+    /** HEAD：只探存在性不拉响应体（blob 探重用，避免把历史 blob 整包下载一遍） */
+    fun head(path: String): DavResponse =
+        exec(Request.Builder().url(root + path).withAuth().head().build())
+
     fun put(path: String, bytes: ByteArray): DavResponse =
         exec(
             Request.Builder().url(root + path).withAuth()

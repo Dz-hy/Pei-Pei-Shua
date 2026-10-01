@@ -42,6 +42,12 @@ object SyncMerge {
         val summarized = d.optBoolean("is_summarized", false) || o.optBoolean("is_summarized", false)
         var summary = d.optString("summary")
         if (summary.isBlank()) summary = o.optString("summary")
+        // 截图 blob 引用同理只增不减：胜出行缺 image_blob 时从另一行回收，
+        // 防止平局按字典序胜出的无图行把带图版本的引用从合并结果里挤掉
+        if (d.optString("image_blob").isBlank() && o.optString("image_blob").isNotBlank()) {
+            d.put("image_blob", o.optString("image_blob"))
+            d.put("image_mime", o.optString("image_mime"))
+        }
         d.put("wrong_count", wc)
         d.put("mastered", if (mastered) 1 else 0)
         d.put("is_summarized", if (summarized) 1 else 0)

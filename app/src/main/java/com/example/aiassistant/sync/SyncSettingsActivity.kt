@@ -8,6 +8,8 @@ import com.example.aiassistant.R
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.switchmaterial.SwitchMaterial
 import com.google.android.material.textfield.TextInputEditText
+import java.lang.ref.WeakReference
+import java.net.URI
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -73,17 +75,29 @@ class SyncSettingsActivity : AppCompatActivity() {
             .show()
     }
 
-    private fun saveInputs() {
-        SyncPrefs.setWebdavUrl(this, etUrl.text?.toString()?.trim().orEmpty()
-            .ifBlank { SyncProtocol.DEFAULT_WEBDAV_URL })
+    /** @return false = 输入不合法未保存 */
+    private fun saveInputs(): Boolean {
+        val url = etUrl.text?.toString()?.trim().orEmpty().ifBlank { SyncProtocol.DEFAULT_WEBDAV_URL }
+        // 凭据只上 HTTPS：http 一律拒存；仅 NSC 明文白名单内的回环地址放行
+        // （localhost 不在 network_security_config 白名单里，放行保存后会被 cleartext 拦截报连接失败）
+        val host = runCatching { URI(url).host }.getOrNull() ?: ""
+        val loopback = host == "10.0.2.2" || host == "127.0.0.1"
+        if (!url.startsWith("https://", ignoreCase = true) &&
+            !(url.startsWith("http://", ignoreCase = true) && loopback)
+        ) {
+            Toast.makeText(this, "WebDAV 地址需以 https:// 开头（本机联调可用 http://10.0.2.2）", Toast.LENGTH_LONG).show()
+            return false
+        }
+        SyncPrefs.setWebdavUrl(this, url)
         SyncPrefs.setWebdavAccount(this, etUser.text?.toString().orEmpty(), etPass.text?.toString().orEmpty())
         SyncPrefs.setDeviceName(this, etDevice.text?.toString().orEmpty()
             .ifBlank { SyncPrefs.deviceName(this) })
         SyncPrefs.setSyncApiKeys(this, switchApiKeys.isChecked)
+        return true
     }
 
     private fun onSyncClicked() {
-        saveInputs()
+        if (!saveInputs()) return
         if (!SyncPrefs.isConfigured(this)) {
             Toast.makeText(this, "请先填写 WebDAV 账号与应用密码", Toast.LENGTH_SHORT).show()
             return
@@ -91,14 +105,18 @@ class SyncSettingsActivity : AppCompatActivity() {
         btnSync.isEnabled = false
         btnSync.text = "同步中…"
         tvStatus.text = "正在同步（拉取远端 → 合并 → 写回本地 → 上传）…"
+        // 弱引用持有 Activity：回调滞留在 sync-engine 队列期间不阻止页面回收；已销毁则放弃更新
+        val ref = WeakReference(this)
         SyncEngine.syncNow(this) { stats ->
-            runOnUiThread {
-                btnSync.isEnabled = true
-                btnSync.text = "立即同步"
+            val act = ref.get() ?: return@syncNow
+            act.runOnUiThread {
+                if (act.isDestroyed || act.isFinishing) return@runOnUiThread
+                act.btnSync.isEnabled = true
+                act.btnSync.text = "立即同步"
                 if (stats == null) {
-                    tvStatus.text = "已有一轮同步在进行，请稍后再试"
+                    act.tvStatus.text = "已有一轮同步在进行，请稍后再试"
                 } else {
-                    renderStats(stats)
+                    act.renderStats(stats)
                 }
             }
         }
