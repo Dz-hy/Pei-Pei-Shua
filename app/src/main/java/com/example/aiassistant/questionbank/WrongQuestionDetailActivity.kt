@@ -35,6 +35,7 @@ import com.example.aiassistant.capDialogWidth
 import com.example.aiassistant.handwriting.HandwritingController
 import com.example.aiassistant.skills.ToolRegistry
 import com.google.android.material.checkbox.MaterialCheckBox
+import androidx.core.content.FileProvider
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -66,10 +67,14 @@ class WrongQuestionDetailActivity : AppCompatActivity() {
     private lateinit var hw: HandwritingController
     // AI 解析故障转移句柄：页面销毁时取消
     private var aiFailover: com.example.aiassistant.AiFailoverExecutor? = null
+    // 重新匹配进度框（不可取消）：页面销毁时兜底关闭，避免窗口泄漏（WindowLeaked）
+    private var rematchProgress: android.app.ProgressDialog? = null
 
     override fun onDestroy() {
         aiFailover?.cancel()
         aiFailover = null
+        rematchProgress?.dismiss()
+        rematchProgress = null
         super.onDestroy()
     }
 
@@ -181,9 +186,12 @@ class WrongQuestionDetailActivity : AppCompatActivity() {
             setCancelable(false)
             show()
         }
+        rematchProgress = progress
         com.example.aiassistant.questionbank.QuestionMatcher.match(this, item.questionText) { result ->
             runOnUiThread {
+                if (isDestroyed || isFinishing) return@runOnUiThread  // 已销毁：进度框由 onDestroy 兜底关闭
                 progress.dismiss()
+                rematchProgress = null
                 val candidates = result.candidates
                 when {
                     result.confidence == com.example.aiassistant.questionbank.QuestionMatcher.CONF_AUTO && result.question != null -> {
@@ -213,10 +221,19 @@ class WrongQuestionDetailActivity : AppCompatActivity() {
     }
 
     private fun applyRematch(question: Question) {
-        WrongQuestionManager.updateSnapshot(this, currentId, question)
-        cachedItem = null
-        Toast.makeText(this, "已匹配题库原题，OCR 原文已清除", Toast.LENGTH_SHORT).show()
-        recreate()
+        val appContext = applicationContext
+        val id = currentId
+        // 快照含 base64 解析图，序列化+写库可达数 MB，放后台线程避免主线程卡顿；
+        // 写完再回主线程 recreate，保证重建后读到新快照
+        Thread {
+            WrongQuestionManager.updateSnapshot(appContext, id, question)
+            runOnUiThread {
+                if (isDestroyed || isFinishing) return@runOnUiThread
+                cachedItem = null
+                Toast.makeText(this, "已匹配题库原题，OCR 原文已清除", Toast.LENGTH_SHORT).show()
+                recreate()
+            }
+        }.start()
     }
 
     private fun loadDetail() {
@@ -353,13 +370,20 @@ class WrongQuestionDetailActivity : AppCompatActivity() {
             cardAnalysisSection.visibility = View.VISIBLE
             tvAnalysis.text = HtmlAnalysis.render(item.bankAnalysis, tvAnalysis)
 
-            // 获取题目类型
-            val moduleName = QuestionBankManager.getQuestionModuleName(item.bankQuestionId)
-            currentQuestionType = mapModuleToQuestionType(moduleName)
+            // 获取题目类型：模块名查库改走异步版，消除主线程渲染路径上的两次 SQLite 查询；
+            // 回调在 QuestionBankManager 的后台执行器线程到达，UI 操作切回主线程并防页面已销毁。
+            // 置亮前进按钮先置灰，避免模块名未查到时点击落入通用解析路径
+            btnStartAi.isEnabled = false
+            QuestionBankManager.getQuestionModuleNameAsync(item.bankQuestionId) { moduleName ->
+                runOnUiThread {
+                    if (isDestroyed || isFinishing) return@runOnUiThread
+                    currentQuestionType = mapModuleToQuestionType(moduleName)
 
-            // 大模块（数量关系/资料分析/常识判断等）无专属题型模板：不按钮置灰，
-            // 走通用 AI 解析（见 GENERIC_ANALYSIS_PROMPT）
-            btnStartAi.isEnabled = true
+                    // 大模块（数量关系/资料分析/常识判断等）无专属题型模板：不按钮置灰，
+                    // 走通用 AI 解析（见 GENERIC_ANALYSIS_PROMPT）
+                    btnStartAi.isEnabled = true
+                }
+            }
             btnStartAi.text = "AI 解析"
             btnStartAi.alpha = 1f
         } else {
@@ -1242,10 +1266,10 @@ class WrongQuestionDetailActivity : AppCompatActivity() {
                         Toast.makeText(this, "保存图片失败", Toast.LENGTH_SHORT).show()
                     }
                 }
-            } catch (e: Exception) {
-                e.printStackTrace()
+            } catch (t: Throwable) {  // 含 OutOfMemoryError：长图分配可达 ≈64MB，堆紧张时抛 Error
+                t.printStackTrace()
                 runOnUiThread {
-                    Toast.makeText(this, "导出失败: ${e.message}", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, "导出失败: ${t.message}", Toast.LENGTH_SHORT).show()
                 }
             }
         }.start()
@@ -1396,14 +1420,16 @@ class WrongQuestionDetailActivity : AppCompatActivity() {
 
         // 绘制正确答案
         if (item.isFromBank && item.bankAnswer.isNotEmpty()) {
-            val answerHeight = cardPadding + 20 * density + cardPadding + 10 * density
+            // 卡片高度与高度预算一致（cardPadding+20d+cardPadding），y 前进卡片全高+cardMargin：
+            // 前进量小于卡片高度会让下方卡片覆盖答案卡底部
+            val answerHeight = cardPadding + 20 * density + cardPadding
             drawRoundRect(canvas, padding.toFloat(), y, (widthPx - padding).toFloat(),
                 y + answerHeight, cornerRadius, Color.parseColor("#E8F5E9"))
-            y += cardPadding
-            canvas.drawText("正确答案", (padding + cardPadding).toFloat(), y + 16 * density, titlePaint)
+            val textTop = y + cardPadding
+            canvas.drawText("正确答案", (padding + cardPadding).toFloat(), textTop + 16 * density, titlePaint)
             canvas.drawText(item.bankAnswer, (padding + cardPadding + 80 * density),
-                y + 20 * density, answerPaint)
-            y += cardPadding + 10 * density + cardMargin
+                textTop + 20 * density, answerPaint)
+            y += answerHeight + cardMargin
         }
 
         // 绘制解析
@@ -1443,6 +1469,10 @@ class WrongQuestionDetailActivity : AppCompatActivity() {
             var remaining = paragraph
             while (remaining.isNotEmpty()) {
                 val breakPos = paint.breakText(remaining, true, maxWidth, null)
+                if (breakPos <= 0) {  // 防御：breakText 异常返回 0 时按整段兜底，避免 cutPos 恒 0 死循环
+                    lines.add(remaining)
+                    break
+                }
                 if (breakPos >= remaining.length) {
                     lines.add(remaining)
                     break
@@ -1486,13 +1516,15 @@ class WrongQuestionDetailActivity : AppCompatActivity() {
             }
             uri
         } else {
-            val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), "AI伴学")
+            // API 26-28 未声明存储权限，写公共 Pictures 目录必失败（EACCES）；改写应用 cache 目录
+            // （Manifest 的 FileProvider 已配 cache-path），经 content:// 分享避免 FileUriExposedException
+            val dir = File(cacheDir, "AI伴学")
             if (!dir.exists()) dir.mkdirs()
             val file = File(dir, fileName)
             FileOutputStream(file).use { fos ->
                 bitmap.compress(Bitmap.CompressFormat.JPEG, 95, fos)
             }
-            Uri.fromFile(file)
+            FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
         }
     }
 

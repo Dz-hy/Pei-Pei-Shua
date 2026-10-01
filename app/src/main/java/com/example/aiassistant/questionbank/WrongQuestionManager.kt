@@ -121,9 +121,10 @@ object WrongQuestionManager {
         getDb(context).setMeta(META_MIGRATED, "0")
     }
 
-    @Synchronized
     fun getWrongQuestions(context: Context): List<WrongQuestion> {
-        migrateIfNeeded(context)
+        synchronized(this) { migrateIfNeeded(context) }
+        // 全表快照反序列化可达秒级，不持对象锁执行：避免后台加载期间阻塞主线程的
+        // 单行读写（getWrongQuestion/setMastered）；WCDB 单次查询自身一致，无需外层互斥
         return getDb(context).listAll().sortedByDescending { it.timestamp }
     }
 
@@ -162,7 +163,7 @@ object WrongQuestionManager {
     fun recordBankWrong(context: Context, question: Question): Boolean {
         val db = getDb(context)
         migrateIfNeeded(context)
-        val existing = db.listAll().firstOrNull { it.bankQuestionId == question.id }
+        val existing = db.findByBankQuestionId(question.id)
         if (existing != null) {
             val values = ContentValues().apply {
                 put("timestamp", System.currentTimeMillis())
@@ -177,9 +178,29 @@ object WrongQuestionManager {
         return true
     }
 
-    /** 从题库数据录入错题（存完整快照；OCR 文本不保存，只存截图） */
+    /** 从题库数据录入错题（存完整快照；OCR 文本不保存，只存截图）。按 bankQuestionId 判重，
+     *  已收录（如悬浮球截图练习已错题）复用原记录，避免同题重复建卡、wrongCount 统计分裂 */
     @Synchronized
     fun addFromBank(context: Context, question: Question, bitmap: Bitmap?): WrongQuestion {
+        val db = getDb(context)
+        migrateIfNeeded(context)
+        val existing = db.findByBankQuestionId(question.id)
+        if (existing != null) {
+            val values = ContentValues().apply {
+                put("timestamp", System.currentTimeMillis())
+                put("wrong_count", existing.wrongCount + 1)
+                put("mastered", 0)
+                // 原记录无截图而本次带截图时补上，详情页可见题面原图
+                if (bitmap != null && existing.imagePath.isEmpty()) {
+                    put("image_path", saveBitmap(context, existing.id, bitmap))
+                }
+            }
+            db.updateColumns(existing.id, values)
+            // 计时联动：记录"第几题 + 该题已用时"（未在计时则为空操作）
+            com.example.aiassistant.TimerEngine.noteWrongCapture()
+            com.example.aiassistant.sync.SyncEngine.schedule(context)
+            return db.getById(existing.id) ?: existing
+        }
         // UUID 而非毫秒时间戳：交卷后循环连续收录多题，同毫秒 id 会触发 REPLACE 静默覆盖丢题
         val id = java.util.UUID.randomUUID().toString()
         val imagePath = saveBitmap(context, id, bitmap)
@@ -228,12 +249,14 @@ object WrongQuestionManager {
             put("ocr_text", "")
         }
         getDb(context).updateColumns(id, values)
+        com.example.aiassistant.sync.SyncEngine.schedule(context)
     }
 
     /** 重做掌握标记 */
     @Synchronized
     fun setMastered(context: Context, id: String, mastered: Boolean) {
         getDb(context).updateColumn(id, "mastered", if (mastered) "1" else "0")
+        com.example.aiassistant.sync.SyncEngine.schedule(context)
     }
 
     private fun saveBitmap(context: Context, id: String, bitmap: Bitmap?): String {
@@ -262,12 +285,14 @@ object WrongQuestionManager {
             put("summary", summary)
         }
         getDb(context).updateColumns(id, values)
+        com.example.aiassistant.sync.SyncEngine.schedule(context)
     }
 
     /** 保存手写批注笔画 JSON */
     @Synchronized
     fun updateAnnotation(context: Context, id: String, annotationJson: String) {
         getDb(context).updateColumn(id, "annotation_json", annotationJson)
+        com.example.aiassistant.sync.SyncEngine.schedule(context)
     }
 
     /** 读取手写批注笔画 JSON，无记录返回 null */

@@ -202,6 +202,30 @@ class WrongQuestionDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, nul
         }
     }
 
+    /** 按题库原题 id 单行查询（判重用）：只反序列化命中行的快照，避免为匹配一个 id 全表解析 JSON */
+    fun findByBankQuestionId(bankQuestionId: String): WrongQuestion? {
+        readableDatabase.rawQuery(
+            "SELECT id, timestamp, image_path, ocr_text, snapshot, bank_question_id, summary, is_summarized, annotation_json, wrong_count, mastered FROM $T_WRONG WHERE bank_question_id = ? LIMIT 1",
+            arrayOf(bankQuestionId)
+        ).use { c ->
+            if (!c.moveToFirst()) return null
+            val snapshot = WrongSnapshotCodec.fromJson(c.getString(4) ?: "")
+            return WrongQuestion(
+                id = c.getString(0),
+                questionText = c.getString(3) ?: "",
+                imagePath = c.getString(2) ?: "",
+                timestamp = c.getLong(1),
+                isSummarized = c.getInt(7) != 0,
+                summary = c.getString(6) ?: "",
+                bankQuestionId = c.getString(5) ?: "",
+                annotationJson = c.getString(8) ?: "",
+                wrongCount = c.getInt(9),
+                mastered = c.getInt(10) != 0,
+                snapshot = snapshot
+            )
+        }
+    }
+
     fun insert(q: WrongQuestion) {
         writableDatabase.insertWithOnConflict(T_WRONG, null, toValues(q), SQLiteDatabase.CONFLICT_REPLACE)
     }

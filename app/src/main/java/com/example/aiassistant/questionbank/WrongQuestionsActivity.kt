@@ -108,7 +108,7 @@ class WrongQuestionsActivity : AppCompatActivity() {
         }
 
         updateTabStyles()
-        loadWrongQuestions()
+        // 首次加载交给 onResume：onCreate 后必然走到 onResume，这里再调一次会双倍全量加载
     }
 
     override fun onResume() {
@@ -241,16 +241,29 @@ class WrongQuestionsActivity : AppCompatActivity() {
 
     /** 错题重练：按当前 tab + 卷名筛选、排除已掌握、只抽有结构化题面的错题随机组卷 */
     private fun startWrongPractice() {
-        val pool = WrongQuestionManager.getWrongQuestions(this)
-            .filter { it.snapshot != null && !it.mastered }
-            .filter {
-                when (currentFilter) {
-                    SourceFilter.ALL -> true
-                    SourceFilter.BANK -> it.isFromBank
-                    SourceFilter.OCR -> !it.isFromBank
+        // 筛选状态先在主线程取值，避免后台线程读到过期字段
+        val filter = currentFilter
+        val source = selectedSource
+        // 全表快照反序列化含数 MB base64 解析图，放后台线程避免主线程卡顿（同 loadWrongQuestions）
+        Thread {
+            val pool = WrongQuestionManager.getWrongQuestions(this)
+                .filter { it.snapshot != null && !it.mastered }
+                .filter {
+                    when (filter) {
+                        SourceFilter.ALL -> true
+                        SourceFilter.BANK -> it.isFromBank
+                        SourceFilter.OCR -> !it.isFromBank
+                    }
                 }
+                .filter { source == null || it.snapshot?.source == source }
+            runOnUiThread {
+                if (isDestroyed || isFinishing) return@runOnUiThread
+                showWrongPracticeDialog(pool)
             }
-            .filter { selectedSource == null || it.snapshot?.source == selectedSource }
+        }.start()
+    }
+
+    private fun showWrongPracticeDialog(pool: List<WrongQuestion>) {
         if (pool.isEmpty()) {
             Toast.makeText(this, "当前筛选下没有可重练的错题（纯OCR题无法重做）", Toast.LENGTH_SHORT).show()
             return
