@@ -154,9 +154,10 @@ class HandwritingController(
         overlay.visibility = View.GONE
     }
 
-    /** 页面 onPause 时调用：编辑中自动保存并退出编辑态 */
+    /** 页面 onPause 时调用：编辑中自动保存并退出编辑态。
+     *  此入口同步落库：onPause 返回后进程随时可能被杀，异步保存有丢最后一笔的窗口（其余入口无此风险） */
     fun onPause() {
-        if (editing) exitEditing(save = true)
+        if (editing) exitEditing(save = true, syncSave = true)
     }
 
     private fun showOverlay(interactive: Boolean) {
@@ -164,20 +165,36 @@ class HandwritingController(
         overlay.visibility = View.VISIBLE
     }
 
-    private fun exitEditing(save: Boolean) {
+    private fun exitEditing(save: Boolean, syncSave: Boolean = false) {
         if (!editing) return
         editing = false
         overlay.isEnabled = false
         toolbar?.visibility = View.GONE
-        if (save) saveNow()
+        if (save) saveNow(syncSave)
         if (!overlay.hasStrokes()) overlay.visibility = View.GONE
     }
 
-    private fun saveNow() {
+    private fun saveNow(syncSave: Boolean) {
         val id = currentId ?: return
-        val json = overlay.toJson()
-        android.util.Log.d("HWDebug", "saveNow id=$id jsonLen=${json.length}")
-        saver(id, json)
+        // 主线程只取引用快照：序列化可达数百 KB、部分 saver 还是同步写库，
+        // 放后台线程执行，避免切题/收起/完成时卡主线程（与 revealAnnotation 的异步加载对偶）
+        val snapshot = overlay.strokesSnapshot()
+        if (syncSave) {
+            // onPause：落库完成后才能返回，保证进程被杀也不丢笔迹（与异步化前的 onPause 行为一致）
+            writeSnapshot(id, snapshot)
+            return
+        }
+        Thread { writeSnapshot(id, snapshot) }.start()
+    }
+
+    private fun writeSnapshot(id: String, snapshot: List<Stroke>) {
+        try {
+            val json = Stroke.listToJson(snapshot)
+            android.util.Log.d("HWDebug", "saveNow id=$id jsonLen=${json.length}")
+            saver(id, json)
+        } catch (e: Exception) {
+            android.util.Log.w("HWDebug", "saveNow failed id=$id", e)
+        }
     }
 
     // ── 工具栏 ─────────────────────────────────────────────────────────

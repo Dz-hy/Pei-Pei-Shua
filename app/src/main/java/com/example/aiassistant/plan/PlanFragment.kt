@@ -44,6 +44,11 @@ class PlanFragment : Fragment() {
     private val dateFormat = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
     private val showFormat = SimpleDateFormat("M月d日", Locale.getDefault())
 
+    // 异步查询代序号：回调只认最新一次查询。查询走单线程队列，刚交卷的大快照落库会长时间
+    // 占住队列，期间切换日期/月份后旧结果若照常渲染，会把旧日期的数据套在新标题/日历上
+    private var calendarReqSeq = 0
+    private var historyReqSeq = 0
+
     private val bankReadyListener: () -> Unit = {
         if (isAdded) refreshAll()
     }
@@ -136,14 +141,20 @@ class PlanFragment : Fragment() {
     }
 
     private fun loadCalendar() {
-        tvMonthTitle.text = "${currentYear}年${currentMonth}月"
+        // 快照调用时状态：回调执行时字段可能已变（单线程队列积压），不能在回调里重读
+        val year = currentYear
+        val month = currentMonth
+        val selected = selectedDate
+        tvMonthTitle.text = "${year}年${month}月"
 
         // 走管理器单线程队列：避免与 savePracticeSession 竞态（刚做完训练回来收不到记录）
-        QuestionBankManager.getPracticeSessionDatesAsync(currentYear, currentMonth) { sessionDates ->
+        val seq = ++calendarReqSeq
+        QuestionBankManager.getPracticeSessionDatesAsync(year, month) { sessionDates ->
             activity?.runOnUiThread {
-                if (!isAdded) return@runOnUiThread
+                // 过期结果兜底：加载期间又发了新查询则丢弃（保序，必有更新的回调跟进）
+                if (!isAdded || seq != calendarReqSeq) return@runOnUiThread
                 val cal = Calendar.getInstance()
-                cal.set(currentYear, currentMonth - 1, 1)
+                cal.set(year, month - 1, 1)
                 val firstDayOfWeek = cal.get(Calendar.DAY_OF_WEEK) - 1
                 val daysInMonth = cal.getActualMaximum(Calendar.DAY_OF_MONTH)
 
@@ -153,12 +164,12 @@ class PlanFragment : Fragment() {
                 }
                 val todayStr = dateFormat.format(Date())
                 for (d in 1..daysInMonth) {
-                    val dateStr = String.format("%04d-%02d-%02d", currentYear, currentMonth, d)
+                    val dateStr = String.format("%04d-%02d-%02d", year, month, d)
                     days.add(CalendarDay(
                         day = d,
                         dateStr = dateStr,
                         isToday = dateStr == todayStr,
-                        isSelected = dateStr == selectedDate,
+                        isSelected = dateStr == selected,
                         hasSession = dateStr in sessionDates
                     ))
                 }
@@ -170,16 +181,20 @@ class PlanFragment : Fragment() {
     // ── 做题历史 ──────────────────────────────────────────────────────
 
     private fun loadHistory() {
-        QuestionBankManager.getPracticeSessionsByDateAsync(selectedDate) { sessions ->
+        // 快照调用时日期：回调执行时 selectedDate 可能已指向新点选的日期
+        val date = selectedDate
+        val seq = ++historyReqSeq
+        QuestionBankManager.getPracticeSessionsByDateAsync(date) { sessions ->
             activity?.runOnUiThread {
-                if (!isAdded) return@runOnUiThread
+                // 过期结果兜底：加载期间又发了新查询则丢弃，避免旧日期列表套新标题、污染绿点自愈
+                if (!isAdded || seq != historyReqSeq) return@runOnUiThread
                 historyAdapter.setData(sessions)
-                tvHistoryTitle.text = "做题历史 · ${showFormat.format(dateFormat.parse(selectedDate) ?: Date())}"
+                tvHistoryTitle.text = "做题历史 · ${showFormat.format(dateFormat.parse(date) ?: Date())}"
                 tvEmpty.visibility = if (sessions.isEmpty()) View.VISIBLE else View.GONE
                 rvHistory.visibility = if (sessions.isEmpty()) View.GONE else View.VISIBLE
                 // 自愈：以当天列表实查结果校准日历绿点，杜绝"有点无记录"的幽灵打点
                 // （打点走 DISTINCT 月度前缀查询，列表走精确等值查询，异常/脏行时两者可能分裂）
-                calendarAdapter.updateDaySession(selectedDate, sessions.isNotEmpty())
+                calendarAdapter.updateDaySession(date, sessions.isNotEmpty())
             }
         }
     }

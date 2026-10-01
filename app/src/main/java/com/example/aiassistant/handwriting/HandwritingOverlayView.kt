@@ -84,6 +84,9 @@ class HandwritingOverlayView(context: Context) : View(context) {
 
     fun toJson(): String = Stroke.listToJson(strokes)
 
+    /** 主线程调用：笔画引用快照（Stroke 创建后不可变），供后台线程序列化，避免主线程全量 JSON 序列化 */
+    fun strokesSnapshot(): List<Stroke> = strokes.toList()
+
     fun loadFromJson(json: String) {
         strokes.clear()
         currentPoints.clear()

@@ -23,7 +23,13 @@ data class Stroke(val brush: Int, val points: FloatArray) {
                 val arr = obj.optJSONArray("p") ?: return null
                 if (arr.length() < 2) return null
                 val pts = FloatArray(arr.length())
-                for (i in 0 until arr.length()) pts[i] = arr.optDouble(i).toFloat()
+                for (i in 0 until arr.length()) {
+                    val v = arr.optDouble(i).toFloat()
+                    // 损坏的 JSON 经 optDouble 变 NaN/Infinity：丢弃整条笔画，
+                    // 否则绘制与命中失效，且下次保存时 put(NaN) 会直接抛异常崩溃
+                    if (!v.isFinite()) return null
+                    pts[i] = v
+                }
                 Stroke(obj.optInt("b", 0), pts)
             } catch (_: Exception) {
                 null
