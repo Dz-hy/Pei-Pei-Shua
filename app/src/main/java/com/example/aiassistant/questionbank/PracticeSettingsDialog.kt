@@ -121,14 +121,25 @@ class PracticeSettingsDialog : DialogFragment() {
         }
     }
 
+    // 最近一次计数查询的序号：拖动滑块会连续触发查询，只应用最新结果（防旧结果晚到覆盖新值）
+    private var countQuerySeq = 0
+
     private fun updateQuestionCount(view: View, rateMin: Int, rateMax: Int) {
         val tvQuestionCountHint = view.findViewById<TextView>(R.id.tv_question_count_hint)
         if (!QuestionBankManager.isLoaded()) {
             tvQuestionCountHint.text = "题库加载中..."
             return
         }
-        val count = QuestionBankManager.getQuestionCountByRateRange(moduleId, rateMin, rateMax)
-        tvQuestionCountHint.text = "符合条件的题目: $count 题"
+        val mid = moduleId
+        val seq = ++countQuerySeq
+        // COUNT 查询挪后台：滑块拖动期间每次 value 回调都走到这里，主线程同步查库会连续卡顿
+        Thread {
+            val count = QuestionBankManager.getQuestionCountByRateRange(mid, rateMin, rateMax)
+            activity?.runOnUiThread {
+                if (!isAdded || seq != countQuerySeq) return@runOnUiThread
+                tvQuestionCountHint.text = "符合条件的题目: $count 题"
+            }
+        }.start()
     }
 
     private fun getSelectedQuestionCount(view: View): Int {

@@ -636,7 +636,9 @@ try {
                 val json = QuestionBankManager.getAnnotation(qid)
                 if (!json.isNullOrBlank()) {
                     runOnUiThread {
-                        if (!destroyed && !isFinishing && currentIndex == targetIndex) {
+                        // 编辑中不覆盖（同 revealAnnotation 的 editing 守卫）：用户已抢先进入手写编辑，
+                        // 晚到的旧快照直接丢弃，避免强制退出编辑、画布被回滚（新笔迹已存库不丢失）
+                        if (!destroyed && !isFinishing && currentIndex == targetIndex && !hw.isEditing()) {
                             hw.onQuestionChanged(qid, json)
                         }
                     }
@@ -684,7 +686,7 @@ try {
             val tvText = optionView.findViewById<TextView>(R.id.tv_option_text)
             val ivImage = optionView.findViewById<ImageView>(R.id.iv_option_image)
 
-            tvLabel.text = labels[i]
+            tvLabel.text = labels.getOrElse(i) { i.toString() }  // 选项超 8 个的兜底标签（同 buildAiUserMessage）
 
             // 优先使用HTML格式
             if (option.html.isNotEmpty()) {
@@ -890,6 +892,7 @@ try {
         correctCount = 0
         wrongCount = 0
         results = arrayOfNulls(questions.size)
+        val masteredIds = mutableListOf<String>()  // 待标"已掌握"的错题记录 id，主线程只收集不写库
         questions.forEachIndexed { i, q ->
             val sel = selectedOptions[i]
             if (sel >= 0) {
@@ -907,12 +910,20 @@ try {
                 results[i] = correct
                 if (correct) {
                     correctCount++
-                    // 错题重练答对：标记已掌握（记录保留，列表默认隐藏）
+                    // 错题重练答对：标记已掌握（记录保留，列表默认隐藏）；此处只收集 id
                     if (isWrongPractice) {
-                        wrongIdByQuestionId[q.id]?.let { WrongQuestionManager.setMastered(this, it, true) }
+                        wrongIdByQuestionId[q.id]?.let { masteredIds.add(it) }
                     }
                 } else wrongCount++
             }
+        }
+
+        // setMastered 是同步 SQLite 写（每题一次磁盘提交），主线程逐题直写会卡住交卷瞬间，
+        // 与下方错题收录一样挪后台线程串行落库
+        if (masteredIds.isNotEmpty()) {
+            Thread {
+                masteredIds.forEach { WrongQuestionManager.setMastered(this, it, true) }
+            }.start()
         }
 
         // 做错的题自动收录进错题本（题库来源、无截图）；已收录的判重置顶并在完成后提示"又错了"
@@ -1213,8 +1224,8 @@ try {
         }
 
         val btnRestart = dialogView.findViewById<MaterialButton>(R.id.btn_card_restart)
-        // 错题重练的回看没有"同分类再来一组"语义，隐藏该按钮
-        btnRestart.visibility = if (reviewRecord?.isWrongPractice == true) View.GONE else View.VISIBLE
+        // 错题重练（当场与回看）都没有"同分类再来一组"语义：无 moduleId，重启查询必空卷，隐藏该按钮
+        btnRestart.visibility = if (reviewRecord?.isWrongPractice == true || isWrongPractice) View.GONE else View.VISIBLE
         btnRestart.setOnClickListener {
             dialog.dismiss()
             restartTraining()
@@ -1311,6 +1322,9 @@ try {
         dialog.setOnDismissListener {
             aiFailover?.cancel()
             aiFailover = null
+            // dismiss 已同步把对话框视图移出视图树，此时销毁 WebView 释放原生资源：
+            // 同一页面反复开关 AI 解析不再累积（销毁惯例同 onDestroy 的选项 WebView 池）
+            try { wvContent.destroy() } catch (_: Exception) {}
         }
 
         fun startRequest() {
