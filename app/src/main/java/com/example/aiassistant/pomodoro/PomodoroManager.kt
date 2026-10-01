@@ -75,11 +75,14 @@ object PomodoroManager {
 
     /**
      * 清理孤立会话（进程被杀后遗留的未完成记录）
+     * @param activeSessionId 当前已恢复、仍在运行的会话 id，跳过不清理（否则墙钟间隔超
+     *   target+5 分钟时会把正在恢复的专注提前标记为已结束，且之后进程再死该行永不再被清理）
      */
-    fun cleanOrphanedSessions() {
+    fun cleanOrphanedSessions(activeSessionId: Long = -1) {
         val db = ensureDb()
         val sessions = db.getRecentSessions(20)
         for (s in sessions) {
+            if (s.id == activeSessionId) continue
             if (!s.isCompleted && s.finishedAt == 0L && s.startedAt > 0) {
                 val elapsed = ((System.currentTimeMillis() - s.startedAt) / 60000).toInt()
                 if (elapsed > s.targetMinutes + 5) {

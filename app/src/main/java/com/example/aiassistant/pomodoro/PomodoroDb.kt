@@ -125,7 +125,7 @@ class PomodoroDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB
         val (startMs, endMs) = getTodayRange()
         val cursor = readableDatabase.rawQuery("""
             SELECT
-                COUNT(*) as total,
+                COUNT(CASE WHEN $COL_COMPLETED = 1 THEN 1 END) as total,
                 SUM(CASE WHEN $COL_COMPLETED = 1 THEN 1 ELSE 0 END) as completed,
                 SUM(CASE WHEN $COL_COMPLETED = 1 THEN $COL_DURATION ELSE 0 END) as focus_minutes
             FROM $TABLE_SESSIONS
@@ -149,7 +149,7 @@ class PomodoroDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB
     fun getStatsByDateRange(startMs: Long, endMs: Long): DailyStats {
         val cursor = readableDatabase.rawQuery("""
             SELECT
-                COUNT(*) as total,
+                COUNT(CASE WHEN $COL_COMPLETED = 1 THEN 1 END) as total,
                 SUM(CASE WHEN $COL_COMPLETED = 1 THEN 1 ELSE 0 END) as completed,
                 SUM(CASE WHEN $COL_COMPLETED = 1 THEN $COL_DURATION ELSE 0 END) as focus_minutes
             FROM $TABLE_SESSIONS
@@ -189,7 +189,7 @@ class PomodoroDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB
 
             val cursor = readableDatabase.rawQuery("""
                 SELECT
-                    COUNT(*) as total,
+                    COUNT(CASE WHEN $COL_COMPLETED = 1 THEN 1 END) as total,
                     SUM(CASE WHEN $COL_COMPLETED = 1 THEN 1 ELSE 0 END) as completed,
                     SUM(CASE WHEN $COL_COMPLETED = 1 THEN $COL_DURATION ELSE 0 END) as focus_minutes
                 FROM $TABLE_SESSIONS

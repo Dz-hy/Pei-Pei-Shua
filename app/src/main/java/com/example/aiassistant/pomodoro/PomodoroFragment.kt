@@ -62,6 +62,12 @@ class PomodoroFragment : Fragment(), PomodoroTimer.TimerListener {
     private var currentPlanTaskId: Long = -1
     private var currentSessionId: Long = -1
     private var whiteNoisePlayer: WhiteNoisePlayer? = null
+    // 会话创建进行中标志：startSession 已移到后台线程，防止连点重复建会话
+    private var creatingSession = false
+    // 自动专注补建会话进行中标志：毫秒级插入窗口内暂停再恢复会重复触发钩子，防止二次 insert
+    private var creatingAutoSession = false
+    // 恢复保存的计时器期间为 true：restore 触发的 onStateChanged(FOCUS) 不应补建会话
+    private var restoringTimer = false
 
     // 应用拦截：接收来自拦截服务的"结束专注"广播
     private val stopFocusReceiver = object : BroadcastReceiver() {
@@ -71,7 +77,11 @@ class PomodoroFragment : Fragment(), PomodoroTimer.TimerListener {
                     // 停止计时器并记录
                     if (currentSessionId > 0) {
                         val elapsedMinutes = ((t.getElapsedMillis()) / 60000).toInt().coerceAtLeast(1)
-                        PomodoroManager.cancelSession(currentSessionId, elapsedMinutes)
+                        val sessionId = currentSessionId
+                        // 落库放后台线程，避免主线程 SQLite 写
+                        Thread {
+                            try { PomodoroManager.cancelSession(sessionId, elapsedMinutes) } catch (_: Exception) {}
+                        }.start()
                         currentSessionId = -1
                     }
                     t.stop()
@@ -107,11 +117,11 @@ class PomodoroFragment : Fragment(), PomodoroTimer.TimerListener {
             requireContext().registerReceiver(stopFocusReceiver, filter)
         }
 
-        // 先恢复旋转前的计时器，再清理孤立会话（避免清理掉正在恢复的会话）
+        // 先恢复旋转前的计时器，再清理孤立会话（清理时排除恢复出来的、仍在运行的会话）
         restoreTimerIfNeeded()
         // 孤儿会话清理（查 20 条 + 批量更新）放后台
         Thread {
-            try { PomodoroManager.cleanOrphanedSessions() } catch (_: Exception) {}
+            try { PomodoroManager.cleanOrphanedSessions(currentSessionId) } catch (_: Exception) {}
         }.start()
         refreshStats()
 
@@ -242,7 +252,13 @@ class PomodoroFragment : Fragment(), PomodoroTimer.TimerListener {
         if (!PomodoroTimerHolder.hasSavedState(ctx)) return
 
         val freshConfig = timer?.config
-        val info = PomodoroTimerHolder.restore(ctx, timer ?: return) ?: return
+        // restore 过程中会触发 onStateChanged(FOCUS)，置标志避免误触发自动补建会话
+        restoringTimer = true
+        val info = (try {
+            PomodoroTimerHolder.restore(ctx, timer ?: return)
+        } finally {
+            restoringTimer = false
+        }) ?: return
         currentSessionId = info.sessionId
         currentTaskTitle = info.taskTitle
         currentTag = info.tag
@@ -271,23 +287,45 @@ class PomodoroFragment : Fragment(), PomodoroTimer.TimerListener {
 
         when (t.state) {
             TimerState.IDLE -> {
-                val sessionId = PomodoroManager.startSession(
-                    taskTitle = currentTaskTitle.ifEmpty { "专注学习" },
-                    tag = currentTag,
-                    targetMinutes = t.config.focusMinutes,
-                    planTaskId = currentPlanTaskId
-                )
-                if (sessionId == -1L) {
-                    Toast.makeText(requireContext(), "创建会话失败", Toast.LENGTH_SHORT).show()
-                    return
-                }
-                currentSessionId = sessionId
-                t.startFocus()
-                whiteNoisePlayer?.play()
-                // 保存当前任务名，供 AppBlockerService 读取对应白名单
+                if (creatingSession) return
+                creatingSession = true
                 val taskName = currentTaskTitle.ifEmpty { "专注学习" }
-                AppPreferences.setAppBlockerCurrentTask(requireContext(), taskName)
-                startAppBlocker()
+                val tag = currentTag
+                val targetMinutes = t.config.focusMinutes
+                val planTaskId = currentPlanTaskId
+                // 会话创建（含首次建库 DDL）放后台线程，避免主线程 SQLite 写
+                Thread {
+                    val sessionId = try {
+                        PomodoroManager.startSession(
+                            taskTitle = taskName,
+                            tag = tag,
+                            targetMinutes = targetMinutes,
+                            planTaskId = planTaskId
+                        )
+                    } catch (_: Exception) { -1L }
+                    activity?.runOnUiThread {
+                        creatingSession = false
+                        if (!isAdded || timer !== t) {
+                            // Fragment 已销毁或 timer 已重建（旋转/视图重建）：不启动计时，
+                            // 取消刚创建的会话行，避免孤儿计时器空转与孤儿会话
+                            if (sessionId > 0) {
+                                Thread { try { PomodoroManager.deleteSession(sessionId) } catch (_: Exception) {} }.start()
+                            }
+                            return@runOnUiThread
+                        }
+                        if (sessionId == -1L) {
+                            Toast.makeText(requireContext(), "创建会话失败", Toast.LENGTH_SHORT).show()
+                            return@runOnUiThread
+                        }
+                        currentSessionId = sessionId
+                        t.startFocus()
+                        whiteNoisePlayer?.play()
+                        // 保存当前任务名，供 AppBlockerService 读取对应白名单
+                        AppPreferences.setAppBlockerCurrentTask(requireContext(), taskName)
+                        startAppBlocker()
+                        updateUI()
+                    }
+                }.start()
             }
             TimerState.PAUSED -> {
                 t.resume()
@@ -336,11 +374,17 @@ class PomodoroFragment : Fragment(), PomodoroTimer.TimerListener {
 
         if (state == TimerState.FOCUS && currentSessionId > 0) {
             val elapsedMinutes = ((timer?.getElapsedMillis() ?: 0) / 60000).toInt().coerceAtLeast(1)
-            if (isSkipped) {
-                PomodoroManager.cancelSession(currentSessionId, elapsedMinutes)
-            } else {
-                PomodoroManager.completeSession(currentSessionId, elapsedMinutes)
-            }
+            val sessionId = currentSessionId
+            // 落库放后台线程，避免主线程 SQLite 写
+            Thread {
+                try {
+                    if (isSkipped) {
+                        PomodoroManager.cancelSession(sessionId, elapsedMinutes)
+                    } else {
+                        PomodoroManager.completeSession(sessionId, elapsedMinutes)
+                    }
+                } catch (_: Exception) {}
+            }.start()
             currentSessionId = -1
         }
 
@@ -377,7 +421,48 @@ class PomodoroFragment : Fragment(), PomodoroTimer.TimerListener {
 
     override fun onStateChanged(newState: TimerState) {
         if (!isAdded) return
+        // 「自动开始下一个专注」路径：timer 自动 startFocus 不经过 onStartClicked 手动入口，
+        // 在此补建会话并重启拦截，否则该轮专注不落库、应用拦截静默失效
+        if (newState == TimerState.FOCUS && !restoringTimer && currentSessionId <= 0) {
+            startAutoFocusSession()
+        }
         updateUI()
+    }
+
+    /**
+     * 自动进入的专注阶段：后台补建会话行，成功后挂上会话并重启应用拦截
+     */
+    private fun startAutoFocusSession() {
+        val t = timer ?: return
+        // 插入进行中标志：防止毫秒级窗口内暂停再恢复重复触发 onStateChanged 钩子二次 insert
+        if (creatingAutoSession) return
+        creatingAutoSession = true
+        val taskName = currentTaskTitle.ifEmpty { "专注学习" }
+        val tag = currentTag
+        val targetMinutes = t.config.focusMinutes
+        val planTaskId = currentPlanTaskId
+        Thread {
+            val sessionId = try {
+                PomodoroManager.startSession(
+                    taskTitle = taskName,
+                    tag = tag,
+                    targetMinutes = targetMinutes,
+                    planTaskId = planTaskId
+                )
+            } catch (_: Exception) { -1L }
+            activity?.runOnUiThread {
+                creatingAutoSession = false
+                if (!isAdded) return@runOnUiThread
+                // 插入期间专注可能已被手动停止/暂停，此时不再挂会话
+                if (sessionId > 0 && t.state == TimerState.FOCUS && currentSessionId <= 0) {
+                    currentSessionId = sessionId
+                    // 保存当前任务名，供 AppBlockerService 读取对应白名单
+                    AppPreferences.setAppBlockerCurrentTask(requireContext(), taskName)
+                    startAppBlocker()
+                    whiteNoisePlayer?.play()
+                }
+            }
+        }.start()
     }
 
     // ── UI 更新 ──
@@ -661,7 +746,8 @@ class PomodoroFragment : Fragment(), PomodoroTimer.TimerListener {
                     tasks.removeAt(index)
                     saveUserTasks(context, tasks)
                     adapter?.notifyItemRemoved(index)
-                    adapter?.notifyItemRangeChanged(index, tasks.size)
+                    // 只刷新从 index 起剩余的条目，itemCount 传全表长度会越界
+                    adapter?.notifyItemRangeChanged(index, tasks.size - index)
                     confirmDialog.dismiss()
                 }
                 .setNegativeButton("取消", null)

@@ -13,6 +13,8 @@ class WhiteNoisePlayer(private val context: Context) {
     private var currentType: String = ""
     private var volume: Float = 0.6f
     private var playing: Boolean = false
+    // 播放意图标志：prepareAsync 完成回调前用户可能已 pause/stop，此时不应自动 start
+    private var playRequested: Boolean = false
     private var useFallback: Boolean = false
 
     fun setNoiseType(type: String) {
@@ -33,6 +35,7 @@ class WhiteNoisePlayer(private val context: Context) {
 
     fun play() {
         if (currentType.isEmpty()) return
+        playRequested = true
         if (playing) return
 
         releasePlayer()
@@ -62,7 +65,7 @@ class WhiteNoisePlayer(private val context: Context) {
                 setVolume(volume, volume)
                 // prepareAsync：媒体 IO 与解码器初始化不阻塞主线程（setDataSource 已复制 fd，afd 可立即关闭）
                 setOnPreparedListener { mp ->
-                    if (mediaPlayer === mp) {
+                    if (mediaPlayer === mp && playRequested) {
                         mp.start()
                         playing = true
                     }
@@ -85,6 +88,7 @@ class WhiteNoisePlayer(private val context: Context) {
     }
 
     fun pause() {
+        playRequested = false
         if (useFallback) {
             releaseTone()
         } else {
@@ -94,6 +98,7 @@ class WhiteNoisePlayer(private val context: Context) {
     }
 
     fun stop() {
+        playRequested = false
         releasePlayer()
         releaseTone()
         playing = false

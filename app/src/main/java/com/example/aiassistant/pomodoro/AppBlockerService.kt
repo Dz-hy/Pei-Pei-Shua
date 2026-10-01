@@ -68,6 +68,8 @@ class AppBlockerService : Service() {
     private var blockerThread: Thread? = null
     @Volatile private var isRunning = false
     private var wakeLock: PowerManager.WakeLock? = null
+    // 轮询线程的续期 acquire 与 onDestroy 的 release 互斥，防止服务销毁后锁被重新持有
+    private val wakeLockGuard = Any()
 
     private val ignoredPackages by lazy {
         // 动态检测：通过 PackageManager 动态检索当前设备上注册为系统桌面的所有包名，完美兼容所有定制及第三方 Launcher
@@ -139,7 +141,10 @@ class AppBlockerService : Service() {
             while (isRunning) {
                 try {
                     // 非引用计数锁：重复 acquire 即续期，防止专注时长超 30 分钟后锁过期、线程被冻结导致拦截静默失效
-                    try { wakeLock?.acquire(30 * 60 * 1000L) } catch (_: Exception) {}
+                    // 与 onDestroy 的 release 互斥，且锁内复查 isRunning，防止销毁后锁被重新 acquire
+                    synchronized(wakeLockGuard) {
+                        if (isRunning) try { wakeLock?.acquire(30 * 60 * 1000L) } catch (_: Exception) {}
+                    }
                     checkForegroundApp()
                     Thread.sleep(POLL_INTERVAL_MS)
                 } catch (e: InterruptedException) {
@@ -172,14 +177,16 @@ class AppBlockerService : Service() {
         blockerThread?.interrupt()
         blockerThread = null
 
-        // 释放 WakeLock 锁
-        if (wakeLock?.isHeld == true) {
-            try {
-                wakeLock?.release()
-                Log.d(TAG, "WakeLock released.")
-            } catch (_: Exception) {}
+        // 释放 WakeLock 锁（与轮询线程的续期 acquire 互斥，销毁后线程不再重新 acquire）
+        synchronized(wakeLockGuard) {
+            if (wakeLock?.isHeld == true) {
+                try {
+                    wakeLock?.release()
+                    Log.d(TAG, "WakeLock released.")
+                } catch (_: Exception) {}
+            }
+            wakeLock = null
         }
-        wakeLock = null
 
         removeOverlay()
         super.onDestroy()
