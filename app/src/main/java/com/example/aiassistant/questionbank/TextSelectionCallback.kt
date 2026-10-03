@@ -84,6 +84,7 @@ class TextSelectionCallback(
 
         com.example.aiassistant.AiFailoverExecutor.execute(
             candidates = chain,
+            ownerId = com.example.aiassistant.OpenAIApiService.OWNER_PRACTICE,
             request = { cfg, onComplete, onError ->
                 OpenAIApiService.analyzeText(
                     ocrText = "",
@@ -94,6 +95,7 @@ class TextSelectionCallback(
                     thinking = false,
                     userMessage = "请回答以下问题：\n$selectedText",
                     apiType = cfg.apiType,
+                    owner = com.example.aiassistant.OpenAIApiService.OWNER_PRACTICE,
                     thinkingBudget = cfg.thinkingBudget,
                     onComplete = onComplete,
                     onError = { /* 已由 onStructuredError 接管 */ },

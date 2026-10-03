@@ -108,6 +108,7 @@ object ShizhengAi {
                         userMessage = userMessage,
                         apiType = cfg.apiType,
                         thinkingBudget = cfg.thinkingBudget,
+                        owner = OpenAIApiService.OWNER_SHIZHENG,
                         onComplete = onComplete,
                         onError = { msg ->
                             // 未分类错误兜底：按 PARSE 转发给 executor（同模型不重试、无备用即终止），
@@ -121,7 +122,8 @@ object ShizhengAi {
                     )
                 },
                 onComplete = { fullText -> result = fullText; latch.countDown() },
-                onError = { msg -> error = msg; latch.countDown() }
+                onError = { msg -> error = msg; latch.countDown() },
+                ownerId = OpenAIApiService.OWNER_SHIZHENG
             )
         } catch (e: Exception) {
             return fail("AI 请求构建异常：${e.message}")

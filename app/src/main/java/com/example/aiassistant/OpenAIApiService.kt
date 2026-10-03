@@ -51,14 +51,49 @@ object OpenAIApiService {
     private val retryHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
     /**
-     * 请求代际标记：每次取消/发起新请求时自增。
-     * 工具循环等多轮回调在继续执行前必须校验代际，避免取消后旧链路仍发请求、触发回调。
+     * 请求代际按「调用方」隔离。
+     *
+     * 原先只有一个全局计数：任何一个新 AI 请求都会把别人的在途请求判为过期，截图分析与做题页
+     * 问答、时政总结互相掐死（配合旧的静默 return，表现为一方永远转圈）。
+     * 现在同一 owner 内新请求取代旧请求（同一功能只留最新一次），不同 owner 互不干扰。
      */
-    @Volatile
-    private var requestGeneration = 0
+    const val OWNER_DEFAULT = "default"
+    const val OWNER_CAPTURE = "capture"           // 悬浮球截图 → OCR → 分析链路
+    const val OWNER_PRACTICE = "practice"         // 做题页 AI 解析/问答
+    const val OWNER_WRONG_DETAIL = "wrong_detail" // 错题详情 AI 解析
+    const val OWNER_CHAT = "chat"                 // AI 页对话
+    const val OWNER_SHIZHENG = "shizheng"         // 时政总结/出题
+    const val OWNER_MATCHER = "matcher"           // 错题三级匹配的裁判调用
 
+    private val generations =
+        java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicLong>()
+    private val ownerCalls =
+        java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.CopyOnWriteArrayList<Call>>()
+
+    /** 该调用方当前的代际号 */
+    private fun ownerGen(owner: String): Long = generations[owner]?.get() ?: 0L
+
+    private fun registerCall(owner: String, call: Call) {
+        val list = ownerCalls.computeIfAbsent(owner) { java.util.concurrent.CopyOnWriteArrayList() }
+        list.add(call)
+        // 长会话里同一 owner 可能积累几十次重试的 Call 对象：只保留最近 16 个
+        while (list.size > 16) list.removeAt(0)
+    }
+
+    /** 取代该调用方的在途请求：代际自增 + 只取消它自己的 Call */
+    private fun cancelOwner(owner: String) {
+        generations.computeIfAbsent(owner) { java.util.concurrent.atomic.AtomicLong(0) }
+            .incrementAndGet()
+        val list = ownerCalls.remove(owner) ?: return
+        for (c in list) {
+            try { if (!c.isCanceled()) c.cancel() } catch (_: Exception) {}
+        }
+    }
+
+    /** 全量取消：服务销毁/熄屏等「一切都别再发」的场合 */
     fun cancelCurrentRequest() {
-        requestGeneration++
+        for (owner in generations.keys.toList()) cancelOwner(owner)
+        ownerCalls.keys.toList().forEach { cancelOwner(it) }
         retryHandler.removeCallbacksAndMessages(null)
         val call = synchronized(this) {
             val c = currentCall
@@ -66,6 +101,11 @@ object OpenAIApiService {
             c
         }
         call?.let { if (!it.isCanceled()) it.cancel() }
+    }
+
+    /** 只取消某个调用方自己的请求（故障转移链按 owner 收尾，不误伤别的功能） */
+    fun cancelCurrentRequest(owner: String) {
+        cancelOwner(owner)
     }
 
     fun warmUpConnection(baseUrl: String) {
@@ -97,7 +137,8 @@ object OpenAIApiService {
         onComplete: (fullText: String) -> Unit,
         onError: (String) -> Unit,
         onStructuredError: ((AiErrorKind, String) -> Unit)? = null,
-        onDelta: ((accumulated: String) -> Unit)? = null
+        onDelta: ((accumulated: String) -> Unit)? = null,
+        owner: String = OWNER_DEFAULT
     ) {
         val systemPrompt = prompt
         val userContent = userMessage ?: "以下是从图片中识别出的文字内容：\n$ocrText"
@@ -112,9 +153,9 @@ object OpenAIApiService {
         }
 
         if (isStream) {
-            executeStreamRequest(request, 0, onDelta!!, onComplete, onError, onStructuredError)
+            executeStreamRequest(request, 0, onDelta!!, onComplete, onError, onStructuredError, owner)
         } else {
-            executeRequest(request, apiType, 0, onComplete, onError, onStructuredError)
+            executeRequest(request, apiType, 0, onComplete, onError, onStructuredError, owner)
         }
     }
 
@@ -132,7 +173,8 @@ object OpenAIApiService {
         onComplete: (fullText: String) -> Unit,
         onError: (String) -> Unit,
         onStructuredError: ((AiErrorKind, String) -> Unit)? = null,
-        onDelta: ((accumulated: String) -> Unit)? = null
+        onDelta: ((accumulated: String) -> Unit)? = null,
+        owner: String = OWNER_DEFAULT
     ) {
         analyzeText(ocrText, baseUrl, apiKey, model, systemPrompt, thinking, userMessage, apiType, thinkingBudget, onComplete, onError, onStructuredError, onDelta)
     }
@@ -149,7 +191,8 @@ object OpenAIApiService {
         thinkingBudget: Int = 4096,
         onComplete: (fullText: String) -> Unit,
         onError: (String) -> Unit,
-        onStructuredError: ((AiErrorKind, String) -> Unit)? = null
+        onStructuredError: ((AiErrorKind, String) -> Unit)? = null,
+        owner: String = OWNER_DEFAULT
     ) {
         val request = try {
             buildImageRequest(baseUrl, apiKey, model, systemPrompt, imageBase64, thinking, apiType, thinkingBudget)
@@ -159,7 +202,7 @@ object OpenAIApiService {
             return
         }
 
-        executeRequest(request, apiType, 0, onComplete, onError, onStructuredError)
+        executeRequest(request, apiType, 0, onComplete, onError, onStructuredError, owner)
     }
 
     // ── 内部请求构造引擎 ───────────────────────────────────────────────
@@ -474,7 +517,8 @@ object OpenAIApiService {
         retryCount: Int,
         onComplete: (fullText: String) -> Unit,
         onError: (String) -> Unit,
-        onStructuredError: ((AiErrorKind, String) -> Unit)? = null
+        onStructuredError: ((AiErrorKind, String) -> Unit)? = null,
+        owner: String = OWNER_DEFAULT
     ) {
         // onStructuredError 非空时接管全部错误上报（供故障转移执行器按错误分类处理）
         // 回调闸门：本次调用无论走成功、失败还是被取代，都只向调用方送达一次结果。
@@ -492,11 +536,12 @@ object OpenAIApiService {
             if (delivered.get()) return
             report(AiErrorKind.SUPERSEDED, "请求已被新的 AI 请求取代")
         }
-        cancelCurrentRequest()
-        val gen = requestGeneration
+        cancelOwner(owner)
+        val gen = ownerGen(owner)
         // 只打 host+path：Gemini 等协议把 key 放在 URL query 里，不能整条 URL 落日志
         android.util.Log.d("AIAssistantAPI", "executeRequest: Launching request. Type: $apiType, URL: ${request.url.host}${request.url.encodedPath}, Method: ${request.method}")
         val call = client.newCall(request)
+        registerCall(owner, call)
         synchronized(this) { currentCall = call }
 
         call.enqueue(object : Callback {
@@ -505,7 +550,7 @@ object OpenAIApiService {
                     android.util.Log.d("AIAssistantAPI", "onFailure: Request was canceled.")
                     return
                 }
-                if (gen != requestGeneration) {
+                if (gen != ownerGen(owner)) {
                     android.util.Log.d("AIAssistantAPI", "onFailure: superseded by a newer request")
                     supersededOrCancel()
                     return
@@ -520,7 +565,7 @@ object OpenAIApiService {
                     response.close()
                     return
                 }
-                if (gen != requestGeneration) {
+                if (gen != ownerGen(owner)) {
                     android.util.Log.d("AIAssistantAPI", "onResponse: superseded by a newer request")
                     response.close()
                     supersededOrCancel()
@@ -541,8 +586,8 @@ object OpenAIApiService {
                         val delayMs = (retryCount + 1) * 2000L
                         android.util.Log.w("AIAssistantAPI", "onResponse: Too Many Requests (429). Retrying in ${delayMs}ms...")
                         retryHandler.postDelayed({
-                            if (gen == requestGeneration) {
-                                executeRequest(request, apiType, retryCount + 1, onComplete, onError, onStructuredError)
+                            if (gen == ownerGen(owner)) {
+                                executeRequest(request, apiType, retryCount + 1, onComplete, onError, onStructuredError, owner)
                             } else {
                                 supersededOrCancel()
                             }
@@ -574,7 +619,7 @@ object OpenAIApiService {
                     val parsedText = parseResponseStr(responseStr, apiType)
                     if (BuildConfig.DEBUG) android.util.Log.d("AIAssistantAPI", "onResponse: Parsed output length: ${parsedText.length}, preview: ${parsedText.take(150)}")
 
-                    if (gen != requestGeneration) {
+                    if (gen != ownerGen(owner)) {
                         supersededOrCancel()
                         return
                     }
@@ -586,7 +631,7 @@ object OpenAIApiService {
                     }
                 } catch (e: Exception) {
                     android.util.Log.e("AIAssistantAPI", "onResponse: Parse exception!", e)
-                    if (gen == requestGeneration) report(AiErrorKind.PARSE, "解析响应失败：${e.message}")
+                    if (gen == ownerGen(owner)) report(AiErrorKind.PARSE, "解析响应失败：${e.message}")
                     else supersededOrCancel()
                 } finally {
                     try { body.close() } catch (_: Exception) {}
@@ -607,7 +652,8 @@ object OpenAIApiService {
         onDelta: (String) -> Unit,
         onComplete: (String) -> Unit,
         onError: (String) -> Unit,
-        onStructuredError: ((AiErrorKind, String) -> Unit)? = null
+        onStructuredError: ((AiErrorKind, String) -> Unit)? = null,
+        owner: String = OWNER_DEFAULT
     ) {
         // 回调闸门：与 executeRequest 同一语义——被取代也必须给调用方一个终点，且只送达一次
         val delivered = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -622,16 +668,17 @@ object OpenAIApiService {
             if (delivered.get()) return
             report(AiErrorKind.SUPERSEDED, "请求已被新的 AI 请求取代")
         }
-        cancelCurrentRequest()
-        val gen = requestGeneration
+        cancelOwner(owner)
+        val gen = ownerGen(owner)
         android.util.Log.d("AIAssistantAPI", "executeStreamRequest: launching. URL: ${request.url.host}${request.url.encodedPath}")
         val call = streamClient.newCall(request)
+        registerCall(owner, call)
         synchronized(this) { currentCall = call }
 
         call.enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
                 if (call.isCanceled()) return
-                if (gen != requestGeneration) { supersededOrCancel(); return }
+                if (gen != ownerGen(owner)) { supersededOrCancel(); return }
                 android.util.Log.e("AIAssistantAPI", "executeStreamRequest: onFailure", e)
                 report(AiErrorKind.NETWORK, "网络请求失败：${e.message}")
             }
@@ -639,7 +686,7 @@ object OpenAIApiService {
             override fun onResponse(call: Call, response: Response) {
                 try {
                     if (call.isCanceled()) { response.close(); return }
-                    if (gen != requestGeneration) { response.close(); supersededOrCancel(); return }
+                    if (gen != ownerGen(owner)) { response.close(); supersededOrCancel(); return }
 
                     if (!response.isSuccessful) {
                         val statusCode = response.code
@@ -647,8 +694,8 @@ object OpenAIApiService {
                         if (statusCode == 429 && retryCount < 2) {
                             val delayMs = (retryCount + 1) * 2000L
                             retryHandler.postDelayed({
-                                if (gen == requestGeneration) {
-                                    executeStreamRequest(request, retryCount + 1, onDelta, onComplete, onError, onStructuredError)
+                                if (gen == ownerGen(owner)) {
+                                    executeStreamRequest(request, retryCount + 1, onDelta, onComplete, onError, onStructuredError, owner)
                                 } else {
                                     supersededOrCancel()
                                 }
@@ -671,7 +718,7 @@ object OpenAIApiService {
                     if (!contentType.contains("text/event-stream")) {
                         // 网关/中转忽略 stream:true：回退为一次性解析
                         val responseStr = body.string()
-                        if (gen != requestGeneration) { supersededOrCancel(); return }
+                        if (gen != ownerGen(owner)) { supersededOrCancel(); return }
                         val parsed = parseResponseStr(responseStr, "openai")
                         if (parsed.isEmpty()) report(AiErrorKind.EMPTY, "解析响应内容为空") else complete(parsed)
                         return
@@ -687,20 +734,20 @@ object OpenAIApiService {
                             // 主线程直接 toString() 会与其扩容竞争（越界崩溃或文本错乱）
                             val snapshot = accumulated.toString()
                             retryHandler.post {
-                                if (gen == requestGeneration) onDelta(snapshot)
+                                if (gen == ownerGen(owner)) onDelta(snapshot)
                             }
                         }
                     }
 
                     body.charStream().buffered().useLines { lines ->
                         for (line in lines) {
-                            if (gen != requestGeneration) { supersededOrCancel(); return }
+                            if (gen != ownerGen(owner)) { supersededOrCancel(); return }
                             val t = line.trim()
                             if (t.isEmpty() || t.startsWith(":") || !t.startsWith("data:")) continue
                             val payload = t.substring(5).trim()
                             if (payload == "[DONE]") {
                                 postDelta(force = true)
-                                if (gen == requestGeneration) {
+                                if (gen == ownerGen(owner)) {
                                     if (accumulated.isEmpty()) report(AiErrorKind.EMPTY, "解析响应内容为空")
                                     else complete(accumulated.toString())
                                 } else {
@@ -726,14 +773,14 @@ object OpenAIApiService {
                         }
                     }
                     // 服务端未发 [DONE] 直接断流：已有内容视为成功，避免白等重试
-                    if (gen != requestGeneration) { supersededOrCancel(); return }
+                    if (gen != ownerGen(owner)) { supersededOrCancel(); return }
                     if (accumulated.isNotEmpty()) complete(accumulated.toString())
                     else report(AiErrorKind.EMPTY, "流式响应提前结束且内容为空")
                 } catch (e: IOException) {
-                    if (gen == requestGeneration) report(AiErrorKind.NETWORK, "流式读取中断：${e.message}")
+                    if (gen == ownerGen(owner)) report(AiErrorKind.NETWORK, "流式读取中断：${e.message}")
                     else supersededOrCancel()
                 } catch (e: Exception) {
-                    if (gen == requestGeneration) report(AiErrorKind.PARSE, "解析流式响应失败：${e.message}")
+                    if (gen == ownerGen(owner)) report(AiErrorKind.PARSE, "解析流式响应失败：${e.message}")
                     else supersededOrCancel()
                 } finally {
                     try { response.body?.close() } catch (_: Exception) {}
@@ -897,7 +944,8 @@ object OpenAIApiService {
         onToolCall: ((String) -> Unit)? = null,  // 通知 UI 正在调用哪个工具
         onComplete: (fullText: String) -> Unit,
         onError: (String) -> Unit,
-        onStructuredError: ((AiErrorKind, String) -> Unit)? = null
+        onStructuredError: ((AiErrorKind, String) -> Unit)? = null,
+        owner: String = OWNER_DEFAULT
     ) {
         val messages = JSONArray().apply {
             put(JSONObject().apply { put("role", "system"); put("content", prompt) })
@@ -949,7 +997,7 @@ object OpenAIApiService {
             messages = messages, tools = tools,
             round = 0, maxRounds = maxToolRounds,
             onToolCall = onToolCall, onComplete = onComplete, onError = onError,
-            onStructuredError = onStructuredError
+            onStructuredError = onStructuredError, owner = owner
         )
     }
 
@@ -963,7 +1011,8 @@ object OpenAIApiService {
         onToolCall: ((String) -> Unit)?,
         onComplete: (String) -> Unit,
         onError: (String) -> Unit,
-        onStructuredError: ((AiErrorKind, String) -> Unit)? = null
+        onStructuredError: ((AiErrorKind, String) -> Unit)? = null,
+        owner: String = OWNER_DEFAULT
     ) {
         // onStructuredError 非空时接管全部错误上报（供故障转移执行器按错误分类处理）
         // 回调闸门：与 executeRequest 同一语义（递归轮次中只有终止那一轮会送达一次结果）
@@ -992,26 +1041,27 @@ object OpenAIApiService {
         }
 
         if (round == 0) {
-            cancelCurrentRequest()
+            cancelOwner(owner)
         }
-        val gen = requestGeneration
+        val gen = ownerGen(owner)
         val call = client.newCall(request)
+        registerCall(owner, call)
         synchronized(this) { currentCall = call }
 
         call.enqueue(object : okhttp3.Callback {
             override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
                 if (call.isCanceled()) return
-                if (gen != requestGeneration) { supersededOrCancel(); return }
+                if (gen != ownerGen(owner)) { supersededOrCancel(); return }
                 report(AiErrorKind.NETWORK, "网络请求失败：${e.message}")
             }
 
             override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
                 if (call.isCanceled()) { response.close(); return }
-                if (gen != requestGeneration) { response.close(); supersededOrCancel(); return }
+                if (gen != ownerGen(owner)) { response.close(); supersededOrCancel(); return }
                 if (!response.isSuccessful) {
                     val body = try { response.body?.string() } catch (_: Exception) { null } ?: ""
                     response.close()
-                    if (gen != requestGeneration) { supersededOrCancel(); return }
+                    if (gen != ownerGen(owner)) { supersededOrCancel(); return }
                     val statusCode = response.code
                     val kind = when {
                         statusCode == 429 -> AiErrorKind.RATE_LIMIT
@@ -1032,7 +1082,7 @@ object OpenAIApiService {
                     val toolCalls = parseToolCalls(json, apiType)
                     
                     if (toolCalls.isNotEmpty()) {
-                        if (gen != requestGeneration) { supersededOrCancel(); return }
+                        if (gen != ownerGen(owner)) { supersededOrCancel(); return }
                         // AI 请求调用工具 → 执行工具 → 追加结果到 messages → 重新请求
                         android.util.Log.d("AIAssistantAPI", "AI 请求调用 ${toolCalls.size} 个工具")
                         
@@ -1082,13 +1132,13 @@ object OpenAIApiService {
                             }
 
                             // 取消/换模型后旧链路不得继续
-                            if (gen != requestGeneration) { supersededOrCancel(); return@Thread }
+                            if (gen != ownerGen(owner)) { supersededOrCancel(); return@Thread }
                             // 递归下一轮
                             executeToolLoop(
                                 context, baseUrl, apiKey, model, apiType,
                                 thinking, thinkingBudget, messages, tools,
                                 round + 1, maxRounds, onToolCall, onComplete, onError,
-                                onStructuredError
+                                onStructuredError, owner
                             )
                           } catch (e: Throwable) {
                             // 工具执行里的异常若逃逸出这个裸线程会直接崩掉进程
@@ -1098,13 +1148,13 @@ object OpenAIApiService {
                         }.start()
                     } else {
                         // 最终文本回答
-                        if (gen != requestGeneration) { supersededOrCancel(); return }
+                        if (gen != ownerGen(owner)) { supersededOrCancel(); return }
                         val text = parseResponseStr(responseStr, apiType)
                         if (text.isEmpty()) report(AiErrorKind.EMPTY, "解析响应内容为空")
                         else complete(text)
                     }
                 } catch (e: Exception) {
-                    if (gen == requestGeneration) report(AiErrorKind.PARSE, "解析响应失败：${e.message}")
+                    if (gen == ownerGen(owner)) report(AiErrorKind.PARSE, "解析响应失败：${e.message}")
                     else supersededOrCancel()
                 }
             }

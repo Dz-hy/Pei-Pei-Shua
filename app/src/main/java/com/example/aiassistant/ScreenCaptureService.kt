@@ -1116,6 +1116,7 @@ class ScreenCaptureService : Service() {
         // 统一由 AiFailoverExecutor 驱动，与错题匹配/时政等调用点共用同一实现
         aiFailover = AiFailoverExecutor.execute(
             candidates = modelList,
+            ownerId = OpenAIApiService.OWNER_CAPTURE,
             request = { config, onDone, onErr ->
                 val label = if (config === modelList.first()) config.name else "【备用】${config.name}"
                 showLoading("⚡ AI 正在深度解析中...\n当前模型: $label")
@@ -1258,6 +1259,7 @@ class ScreenCaptureService : Service() {
                 thinking = config.thinkingDefault,
                 userMessage = userMsg,
                 apiType = config.apiType,
+                owner = OpenAIApiService.OWNER_CAPTURE,
                 thinkingBudget = config.thinkingBudget,
                 tools = toolsArray,
                 onToolCall = { toolName ->
@@ -1284,6 +1286,7 @@ class ScreenCaptureService : Service() {
                 thinking = config.thinkingDefault,
                 userMessage = userMsg,
                 apiType = config.apiType,
+                owner = OpenAIApiService.OWNER_CAPTURE,
                 thinkingBudget = config.thinkingBudget,
                 onComplete = onDone,
                 onError = { onErr(AiErrorKind.PARSE, it) },
@@ -1431,6 +1434,7 @@ class ScreenCaptureService : Service() {
         // 视觉与文字管道共用同一套故障转移语义（AiFailoverExecutor 统一驱动退避重试/切换/终止）
         aiFailover = AiFailoverExecutor.execute(
             candidates = modelList,
+            ownerId = OpenAIApiService.OWNER_CAPTURE,
             request = { config, onDone, onErr ->
                 val label = if (config === modelList.first()) config.name else "【备用】${config.name}"
                 val ocr = lastOcrText
@@ -1455,6 +1459,7 @@ class ScreenCaptureService : Service() {
                         thinking = config.thinkingDefault,
                         userMessage = visionUserMsg,
                         apiType = config.apiType,
+                owner = OpenAIApiService.OWNER_CAPTURE,
                         thinkingBudget = config.thinkingBudget,
                         tools = toolsArray,
                         imageBase64 = imageBase64,  // 多模态传图参数
@@ -1482,6 +1487,7 @@ class ScreenCaptureService : Service() {
                         model = config.model,
                         thinking = config.thinkingDefault,
                         apiType = config.apiType,
+                owner = OpenAIApiService.OWNER_CAPTURE,
                         thinkingBudget = config.thinkingBudget,
                         onComplete = onDone,
                         onError = { onErr(AiErrorKind.PARSE, it) },
@@ -1870,6 +1876,7 @@ class ScreenCaptureService : Service() {
                     baseUrl = baseUrl,
                     apiKey = apiKey,
                     model = model,
+                    owner = OpenAIApiService.OWNER_CAPTURE,
                     prompt = repairPrompt,
                     thinking = false,
                     userMessage = userMsg,

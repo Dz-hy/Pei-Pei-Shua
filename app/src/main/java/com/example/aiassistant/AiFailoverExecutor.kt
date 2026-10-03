@@ -17,6 +17,7 @@ import android.os.Looper
  */
 class AiFailoverExecutor private constructor(
     private val candidates: List<AiModelConfig>,
+    private val ownerId: String,
     private val request: (config: AiModelConfig, onComplete: (String) -> Unit, onError: (AiErrorKind, String) -> Unit) -> Unit,
     private val onComplete: (String) -> Unit,
     private val onError: (String) -> Unit,
@@ -27,10 +28,10 @@ class AiFailoverExecutor private constructor(
     private var modelIndex = 0
     private var sameModelRetry = 0
 
-    /** 取消本次故障转移：丢弃后续重试/切换，并取消底层 HTTP 请求 */
+    /** 取消本次故障转移：丢弃后续重试/切换，并取消底层 HTTP 请求（只取消本链路自己的） */
     fun cancel() {
         cancelled = true
-        OpenAIApiService.cancelCurrentRequest()
+        OpenAIApiService.cancelCurrentRequest(ownerId)
     }
 
     private fun launch() {
@@ -126,6 +127,8 @@ class AiFailoverExecutor private constructor(
          * @param onModelSwitched 每次成功切换备用模型时回调（可用于 Toast 提示）
          * @param onModelAttemptFailed 每次单模型请求失败时回调（重试/切换决策前，可用于
          *                             记录主模型失败原因、更新"正在重试"loading 文案）
+         * @param ownerId 调用方标识（OpenAIApiService.OWNER_*）：同一 owner 内新请求取代旧请求，
+         *                不同 owner 互不干扰；cancel 也只收回本 owner 的在途请求
          */
         fun execute(
             candidates: List<AiModelConfig>,
@@ -133,9 +136,10 @@ class AiFailoverExecutor private constructor(
             onComplete: (String) -> Unit,
             onError: (String) -> Unit,
             onModelSwitched: ((AiModelConfig, String, AiModelConfig) -> Unit)? = null,
-            onModelAttemptFailed: ((AiModelConfig, AiErrorKind, String) -> Unit)? = null
+            onModelAttemptFailed: ((AiModelConfig, AiErrorKind, String) -> Unit)? = null,
+            ownerId: String = OpenAIApiService.OWNER_DEFAULT
         ): AiFailoverExecutor {
-            val executor = AiFailoverExecutor(candidates, request, onComplete, onError, onModelSwitched, onModelAttemptFailed)
+            val executor = AiFailoverExecutor(candidates, ownerId, request, onComplete, onError, onModelSwitched, onModelAttemptFailed)
             executor.dispatch { executor.launch() }
             return executor
         }

@@ -193,6 +193,7 @@ object QuestionMatcher {
                     userMessage = userMessage,
                     apiType = cfg.apiType,
                     thinkingBudget = cfg.thinkingBudget,
+                    owner = OpenAIApiService.OWNER_MATCHER,
                     onComplete = onComplete,
                     onError = { msg ->
                         // 未分类错误兜底：按 PARSE 转发给 executor，避免其收不到回调、latch 挂到超时
@@ -202,7 +203,8 @@ object QuestionMatcher {
                 )
             },
             onComplete = { text -> result = parseRerank(text); latch.countDown() },
-            onError = { latch.countDown() }
+            onError = { latch.countDown() },
+            ownerId = OpenAIApiService.OWNER_MATCHER
         )
         val finished = latch.await(90L * chain.size.coerceAtMost(3), TimeUnit.SECONDS)
         if (!finished) {

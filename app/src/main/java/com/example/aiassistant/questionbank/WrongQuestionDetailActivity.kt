@@ -656,6 +656,7 @@ class WrongQuestionDetailActivity : AppCompatActivity() {
         aiFailover?.cancel()
         aiFailover = com.example.aiassistant.AiFailoverExecutor.execute(
             candidates = chain,
+            ownerId = com.example.aiassistant.OpenAIApiService.OWNER_WRONG_DETAIL,
             request = { cfg, onComplete, onError ->
                 runOnUiThread {
                     layoutAiLoading.visibility = View.VISIBLE
@@ -672,6 +673,7 @@ class WrongQuestionDetailActivity : AppCompatActivity() {
                         thinking = cfg.thinkingDefault,
                         userMessage = userMessage,
                         apiType = cfg.apiType,
+                        owner = com.example.aiassistant.OpenAIApiService.OWNER_WRONG_DETAIL,
                         thinkingBudget = cfg.thinkingBudget,
                         tools = toolsArray,
                         onToolCall = { toolName ->
@@ -691,6 +693,7 @@ class WrongQuestionDetailActivity : AppCompatActivity() {
                         thinking = cfg.thinkingDefault,
                         userMessage = userMessage,
                         apiType = cfg.apiType,
+                        owner = com.example.aiassistant.OpenAIApiService.OWNER_WRONG_DETAIL,
                         thinkingBudget = cfg.thinkingBudget,
                         onComplete = onComplete,
                         onError = { /* 已由 onStructuredError 接管 */ },

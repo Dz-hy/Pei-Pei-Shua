@@ -1290,6 +1290,7 @@ try {
             apiKey = apiKey,
             model = model,
             userMessage = "请回答以下问题：\n$selectedText",
+            owner = com.example.aiassistant.OpenAIApiService.OWNER_PRACTICE,
             onComplete = { response ->
                 runOnUiThread {
                     try { dialog.setMessage(response) } catch (_: Exception) {}
@@ -1487,6 +1488,7 @@ try {
             aiFailover?.cancel()
             aiFailover = com.example.aiassistant.AiFailoverExecutor.execute(
                 candidates = com.example.aiassistant.AiFailoverExecutor.buildChain(config.id),
+                ownerId = com.example.aiassistant.OpenAIApiService.OWNER_PRACTICE,
                 request = { cfg, onComplete, onError ->
                     com.example.aiassistant.OpenAIApiService.analyzeText(
                         ocrText = "",
@@ -1497,6 +1499,7 @@ try {
                         thinking = cfg.thinkingDefault,
                         userMessage = buildAiUserMessage(question),
                         apiType = cfg.apiType,
+                        owner = com.example.aiassistant.OpenAIApiService.OWNER_PRACTICE,
                         thinkingBudget = cfg.thinkingBudget,
                         onComplete = onComplete,
                         onError = { /* 已由 onStructuredError 接管 */ },
