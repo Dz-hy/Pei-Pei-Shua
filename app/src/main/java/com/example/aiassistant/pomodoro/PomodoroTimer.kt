@@ -30,6 +30,10 @@ class PomodoroTimer(private val listener: TimerListener) {
     private var pausedRemainingMillis: Long = 0
     private var pausedFromState: TimerState = TimerState.IDLE
 
+    // 本阶段结束时刻（elapsedRealtime 基准，含深睡），以及"阶段结束只生效一次"的闸门
+    private var deadlineRealtime: Long = 0
+    private var phaseFinished: Boolean = false
+
     fun configure(config: PomodoroConfig) {
         this.config = config
     }
@@ -140,17 +144,36 @@ class PomodoroTimer(private val listener: TimerListener) {
 
     private fun startCountDown() {
         countDownTimer?.cancel()
+        // 用 elapsedRealtime 的绝对终点表达剩余时间：CountDownTimer 的 tick 在息屏深睡下会被
+        // 冻结/降频投递（Android≤13 是"每收到一次 tick 才减一个固定 interval"），按 tick 累计
+        // 会让 25 分钟专注实际只走几分钟；elapsedRealtime 连深睡一起计，剩余一律由
+        // "终点 - 现在"现算，唤醒后自动纠偏
+        deadlineRealtime = android.os.SystemClock.elapsedRealtime() + remainingMillis
+        phaseFinished = false
         countDownTimer = object : CountDownTimer(remainingMillis, 1000) {
             override fun onTick(millisUntilFinished: Long) {
-                remainingMillis = millisUntilFinished
+                remainingMillis = (deadlineRealtime - android.os.SystemClock.elapsedRealtime())
+                    .coerceAtLeast(0L)
+                if (remainingMillis <= 0L) {
+                    cancel()
+                    finishPhase()
+                    return
+                }
                 listener.onTick(remainingMillis, totalMillis)
             }
 
             override fun onFinish() {
-                remainingMillis = 0
-                onPhaseEnd(skipped = false)
+                finishPhase()
             }
         }.start()
+    }
+
+    /** 阶段自然结束（tick 追赶与 onFinish 可能都命中，只允许生效一次） */
+    private fun finishPhase() {
+        if (phaseFinished) return
+        phaseFinished = true
+        remainingMillis = 0
+        onPhaseEnd(skipped = false)
     }
 
     private fun onPhaseEnd(skipped: Boolean) {

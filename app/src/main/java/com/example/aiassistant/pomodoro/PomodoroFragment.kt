@@ -805,11 +805,50 @@ class PomodoroFragment : Fragment(), PomodoroTimer.TimerListener {
     }
 
     /**
+     * Android 13+ 的 POST_NOTIFICATIONS：拦截服务的常驻通知是"正在拦截 / 停止拦截"的唯一
+     * 可见入口，未授权时系统会静默丢弃前台通知。这里主动申请一次；被拒绝不阻断本次专注
+     * （服务已不会在无会话时被系统复活，不存在"打不开任何 App"的死局）。
+     * 用框架的 requestPermissions 而非 ActivityResultLauncher：后者依赖 androidx.activity
+     * 的包名版本差异（ActivityResultContracts 在不同版本里是 contract/contracts）。
+     */
+    @Suppress("DEPRECATION") // 刻意用框架版 requestPermissions，理由见上方注释
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT < 33) return
+        val ctx = context ?: return
+        val granted = androidx.core.content.ContextCompat.checkSelfPermission(
+            ctx, android.Manifest.permission.POST_NOTIFICATIONS
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (!granted) requestPermissions(
+            arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), REQ_NOTIFICATION_PERMISSION
+        )
+    }
+
+    private val REQ_NOTIFICATION_PERMISSION = 4001
+
+    @Suppress("DEPRECATION") // 与上方 requestPermissions 配对：同样刻意避开 androidx.activity 版本差异
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQ_NOTIFICATION_PERMISSION &&
+            grantResults.none { it == android.content.pm.PackageManager.PERMISSION_GRANTED }
+        ) {
+            context?.let {
+                Toast.makeText(it, "未开启通知权限：专注时将看不到「停止拦截」通知", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    /**
      * 检查并请求应用拦截所需的权限
      * @return true 如果全部权限已授权；false 如果正在引导用户授权中
      */
     private fun checkAppBlockerPermissions(): Boolean {
         val ctx = requireContext()
+
+        requestNotificationPermissionIfNeeded()
         
         // 1. 检查悬浮窗权限
         if (!Settings.canDrawOverlays(ctx)) {

@@ -48,10 +48,17 @@ class AppBlockerService : Service() {
 
         fun start(context: Context) {
             val intent = Intent(context, AppBlockerService::class.java)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+            } catch (e: Exception) {
+                // Android 12+ 在后台启动前台服务会抛 ForegroundServiceStartNotAllowedException
+                // （休息结束自动进入专注时应用常在后台）：这里不能让它击穿调用线程，
+                // 拦截能力降级为"本次不拦截"，专注计时照常进行
+                android.util.Log.e(TAG, "启动应用拦截服务失败（可能处于后台）：${e.message}")
             }
         }
 
@@ -168,7 +175,17 @@ class AppBlockerService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        return START_STICKY
+        // 系统复活（intent == null）绝不继续跑拦截：此时没有任何专注会话在跑，而轮询只认
+        // "拦截开关开着"，会给一切第三方 App 盖遮罩；遮罩上的「停止专注」靠番茄页的广播
+        // 接收器生效（此时必然没人接），唯一兜底是通知栏「停止拦截」——Android 13+ 未授予
+        // POST_NOTIFICATIONS 时前台通知被静默丢弃，用户就只能强制停止应用。
+        // 一律不复活、无 intent 即自毁，由番茄页在真正需要拦截时重新 start
+        if (intent == null) {
+            android.util.Log.w(TAG, "被系统复活且无会话依据，直接自我停止")
+            stopSelf()
+            return START_NOT_STICKY
+        }
+        return START_NOT_STICKY
     }
 
     override fun onDestroy() {

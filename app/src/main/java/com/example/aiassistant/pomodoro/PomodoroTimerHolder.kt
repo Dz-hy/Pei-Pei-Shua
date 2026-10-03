@@ -58,6 +58,8 @@ object PomodoroTimerHolder {
             .putLong(KEY_PLAN_TASK_ID, planTaskId)
             .putLong(KEY_REMAINING_MS, timer.getRemainingMillis())
             .putLong(KEY_TOTAL_MS, timer.getTotalMillis())
+            // 记下"剩余时间是截至此刻的"：进程被杀期间时间照样流逝，恢复时要按墙钟补扣
+            .putLong(KEY_START_TIME, System.currentTimeMillis())
             .putInt(KEY_COMPLETED_TOMATOES, timer.completedTomatoes)
             .putInt(KEY_PAUSED_FROM, timer.pausedFromStateOrdinal())
             .putInt(KEY_CONFIG_FOCUS, timer.config.focusMinutes)
@@ -76,10 +78,26 @@ object PomodoroTimerHolder {
         if (!p.getBoolean(KEY_RUNNING, false)) return null
 
         val stateOrdinal = p.getInt(KEY_STATE, 0)
-        val state = TimerState.entries.getOrElse(stateOrdinal) { TimerState.IDLE }
-        val remainingMs = p.getLong(KEY_REMAINING_MS, 0)
+        var state = TimerState.entries.getOrElse(stateOrdinal) { TimerState.IDLE }
+        var remainingMs = p.getLong(KEY_REMAINING_MS, 0)
         val totalMs = p.getLong(KEY_TOTAL_MS, 0)
         val completedTomatoes = p.getInt(KEY_COMPLETED_TOMATOES, 0)
+
+        // 进程被杀期间真实时间照样流逝：暂停态不扣（本来就停着），运行态按墙钟补扣。
+        // 不扣的话恢复后仍显示"还剩 24 分钟"，自然结束时又按目标时长落库 = 凭空多一个番茄
+        if (state != TimerState.PAUSED) {
+            val savedAt = p.getLong(KEY_START_TIME, 0L)
+            if (savedAt > 0) {
+                val elapsedWhileGone = System.currentTimeMillis() - savedAt
+                if (elapsedWhileGone > 0) remainingMs = (remainingMs - elapsedWhileGone).coerceAtLeast(0L)
+            }
+            if (remainingMs <= 0L) {
+                // 阶段在应用不在的时候就该结束了：不把"已结束"恢复成"专注中"，
+                // 也不补记番茄（没人见证它完成）；会话行留给孤儿清理按未完成处理
+                state = TimerState.IDLE
+                remainingMs = 0
+            }
+        }
 
         // 恢复配置
         val config = PomodoroConfig(

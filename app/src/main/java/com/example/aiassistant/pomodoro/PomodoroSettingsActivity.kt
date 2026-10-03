@@ -89,6 +89,10 @@ class PomodoroSettingsActivity : AppCompatActivity() {
                         .setCancelable(false)
                         .show()
                 }
+            } else {
+                // 只写偏好就关掉是不够的：服务仍在跑 800ms 轮询并持续续期 WakeLock，
+                // 遮罩与发热耗电都会留着。关掉开关即刻停服务
+                AppBlockerService.stop(this)
             }
         }
 

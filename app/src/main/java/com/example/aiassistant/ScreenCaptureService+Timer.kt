@@ -572,10 +572,21 @@ internal fun ScreenCaptureService.showTimerResultCard(session: TimerSession) {
         saving = true
         val toSave = session.copy(questions = remaining.toList())
         Thread {
-            TimerStore.saveSession(this, toSave)
+            // insert 失败返回 -1（磁盘满/约束冲突），异常也在这里收住：过去两者都不看，
+            // 照样关卡片弹"已保存"，用户以为存下了其实一条都没落库
+            val saved = try {
+                TimerStore.saveSession(this, toSave) to null
+            } catch (t: Throwable) {
+                -1L to (t.message ?: t.javaClass.simpleName)
+            }
             mainHandler.post {
-                dismissTimerResultCard()
-                Toast.makeText(this, "已保存计时记录（${toSave.questions.size} 题）", Toast.LENGTH_SHORT).show()
+                saving = false
+                if (saved.first >= 0) {
+                    dismissTimerResultCard()
+                    Toast.makeText(this, "已保存计时记录（${toSave.questions.size} 题）", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(this, "保存失败：${saved.second ?: "数据库未写入"}，请重试", Toast.LENGTH_LONG).show()
+                }
             }
         }.start()
     }
