@@ -362,8 +362,16 @@ object MarkdownRenderer {
 
     // ── 行内标记（占位符法：先换成占位符避免嵌套误配，最后回填带样式片段） ──
 
-    private fun parseInline(text: String, linkContext: Context?): SpannableStringBuilder {
-        val pieces = mutableListOf<CharSequence>()
+    /**
+     * @param pieces 占位符→带样式片段的表。加粗/斜体会递归调用本函数，必须共用同一张表：
+     *   外层先替换行内代码产生的占位符会留在内层文本里，各建一张表就查不到、那段文字直接消失
+     *   （例如 **答案是 `A`** 渲染成"答案是"）。
+     */
+    private fun parseInline(
+        text: String,
+        linkContext: Context?,
+        pieces: MutableList<CharSequence> = mutableListOf()
+    ): SpannableStringBuilder {
         fun stash(cs: CharSequence): String = "$PH_START${pieces.size}$PH_END".also { pieces.add(cs) }
 
         var s = text
@@ -381,13 +389,13 @@ object MarkdownRenderer {
         // 加粗
         s = Regex("\\*\\*(.+?)\\*\\*|__(.+?)__").replace(s) { m ->
             val inner = m.groupValues[1].ifEmpty { m.groupValues[2] }
-            val sb = parseInline(inner, linkContext)
+            val sb = parseInline(inner, linkContext, pieces)
             sb.setSpan(StyleSpan(Typeface.BOLD), 0, sb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
             stash(sb)
         }
         // 斜体
         s = Regex("(?<!\\*)\\*([^*\\n]+?)\\*(?!\\*)").replace(s) { m ->
-            val sb = parseInline(m.groupValues[1], linkContext)
+            val sb = parseInline(m.groupValues[1], linkContext, pieces)
             sb.setSpan(StyleSpan(Typeface.ITALIC), 0, sb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
             stash(sb)
         }
@@ -420,9 +428,11 @@ object MarkdownRenderer {
             }
             out.append(rest.substring(0, st))
             val idx = rest.substring(st + 1, en).toIntOrNull()
-            if (idx != null && idx in pieces.indices) {
-                out.append(pieces[idx])
-            }
+            // 查不到也必须留下这段文本（与上面 en<0 的兜底同口径）：静默丢弃会让内容凭空少一截
+            out.append(
+                if (idx != null && idx in pieces.indices) pieces[idx]
+                else rest.substring(st, en + 1)
+            )
             rest = rest.substring(en + 1)
         }
         return out
