@@ -22,15 +22,21 @@ object ModelManager {
     private var models = mutableListOf<AiModelConfig>()
     private var loaded = false
 
+    // 模型列表由主线程（增删改/拖拽/偏好导入）写、AI 故障转移线程（buildChain 迭代）读，
+    // 不加锁会抛 ConcurrentModificationException；读写统一走这把锁并返回快照
+    private val modelsLock = Any()
+
     /** KeyStore 密钥进程内缓存：避免每次 init/save 都走 AndroidKeyStore IPC 取钥 */
     @Volatile private var cachedKey: SecretKey? = null
     private val keyLock = Any()
 
-    val allModels: List<AiModelConfig> get() = models.toList()
+    val allModels: List<AiModelConfig> get() = synchronized(modelsLock) { models.toList() }
 
     fun init(context: Context) {
-        if (loaded) return
-        loaded = true
+        synchronized(modelsLock) {
+            if (loaded) return
+            loaded = true
+        }
         // 后台预热 KeyStore 密钥：首次密钥生成可达数十 ms，移出主线程的 save 路径
         // （取钥/生成在 keyLock 内串行，不会与主线程解密重复生成）
         Thread { getOrCreateKey() }.start()
@@ -61,51 +67,70 @@ object ModelManager {
                     }
                     list.add(cfg)
                 }
-                models = list
+                synchronized(modelsLock) { models = list }
             } catch (e: Exception) {
                 Log.e(TAG, "ai_models 解析失败，忽略已损坏的存储内容", e)
-                models = mutableListOf()
+                synchronized(modelsLock) { models = mutableListOf() }
             }
         }
         // 没有模型则创建默认
-        if (models.isEmpty()) {
-            models.add(AiModelConfig(
-                name = "默认模型",
-                baseUrl = AppPreferences.getApiBaseUrl(context),
-                apiKey = AppPreferences.getApiKey(context),
-                model = AppPreferences.getApiModel(context)
-            ))
-            save(context)
-        } else if (needMigrate) {
-            save(context) // 旧格式（整体密文/明文 apiKey）迁移为字段级密文
+        synchronized(modelsLock) {
+            if (models.isEmpty()) {
+                models.add(AiModelConfig(
+                    name = "默认模型",
+                    baseUrl = AppPreferences.getApiBaseUrl(context),
+                    apiKey = AppPreferences.getApiKey(context),
+                    model = AppPreferences.getApiModel(context)
+                ))
+                save(context)
+            } else if (needMigrate) {
+                save(context) // 旧格式（整体密文/明文 apiKey）迁移为字段级密文
+            }
         }
     }
 
-    fun get(id: String) = models.find { it.id == id }
+    /**
+     * 偏好备份导入后必须调用：init 只认进程内 loaded 标记，不重载的话，
+     * 内存里的旧列表会在下一次增删改时被整体 save 回去、把刚导入的模型（含密钥）覆盖丢失。
+     */
+    fun reload(context: Context) {
+        synchronized(modelsLock) { loaded = false }
+        init(context)
+    }
+
+    fun get(id: String) = synchronized(modelsLock) { models.find { it.id == id } }
 
     fun add(context: Context, config: AiModelConfig) {
-        models.add(config)
-        save(context)
+        synchronized(modelsLock) {
+            models.add(config)
+            save(context)
+        }
     }
 
     fun update(context: Context, config: AiModelConfig) {
-        val idx = models.indexOfFirst { it.id == config.id }
-        if (idx >= 0) {
-            models[idx] = config
-            save(context)
+        synchronized(modelsLock) {
+            val idx = models.indexOfFirst { it.id == config.id }
+            if (idx >= 0) {
+                models[idx] = config
+                save(context)
+            }
         }
     }
 
     fun delete(context: Context, id: String) {
-        models.removeAll { it.id == id }
-        save(context)
+        synchronized(modelsLock) {
+            models.removeAll { it.id == id }
+            save(context)
+        }
     }
 
     /** 调整模型顺序（备用模型切换优先级；主模型由 activeModelId 决定，仍最优先）。 */
     fun move(context: Context, fromIndex: Int, toIndex: Int) {
-        if (fromIndex !in models.indices || toIndex !in models.indices || fromIndex == toIndex) return
-        models.add(toIndex, models.removeAt(fromIndex))
-        save(context)
+        synchronized(modelsLock) {
+            if (fromIndex !in models.indices || toIndex !in models.indices || fromIndex == toIndex) return
+            models.add(toIndex, models.removeAt(fromIndex))
+            save(context)
+        }
     }
 
     private fun save(context: Context) {

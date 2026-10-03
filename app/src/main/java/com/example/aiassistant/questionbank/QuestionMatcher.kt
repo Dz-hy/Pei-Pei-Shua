@@ -180,7 +180,7 @@ object QuestionMatcher {
         if (chain.isEmpty()) return null
         val latch = CountDownLatch(1)
         var result: Pair<Int, String>? = null
-        AiFailoverExecutor.execute(
+        val executor = AiFailoverExecutor.execute(
             candidates = chain,
             request = { cfg, onComplete, onError ->
                 OpenAIApiService.analyzeText(
@@ -204,7 +204,11 @@ object QuestionMatcher {
             onComplete = { text -> result = parseRerank(text); latch.countDown() },
             onError = { latch.countDown() }
         )
-        latch.await(90L * chain.size.coerceAtMost(3), TimeUnit.SECONDS)
+        val finished = latch.await(90L * chain.size.coerceAtMost(3), TimeUnit.SECONDS)
+        if (!finished) {
+            // 超时：掐掉这条孤儿链，否则它会继续逐模型重发、烧 token 并抢占后续请求
+            executor.cancel()
+        }
         return result
     }
 

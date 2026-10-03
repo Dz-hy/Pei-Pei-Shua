@@ -22,7 +22,8 @@ enum class AiErrorKind {
     PARSE,       // 响应 JSON 解析异常
     CLIENT,      // HTTP 4xx（除 429）：鉴权/参数等客户端错误
     BUILD,       // 请求构建失败
-    TOOL_LIMIT   // 工具调用轮次超限
+    TOOL_LIMIT,  // 工具调用轮次超限
+    SUPERSEDED   // 被同引擎的下一个请求取代：不可重试/不可切换，但必须给调用方一个终点
 }
 
 /**
@@ -36,6 +37,14 @@ object OpenAIApiService {
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(120, TimeUnit.SECONDS)
         .writeTimeout(15, TimeUnit.SECONDS)
+        // 整调用上限：只设 connect/read/write 时，一个不断吐字节的慢响应（或 SSE 心跳）
+        // 可以永不触发超时，调用方只能靠自己的 latch 干等
+        .callTimeout(180, TimeUnit.SECONDS)
+        .build()
+
+    // 流式回答整体更长（边生成边推），单独放宽到 10 分钟兜底"永不断流"的挂死
+    private val streamClient: OkHttpClient = client.newBuilder()
+        .callTimeout(600, TimeUnit.SECONDS)
         .build()
 
     private var currentCall: Call? = null
@@ -166,7 +175,14 @@ object OpenAIApiService {
         model: String
     ): List<FloatArray> {
         if (texts.isEmpty()) return emptyList()
-        val url = baseUrl.trimEnd('/') + "/v1/embeddings"
+        // 与 chat 端点同一套 /v1 归一：用户按文档填 ".../v1" 时不能再拼一次，
+        // 否则得到 ".../v1/v1/embeddings" → 404，向量匹配静默降级、索引构建失败
+        val cleanBaseUrl = if (!baseUrl.contains("/v1")) {
+            baseUrl.trimEnd('/') + "/v1"
+        } else {
+            baseUrl
+        }
+        val url = cleanBaseUrl.trimEnd('/') + "/embeddings"
         val body = JSONObject().apply {
             put("model", model)
             put("input", JSONArray(texts))
@@ -461,8 +477,20 @@ object OpenAIApiService {
         onStructuredError: ((AiErrorKind, String) -> Unit)? = null
     ) {
         // onStructuredError 非空时接管全部错误上报（供故障转移执行器按错误分类处理）
+        // 回调闸门：本次调用无论走成功、失败还是被取代，都只向调用方送达一次结果。
+        // 被取代（代际变化）时以前直接 return，调用方永远等不到终点——UI 永久转圈、
+        // latch 空等到超时、整条线程被挂住
+        val delivered = java.util.concurrent.atomic.AtomicBoolean(false)
+        fun complete(text: String) {
+            if (delivered.compareAndSet(false, true)) onComplete(text)
+        }
         fun report(kind: AiErrorKind, msg: String) {
+            if (!delivered.compareAndSet(false, true)) return
             if (onStructuredError != null) onStructuredError.invoke(kind, msg) else onError(msg)
+        }
+        fun supersededOrCancel() {
+            if (delivered.get()) return
+            report(AiErrorKind.SUPERSEDED, "请求已被新的 AI 请求取代")
         }
         cancelCurrentRequest()
         val gen = requestGeneration
@@ -473,8 +501,13 @@ object OpenAIApiService {
 
         call.enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
-                if (call.isCanceled() || gen != requestGeneration) {
+                if (call.isCanceled()) {
                     android.util.Log.d("AIAssistantAPI", "onFailure: Request was canceled.")
+                    return
+                }
+                if (gen != requestGeneration) {
+                    android.util.Log.d("AIAssistantAPI", "onFailure: superseded by a newer request")
+                    supersededOrCancel()
                     return
                 }
                 android.util.Log.e("AIAssistantAPI", "onFailure: Network request failed!", e)
@@ -482,9 +515,15 @@ object OpenAIApiService {
             }
 
             override fun onResponse(call: Call, response: Response) {
-                if (call.isCanceled() || gen != requestGeneration) {
+                if (call.isCanceled()) {
                     android.util.Log.d("AIAssistantAPI", "onResponse: Request was canceled after response received.")
                     response.close()
+                    return
+                }
+                if (gen != requestGeneration) {
+                    android.util.Log.d("AIAssistantAPI", "onResponse: superseded by a newer request")
+                    response.close()
+                    supersededOrCancel()
                     return
                 }
 
@@ -504,6 +543,8 @@ object OpenAIApiService {
                         retryHandler.postDelayed({
                             if (gen == requestGeneration) {
                                 executeRequest(request, apiType, retryCount + 1, onComplete, onError, onStructuredError)
+                            } else {
+                                supersededOrCancel()
                             }
                         }, delayMs)
                         return
@@ -533,16 +574,20 @@ object OpenAIApiService {
                     val parsedText = parseResponseStr(responseStr, apiType)
                     if (BuildConfig.DEBUG) android.util.Log.d("AIAssistantAPI", "onResponse: Parsed output length: ${parsedText.length}, preview: ${parsedText.take(150)}")
 
-                    if (gen != requestGeneration) return
+                    if (gen != requestGeneration) {
+                        supersededOrCancel()
+                        return
+                    }
                     if (parsedText.isEmpty()) {
                         android.util.Log.e("AIAssistantAPI", "onResponse: Parsed text is empty!")
                         report(AiErrorKind.EMPTY, "解析响应内容为空")
                     } else {
-                        onComplete(parsedText)
+                        complete(parsedText)
                     }
                 } catch (e: Exception) {
                     android.util.Log.e("AIAssistantAPI", "onResponse: Parse exception!", e)
                     if (gen == requestGeneration) report(AiErrorKind.PARSE, "解析响应失败：${e.message}")
+                    else supersededOrCancel()
                 } finally {
                     try { body.close() } catch (_: Exception) {}
                 }
@@ -564,25 +609,37 @@ object OpenAIApiService {
         onError: (String) -> Unit,
         onStructuredError: ((AiErrorKind, String) -> Unit)? = null
     ) {
+        // 回调闸门：与 executeRequest 同一语义——被取代也必须给调用方一个终点，且只送达一次
+        val delivered = java.util.concurrent.atomic.AtomicBoolean(false)
+        fun complete(text: String) {
+            if (delivered.compareAndSet(false, true)) onComplete(text)
+        }
         fun report(kind: AiErrorKind, msg: String) {
+            if (!delivered.compareAndSet(false, true)) return
             if (onStructuredError != null) onStructuredError.invoke(kind, msg) else onError(msg)
+        }
+        fun supersededOrCancel() {
+            if (delivered.get()) return
+            report(AiErrorKind.SUPERSEDED, "请求已被新的 AI 请求取代")
         }
         cancelCurrentRequest()
         val gen = requestGeneration
         android.util.Log.d("AIAssistantAPI", "executeStreamRequest: launching. URL: ${request.url.host}${request.url.encodedPath}")
-        val call = client.newCall(request)
+        val call = streamClient.newCall(request)
         synchronized(this) { currentCall = call }
 
         call.enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
-                if (call.isCanceled() || gen != requestGeneration) return
+                if (call.isCanceled()) return
+                if (gen != requestGeneration) { supersededOrCancel(); return }
                 android.util.Log.e("AIAssistantAPI", "executeStreamRequest: onFailure", e)
                 report(AiErrorKind.NETWORK, "网络请求失败：${e.message}")
             }
 
             override fun onResponse(call: Call, response: Response) {
                 try {
-                    if (call.isCanceled() || gen != requestGeneration) { response.close(); return }
+                    if (call.isCanceled()) { response.close(); return }
+                    if (gen != requestGeneration) { response.close(); supersededOrCancel(); return }
 
                     if (!response.isSuccessful) {
                         val statusCode = response.code
@@ -592,6 +649,8 @@ object OpenAIApiService {
                             retryHandler.postDelayed({
                                 if (gen == requestGeneration) {
                                     executeStreamRequest(request, retryCount + 1, onDelta, onComplete, onError, onStructuredError)
+                                } else {
+                                    supersededOrCancel()
                                 }
                             }, delayMs)
                             return
@@ -612,9 +671,9 @@ object OpenAIApiService {
                     if (!contentType.contains("text/event-stream")) {
                         // 网关/中转忽略 stream:true：回退为一次性解析
                         val responseStr = body.string()
-                        if (gen != requestGeneration) return
+                        if (gen != requestGeneration) { supersededOrCancel(); return }
                         val parsed = parseResponseStr(responseStr, "openai")
-                        if (parsed.isEmpty()) report(AiErrorKind.EMPTY, "解析响应内容为空") else onComplete(parsed)
+                        if (parsed.isEmpty()) report(AiErrorKind.EMPTY, "解析响应内容为空") else complete(parsed)
                         return
                     }
 
@@ -624,15 +683,18 @@ object OpenAIApiService {
                         val now = android.os.SystemClock.elapsedRealtime()
                         if (force || now - lastUiPost >= 80) {
                             lastUiPost = now
+                            // 必须在工作线程先取快照再 post：accumulated 由本线程继续 append，
+                            // 主线程直接 toString() 会与其扩容竞争（越界崩溃或文本错乱）
+                            val snapshot = accumulated.toString()
                             retryHandler.post {
-                                if (gen == requestGeneration) onDelta(accumulated.toString())
+                                if (gen == requestGeneration) onDelta(snapshot)
                             }
                         }
                     }
 
                     body.charStream().buffered().useLines { lines ->
                         for (line in lines) {
-                            if (gen != requestGeneration) return
+                            if (gen != requestGeneration) { supersededOrCancel(); return }
                             val t = line.trim()
                             if (t.isEmpty() || t.startsWith(":") || !t.startsWith("data:")) continue
                             val payload = t.substring(5).trim()
@@ -640,7 +702,9 @@ object OpenAIApiService {
                                 postDelta(force = true)
                                 if (gen == requestGeneration) {
                                     if (accumulated.isEmpty()) report(AiErrorKind.EMPTY, "解析响应内容为空")
-                                    else onComplete(accumulated.toString())
+                                    else complete(accumulated.toString())
+                                } else {
+                                    supersededOrCancel()
                                 }
                                 return
                             }
@@ -662,13 +726,15 @@ object OpenAIApiService {
                         }
                     }
                     // 服务端未发 [DONE] 直接断流：已有内容视为成功，避免白等重试
-                    if (gen != requestGeneration) return
-                    if (accumulated.isNotEmpty()) onComplete(accumulated.toString())
+                    if (gen != requestGeneration) { supersededOrCancel(); return }
+                    if (accumulated.isNotEmpty()) complete(accumulated.toString())
                     else report(AiErrorKind.EMPTY, "流式响应提前结束且内容为空")
                 } catch (e: IOException) {
                     if (gen == requestGeneration) report(AiErrorKind.NETWORK, "流式读取中断：${e.message}")
+                    else supersededOrCancel()
                 } catch (e: Exception) {
                     if (gen == requestGeneration) report(AiErrorKind.PARSE, "解析流式响应失败：${e.message}")
+                    else supersededOrCancel()
                 } finally {
                     try { response.body?.close() } catch (_: Exception) {}
                 }
@@ -900,8 +966,18 @@ object OpenAIApiService {
         onStructuredError: ((AiErrorKind, String) -> Unit)? = null
     ) {
         // onStructuredError 非空时接管全部错误上报（供故障转移执行器按错误分类处理）
+        // 回调闸门：与 executeRequest 同一语义（递归轮次中只有终止那一轮会送达一次结果）
+        val delivered = java.util.concurrent.atomic.AtomicBoolean(false)
+        fun complete(text: String) {
+            if (delivered.compareAndSet(false, true)) onComplete(text)
+        }
         fun report(kind: AiErrorKind, msg: String) {
+            if (!delivered.compareAndSet(false, true)) return
             if (onStructuredError != null) onStructuredError.invoke(kind, msg) else onError(msg)
+        }
+        fun supersededOrCancel() {
+            if (delivered.get()) return
+            report(AiErrorKind.SUPERSEDED, "请求已被新的 AI 请求取代")
         }
         if (round >= maxRounds) {
             report(AiErrorKind.TOOL_LIMIT, "工具调用轮次超限（最多 $maxRounds 轮），已终止")
@@ -924,16 +1000,18 @@ object OpenAIApiService {
 
         call.enqueue(object : okhttp3.Callback {
             override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
-                if (call.isCanceled() || gen != requestGeneration) return
+                if (call.isCanceled()) return
+                if (gen != requestGeneration) { supersededOrCancel(); return }
                 report(AiErrorKind.NETWORK, "网络请求失败：${e.message}")
             }
 
             override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
-                if (call.isCanceled() || gen != requestGeneration) { response.close(); return }
+                if (call.isCanceled()) { response.close(); return }
+                if (gen != requestGeneration) { response.close(); supersededOrCancel(); return }
                 if (!response.isSuccessful) {
                     val body = try { response.body?.string() } catch (_: Exception) { null } ?: ""
                     response.close()
-                    if (gen != requestGeneration) return
+                    if (gen != requestGeneration) { supersededOrCancel(); return }
                     val statusCode = response.code
                     val kind = when {
                         statusCode == 429 -> AiErrorKind.RATE_LIMIT
@@ -954,7 +1032,7 @@ object OpenAIApiService {
                     val toolCalls = parseToolCalls(json, apiType)
                     
                     if (toolCalls.isNotEmpty()) {
-                        if (gen != requestGeneration) return
+                        if (gen != requestGeneration) { supersededOrCancel(); return }
                         // AI 请求调用工具 → 执行工具 → 追加结果到 messages → 重新请求
                         android.util.Log.d("AIAssistantAPI", "AI 请求调用 ${toolCalls.size} 个工具")
                         
@@ -964,6 +1042,7 @@ object OpenAIApiService {
                         
                         // 在后台线程执行工具
                         Thread {
+                          try {
                             val toolResults = mutableListOf<Pair<String, String>>()
                             for (tc in toolCalls) {
                                 onToolCall?.let {
@@ -1003,7 +1082,7 @@ object OpenAIApiService {
                             }
 
                             // 取消/换模型后旧链路不得继续
-                            if (gen != requestGeneration) return@Thread
+                            if (gen != requestGeneration) { supersededOrCancel(); return@Thread }
                             // 递归下一轮
                             executeToolLoop(
                                 context, baseUrl, apiKey, model, apiType,
@@ -1011,16 +1090,22 @@ object OpenAIApiService {
                                 round + 1, maxRounds, onToolCall, onComplete, onError,
                                 onStructuredError
                             )
+                          } catch (e: Throwable) {
+                            // 工具执行里的异常若逃逸出这个裸线程会直接崩掉进程
+                            android.util.Log.e("AIAssistantAPI", "tool loop failed", e)
+                            report(AiErrorKind.CLIENT, "工具执行失败：${e.message}")
+                          }
                         }.start()
                     } else {
                         // 最终文本回答
-                        if (gen != requestGeneration) return
+                        if (gen != requestGeneration) { supersededOrCancel(); return }
                         val text = parseResponseStr(responseStr, apiType)
                         if (text.isEmpty()) report(AiErrorKind.EMPTY, "解析响应内容为空")
-                        else onComplete(text)
+                        else complete(text)
                     }
                 } catch (e: Exception) {
                     if (gen == requestGeneration) report(AiErrorKind.PARSE, "解析响应失败：${e.message}")
+                    else supersededOrCancel()
                 }
             }
         })

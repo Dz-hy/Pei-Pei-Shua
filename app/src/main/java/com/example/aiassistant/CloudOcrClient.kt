@@ -16,6 +16,7 @@ object CloudOcrClient {
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
+        .callTimeout(120, TimeUnit.SECONDS)
         .build()
 
     @Volatile
@@ -140,12 +141,20 @@ object CloudOcrClient {
         onSuccess: (json: JSONObject) -> Unit,
         onError: (String) -> Unit
     ) {
-        val request = Request.Builder()
-            .url(url.trimEnd('/'))
-            .addHeader("Authorization", "token $token")
-            .addHeader("Content-Type", "application/json")
-            .post(requestJson.toString().toRequestBody("application/json".toMediaType()))
-            .build()
+        // 设置页填了缺 scheme 的地址（如 "xxx.com/ocr"）时 Request.Builder.url() 会抛
+        // IllegalArgumentException；本函数跑在截图的 CaptureThread 上，异常没人接就是整进程崩
+        val request = try {
+            Request.Builder()
+                .url(url.trimEnd('/'))
+                .addHeader("Authorization", "token $token")
+                .addHeader("Content-Type", "application/json")
+                .post(requestJson.toString().toRequestBody("application/json".toMediaType()))
+                .build()
+        } catch (e: Exception) {
+            android.util.Log.e("CloudOcrClient", "云端 OCR 地址无法解析：$url", e)
+            onError("云端 OCR 地址无效（需以 http:// 或 https:// 开头）：${e.message}")
+            return
+        }
 
         cancelCurrentRequest()
         val call = client.newCall(request)

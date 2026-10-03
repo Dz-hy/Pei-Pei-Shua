@@ -30,10 +30,31 @@ object ShizhengAi {
     var lastError: String? = null
         private set
 
-    private fun <T> fail(reason: String): T? {
+    /**
+     * 上一次失败的可重试性：出题/总结链据此决定"保留待下次同步重试"还是"永久判死"。
+     * 判定只来自 AI 层回传的结构化错误码与明确的超时/解析点，不从错误文案反推。
+     */
+    enum class ShizhengFailure { TRANSIENT, PERMANENT }
+
+    @Volatile
+    var lastFailure: ShizhengFailure = ShizhengFailure.PERMANENT
+        private set
+
+    private fun <T> fail(
+        reason: String,
+        kind: ShizhengFailure = ShizhengFailure.PERMANENT
+    ): T? {
         lastError = reason
-        Log.e(TAG, "AI 调用失败：$reason")
+        lastFailure = kind
+        Log.e(TAG, "AI 调用失败（$kind）：$reason")
         return null
+    }
+
+    /** AI 层结构化错误码 → 可重试性：客户端/构建/解析类换时机重试也没用，其余按瞬时处理 */
+    private fun transientKind(kind: AiErrorKind): ShizhengFailure = when (kind) {
+        AiErrorKind.CLIENT, AiErrorKind.BUILD, AiErrorKind.PARSE, AiErrorKind.TOOL_LIMIT ->
+            ShizhengFailure.PERMANENT
+        else -> ShizhengFailure.TRANSIENT   // NETWORK / SERVER / RATE_LIMIT / EMPTY / SUPERSEDED
     }
 
     data class Classified(val categories: List<String>, val items: List<String>)
@@ -71,7 +92,9 @@ object ShizhengAi {
         val latch = CountDownLatch(1)
         var result: String? = null
         var error: String? = null
-        try {
+        // AI 层回传的结构化错误码：latch 之后据此判定可重试性（回调先于 countDown，可见性有保证）
+        var lastKind = AiErrorKind.PARSE
+        val executor = try {
             com.example.aiassistant.AiFailoverExecutor.execute(
                 candidates = listOf(config),
                 request = { cfg, onComplete, onError ->
@@ -91,7 +114,10 @@ object ShizhengAi {
                             // 避免 analyzeText 走非结构化错误通道时 executor 收不到回调、latch 挂到超时
                             onError(AiErrorKind.PARSE, msg)
                         },
-                        onStructuredError = onError
+                        onStructuredError = { kind, msg ->
+                            lastKind = kind
+                            onError(kind, msg)
+                        }
                     )
                 },
                 onComplete = { fullText -> result = fullText; latch.countDown() },
@@ -101,11 +127,17 @@ object ShizhengAi {
             return fail("AI 请求构建异常：${e.message}")
         }
         if (!latch.await(CALL_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
-            return fail("AI 响应超时（>${CALL_TIMEOUT_SECONDS}s），模型：${config.model}")
+            // 超时后必须掐掉这条链：否则它仍会按"同模型退避 + 逐模型切换"跑完整条链，
+            // 白烧 token，还会抢占单飞槽位把下一次 AI 请求挤掉
+            executor.cancel()
+            return fail(
+                "AI 响应超时（>${CALL_TIMEOUT_SECONDS}s），模型：${config.model}",
+                ShizhengFailure.TRANSIENT
+            )
         }
-        error?.let { return fail("AI 接口报错：$it") }
+        error?.let { return fail("AI 接口报错：$it", transientKind(lastKind)) }
         val text = result
-        if (text.isNullOrBlank()) return fail("AI 返回内容为空")
+        if (text.isNullOrBlank()) return fail("AI 返回内容为空", ShizhengFailure.TRANSIENT)
         return text
     }
 
@@ -183,6 +215,7 @@ object ShizhengAi {
     ): Map<Long, Classified>? {
         if (articles.isEmpty()) return emptyMap()
         lastError = null
+        lastFailure = ShizhengFailure.PERMANENT
 
         val result = mutableMapOf<Long, Classified>()
         var selectedCount = 0
@@ -237,6 +270,7 @@ object ShizhengAi {
 
     fun summarizeArticle(context: Context, article: NewsArticle): OrgSummary? {
         lastError = null
+        lastFailure = ShizhengFailure.PERMANENT
         val prompt = buildString {
             append("你是公务员考试时政学习助手。请对下面这篇《中国组织人事报》要闻做备考向总结：\n")
             append("1. summary：80-120字一段话概括，按「时间/主体 + 核心事项 + 举措亮点或意义」组织，语言精炼、信息密度高，不要空话；\n")
@@ -266,6 +300,7 @@ object ShizhengAi {
 
     fun generateQuestion(context: Context, article: NewsArticle, type: Int): ShizhengQuestionDraft? {
         lastError = null
+        lastFailure = ShizhengFailure.PERMANENT
         val prompt = if (type == ShizhengQuestionType.BLANK) blankPrompt() else thoughtPrompt()
         val user = buildString {
             append("新闻标题：${article.title}\n发布日期：${article.publishDate}\n正文：\n")
@@ -340,6 +375,7 @@ object ShizhengAi {
         draft: ShizhengQuestionDraft
     ): Triple<Boolean, ShizhengQuestionDraft?, String>? {
         lastError = null
+        lastFailure = ShizhengFailure.PERMANENT
         val draftJson = JSONObject().apply {
             put("stem", draft.stem)
             put("options", JSONArray(draft.options))
