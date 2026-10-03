@@ -177,6 +177,9 @@ internal fun ScreenCaptureService.setupFloatBallTouch(view: View) {
                         // 倒计时期间单击 = 取消计时（未正式计时，不影响截图功能）
                         TimerEngine.cancelCountdown(this@setupFloatBallTouch)
                     } else {
+                        // 普通单击：清掉可能残留的识词标记（上一次识词被取消/截帧失败时
+                        // 走不到复位点，残留会把之后每次普通截图都劫持成词典查词）
+                        ScreenCaptureService.isDictOcrMode = false
                         onFloatBallClicked()
                     }
                 }

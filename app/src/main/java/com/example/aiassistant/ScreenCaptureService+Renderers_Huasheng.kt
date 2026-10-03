@@ -824,7 +824,11 @@ internal fun ScreenCaptureService.renderQuestionSection(card: View, json: JSONOb
     }
     // 填空题：把不间断空格（NBSP, U+00A0）和全角空格（U+3000）替换为可见下划线
     qText = qText.replace(Regex("[\\u00A0\\u3000]{2,}"), " ________ ")
-    qText = qText.replace(Regex("■.*$"), "").trim()
+    // 去掉行首的 "■…" 标记行。MULTILINE 让 $ 按"行尾"匹配：缺它时 $ 只认整个字符串的末尾，
+    // 标记夹在中间就清不掉（残留进题干）；而单行题干恰好以 ■ 开头时，整条题干会被替换成空，
+    // 题干区随之隐藏——用户看到的是一道没有题干的题。因此清不干净时宁可用原文也不留空
+    val stemWithoutMarks = qText.replace(Regex("■.*$", RegexOption.MULTILINE), "").trim()
+    if (stemWithoutMarks.isNotEmpty()) qText = stemWithoutMarks
 
     // 根据 AI 返回的 keywords 数组，自动在题目中标红关键词
     val keywords = json.optJSONArray("keywords")
@@ -919,8 +923,12 @@ internal fun ScreenCaptureService.renderOptionsAnalysis(card: View, json: JSONOb
         tvOT?.visibility = View.VISIBLE; layoutOpts?.visibility = View.VISIBLE; layoutOpts?.removeAllViews()
         for (idx in 0 until opts.length()) {
             val o = opts.optJSONObject(idx) ?: continue
-            val correct = o.optBoolean("correct", false)
-            val matches = if (o.has("matches")) o.optBoolean("matches", false) else correct
+            val rawCorrect = o.optBoolean("correct", false)
+            val matches = if (o.has("matches")) o.optBoolean("matches", false) else rawCorrect
+            // 单一判定：底色、✓/✗ 图标与右侧标签必须共用同一个条件。
+            // 片段阅读只回 correct，定义判断/类比推理只回 matches——
+            // 分开设条件会让"正确项绿底 + 红色易错点标签"同时出现，结论自相矛盾
+            val isRight = rawCorrect || matches
             val optText = cleanHtmlText(jsonStr(o,"option", ""))
             val reason = jsonStr(o,"reason", "")
                 .replace(Regex("<br\\s*/?>", RegexOption.IGNORE_CASE), "\n")
@@ -932,15 +940,15 @@ internal fun ScreenCaptureService.renderOptionsAnalysis(card: View, json: JSONOb
                 orientation = LinearLayout.VERTICAL
                 layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 0, 0, dp6) }
                 setPadding(dp10, dp8, dp10, dp8)
-                setBackgroundResource(if (correct || matches) R.drawable.bg_option_correct else R.drawable.bg_option_incorrect)
+                setBackgroundResource(if (isRight) R.drawable.bg_option_correct else R.drawable.bg_option_incorrect)
             }
             val hRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
             val icon = TextView(this).apply {
                 layoutParams = LinearLayout.LayoutParams((20*d).toInt(), (20*d).toInt()).apply { setMargins(0, 0, dp6, 0) }
-                text = if (correct || matches) "✓" else "✗"; textSize = 13f; gravity = Gravity.CENTER
-                setTextColor(if (correct || matches) 0xFF10B981.toInt() else 0xFFEF4444.toInt())
+                text = if (isRight) "✓" else "✗"; textSize = 13f; gravity = Gravity.CENTER
+                setTextColor(if (isRight) 0xFF10B981.toInt() else 0xFFEF4444.toInt())
                 setTypeface(null, Typeface.BOLD)
-                setBackgroundResource(if (correct || matches) R.drawable.bg_tag_green else R.drawable.bg_tag_red)
+                setBackgroundResource(if (isRight) R.drawable.bg_tag_green else R.drawable.bg_tag_red)
             }
             hRow.addView(icon)
             val tvOpt = TextView(this).apply {
@@ -964,14 +972,14 @@ internal fun ScreenCaptureService.renderOptionsAnalysis(card: View, json: JSONOb
                 layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, dp4, 0, 0) }
             }
             var hasTag = false
-            if (correct && sType.isNotEmpty()) { tRow.addView(createTag(sType, "#92400E", R.drawable.bg_tag_orange, d)); hasTag = true }
-            if (correct && sPos.isNotEmpty()) {
+            if (isRight && sType.isNotEmpty()) { tRow.addView(createTag(sType, "#92400E", R.drawable.bg_tag_orange, d)); hasTag = true }
+            if (isRight && sPos.isNotEmpty()) {
                 val lbl = if (sPos == "pre") "前对策" else "后对策"
                 val t = createTag(lbl, "#1E40AF", R.drawable.bg_tag_blue, d)
                 (t.layoutParams as LinearLayout.LayoutParams).setMargins(dp4, 0, 0, 0)
                 tRow.addView(t); hasTag = true
             }
-            if (!correct && eType.isNotEmpty()) { tRow.addView(createTag(eType, "#DC2626", R.drawable.bg_tag_red, d)); hasTag = true }
+            if (!isRight && eType.isNotEmpty()) { tRow.addView(createTag(eType, "#DC2626", R.drawable.bg_tag_red, d)); hasTag = true }
             if (hasTag) optCard.addView(tRow)
             layoutOpts?.addView(optCard)
         }

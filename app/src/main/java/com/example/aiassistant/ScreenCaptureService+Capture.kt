@@ -40,9 +40,12 @@ internal fun ScreenCaptureService.captureAndCrop(cropRect: Rect) {
                         isSilentCapture = false
                         cancelCaptureTimeout()
                         reattachSmallBall()
+                        ScreenCaptureService.isDictOcrMode = false
                         Toast.makeText(this, "裁剪失败", Toast.LENGTH_SHORT).show()
                     }
                 } else {
+                    // 截帧失败：本次截图终止，识词标记必须一并复位（残留会劫持下一次截图）
+                    ScreenCaptureService.isDictOcrMode = false
                     isCapturing = false
                     isSilentCapture = false
                     cancelCaptureTimeout()
@@ -69,6 +72,7 @@ internal fun ScreenCaptureService.captureAndShowSelector(saveAsFixed: Boolean) {
                     cancelCaptureTimeout()
                     reattachFloatBall()
                     reattachSmallBall()
+                    ScreenCaptureService.isDictOcrMode = false
                     Toast.makeText(this, "截图失败，请重试", Toast.LENGTH_SHORT).show()
                 }
             }
@@ -215,7 +219,11 @@ internal fun ScreenCaptureService.cropBitmap(source: Bitmap, rect: Rect): Bitmap
         val top    = rect.top.coerceIn(0, source.height - 1)
         val right  = rect.right.coerceIn(left + 1, source.width)
         val bottom = rect.bottom.coerceIn(top + 1, source.height)
-        Bitmap.createBitmap(source, left, top, right - left, bottom - top)
+        val out = Bitmap.createBitmap(source, left, top, right - left, bottom - top)
+        // 整屏（无平移无缩放）时 createBitmap 直接返回 source 本身：调用方紧接着 recycle(source)
+        // 会把返回值一起回收，之后 bitmap.compress 抛 "can't compress a recycled bitmap" 崩进程。
+        // 横屏保存的固定区域转回竖屏被 coerceIn 夹成全屏时同样命中这条路
+        if (out === source) source.copy(source.config ?: Bitmap.Config.ARGB_8888, true) else out
     } catch (e: Exception) {
         null
     }
@@ -337,6 +345,7 @@ internal fun ScreenCaptureService.showAreaSelectionOverlay(fullBitmap: Bitmap, s
                 isSilentCapture = false
                 cancelCaptureTimeout()
                 reattachSmallBall()
+                ScreenCaptureService.isDictOcrMode = false
                 Toast.makeText(this, "裁剪失败", Toast.LENGTH_SHORT).show()
             }
         },
@@ -347,6 +356,7 @@ internal fun ScreenCaptureService.showAreaSelectionOverlay(fullBitmap: Bitmap, s
             removeAreaOverlay()
             reattachFloatBall()
             reattachSmallBall()
+            ScreenCaptureService.isDictOcrMode = false
             fullBitmap.recycle()
             areaOverlayBitmap = null
         }

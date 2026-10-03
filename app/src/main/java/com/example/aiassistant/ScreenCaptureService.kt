@@ -109,6 +109,16 @@ class ScreenCaptureService : Service() {
     // ── 防止重复弹出授权页面 ──────────────────────────────────────────
     @Volatile internal var isRequestingConsent = false
 
+    // 授权标记的兜底复位：授权页被 ROM 静默拦截、被用户划掉或自身崩溃时，既没有
+    // onActivityResult 也没有 DENIED 广播，标记会永久为 true——此后悬浮球单击、
+    // 开始计时等所有入口都走 "已在等待授权" 的死分支，功能整体变砖且无自愈
+    private val consentTimeoutRunnable = Runnable {
+        if (isRequestingConsent) {
+            Log.w(TAG, "授权页 15s 无回声，复位授权标记（截图入口恢复可用）")
+            isRequestingConsent = false
+        }
+    }
+
     // ── 缓存截图上下文用于快捷切换重分析 ──
     @Volatile internal var lastQuestionText: String? = null
     @Volatile internal var lastCroppedBitmap: Bitmap? = null
@@ -238,6 +248,7 @@ class ScreenCaptureService : Service() {
                     }
                     MediaProjectionConsentActivity.ACTION_CONSENT_DENIED -> {
                         Log.d(TAG, "Consent denied — resetting flag")
+                        mainHandler.removeCallbacks(consentTimeoutRunnable)
                         isRequestingConsent = false
                     }
                 }
@@ -306,6 +317,7 @@ class ScreenCaptureService : Service() {
             // 保存授权凭据，锁屏后可自动恢复，无需用户再次授权
             savedResultCode = resultCode
             savedProjectionData = data.clone() as Intent
+            mainHandler.removeCallbacks(consentTimeoutRunnable)
             isRequestingConsent = false  // 授权成功，重置标记
 
             showFloatBall()
@@ -473,7 +485,13 @@ class ScreenCaptureService : Service() {
                 val consentIntent = Intent(this, MediaProjectionConsentActivity::class.java).apply {
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_MULTIPLE_TASK)
                 }
-                startActivity(consentIntent)
+                try {
+                    startActivity(consentIntent)
+                } catch (e: Exception) {
+                    Log.e(TAG, "启动授权页失败", e)
+                    isRequestingConsent = false
+                }
+                mainHandler.postDelayed(consentTimeoutRunnable, 15_000L)
                 return
             } else {
                 return  // 已经在等待授权，不重复弹窗
@@ -557,9 +575,29 @@ class ScreenCaptureService : Service() {
             screenDensity = metrics.densityDpi
             displayDensity = metrics.density
 
+            // 镜像层必须一起改尺寸：VirtualDisplay 仍按旧方向出帧时，取帧却按新宽算行填充，
+            // 截出来的是错位帧或空帧——表现为转屏后一直"截图失败，请重试"，直到重新授权
+            resizeCaptureDisplay(newWidth, newHeight, metrics.densityDpi)
+
             // 重新调整悬浮球位置
             adjustFloatBallPosition()
             updateSmallBallPosition()
+        }
+    }
+
+    /** 屏幕尺寸变化（旋转/折叠屏/分屏）后重建镜像：改 VirtualDisplay 尺寸并换一块同尺寸的取帧表面 */
+    private fun resizeCaptureDisplay(width: Int, height: Int, density: Int) {
+        val vd = virtualDisplay ?: return
+        try {
+            vd.resize(width, height, density)
+            val fresh = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
+            val stale = imageReader
+            vd.setSurface(fresh.surface)
+            imageReader = fresh
+            stale?.close()
+            Log.d(TAG, "VirtualDisplay resized: ${width}x$height")
+        } catch (e: Exception) {
+            Log.e(TAG, "VirtualDisplay resize failed", e)
         }
     }
 
@@ -700,6 +738,7 @@ class ScreenCaptureService : Service() {
         // 检查 MediaProjection 是否有效
         if (mediaProjection == null || imageReader == null || virtualDisplay == null) {
             bitmap.recycle()
+            isDictOcrMode = false
             updateResultCard("❌ 录屏已失效，请重新开启悬浮球")
             if (isSilentCapture) {
                 isCapturing = false
@@ -707,6 +746,22 @@ class ScreenCaptureService : Service() {
                 cancelCaptureTimeout()
                 mainHandler.post { reattachSmallBall() }
             }
+            return
+        }
+
+        // 上一题的中间态必须随新截屏一起作废：文字/视觉管道都拿 lastOcrText 去查题库，
+        // 结果卡与渲染器又拿 lastBankMatch 标"题库命中"，残留会把上一题的参考答案注入当前题
+        lastOcrText = null
+        lastBankMatch = null
+
+        if (bitmap.isRecycled) {
+            Log.e(TAG, "sendToAI: bitmap already recycled, drop this capture")
+            isCapturing = false
+            isSilentCapture = false
+            isDictOcrMode = false
+            cancelCaptureTimeout()
+            mainHandler.post { reattachSmallBall() }
+            Toast.makeText(this, "截图已失效，请重试", Toast.LENGTH_SHORT).show()
             return
         }
 
@@ -722,6 +777,18 @@ class ScreenCaptureService : Service() {
         // 异步转换 Base64 并保存，同时进行模式分流
         captureHandler?.post {
             val jpegBytes = bitmapToJpeg(bitmap)
+            if (jpegBytes.isEmpty()) {
+                // 截图失效（被回收或编码失败）：终止本次管道，不要把空图喂给 OCR/AI
+                mainHandler.post {
+                    isCapturing = false
+                    isSilentCapture = false
+                    isDictOcrMode = false
+                    cancelCaptureTimeout()
+                    reattachSmallBall()
+                    Toast.makeText(this, "截图已失效，请重试", Toast.LENGTH_SHORT).show()
+                }
+                return@post
+            }
             val jpegBase64 = android.util.Base64.encodeToString(jpegBytes, android.util.Base64.NO_WRAP)
             stashImageBase64(jpegBase64)
 
@@ -1510,9 +1577,20 @@ class ScreenCaptureService : Service() {
 
     /** Bitmap 转 JPEG 字节数组（质量 85%） */
     internal fun bitmapToJpeg(bitmap: Bitmap): ByteArray {
-        val stream = java.io.ByteArrayOutputStream()
-        bitmap.compress(Bitmap.CompressFormat.JPEG, 85, stream)
-        return stream.toByteArray()
+        // 已回收的 Bitmap 调 compress 会抛 IllegalArgumentException，而这里跑在 CaptureThread/
+        // 主线程回调里，异常没人接就是整个进程崩；返回空数组由调用方按"截图失效"处理
+        if (bitmap.isRecycled) {
+            Log.e(TAG, "bitmapToJpeg: bitmap already recycled")
+            return ByteArray(0)
+        }
+        return try {
+            val stream = java.io.ByteArrayOutputStream()
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 85, stream)
+            stream.toByteArray()
+        } catch (e: Throwable) {
+            Log.e(TAG, "bitmapToJpeg failed", e)
+            ByteArray(0)
+        }
     }
 
     // ═════════════════════════════════════════════════════════════════════
