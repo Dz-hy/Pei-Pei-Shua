@@ -69,10 +69,11 @@ object AppPreferences {
         prefs(context).edit().putString(KEY_API_BASE_URL, url).apply()
 
     fun getApiKey(context: Context): String =
-        prefs(context).getString(KEY_API_KEY, DEFAULT_API_KEY)?.takeIf { it.isNotBlank() } ?: DEFAULT_API_KEY
+        SecurePrefs.open(prefs(context).getString(KEY_API_KEY, DEFAULT_API_KEY))
+            ?.takeIf { it.isNotBlank() } ?: DEFAULT_API_KEY
 
     fun setApiKey(context: Context, key: String) =
-        prefs(context).edit().putString(KEY_API_KEY, key).apply()
+        prefs(context).edit().putString(KEY_API_KEY, SecurePrefs.seal(key)).apply()
 
     fun getApiModel(context: Context): String =
         prefs(context).getString(KEY_API_MODEL, DEFAULT_MODEL)?.takeIf { it.isNotBlank() } ?: DEFAULT_MODEL
@@ -96,10 +97,10 @@ object AppPreferences {
         prefs(context).edit().putString(KEY_EMB_BASE_URL, url).apply()
 
     fun getEmbKey(context: Context): String =
-        prefs(context).getString(KEY_EMB_KEY, "")?.takeIf { it.isNotBlank() } ?: ""
+        SecurePrefs.open(prefs(context).getString(KEY_EMB_KEY, ""))?.takeIf { it.isNotBlank() } ?: ""
 
     fun setEmbKey(context: Context, key: String) =
-        prefs(context).edit().putString(KEY_EMB_KEY, key).apply()
+        prefs(context).edit().putString(KEY_EMB_KEY, SecurePrefs.seal(key)).apply()
 
     fun getEmbModel(context: Context): String =
         prefs(context).getString(KEY_EMB_MODEL, DEFAULT_EMB_MODEL)?.takeIf { it.isNotBlank() }
@@ -241,10 +242,11 @@ object AppPreferences {
         prefs(context).edit().putString(KEY_CLOUD_OCR_URL, url).apply()
 
     fun getCloudOcrToken(context: Context): String =
-        prefs(context).getString(KEY_CLOUD_OCR_TOKEN, DEFAULT_CLOUD_OCR_TOKEN)?.takeIf { it.isNotBlank() } ?: DEFAULT_CLOUD_OCR_TOKEN
+        SecurePrefs.open(prefs(context).getString(KEY_CLOUD_OCR_TOKEN, DEFAULT_CLOUD_OCR_TOKEN))
+            ?.takeIf { it.isNotBlank() } ?: DEFAULT_CLOUD_OCR_TOKEN
 
     fun setCloudOcrToken(context: Context, token: String) =
-        prefs(context).edit().putString(KEY_CLOUD_OCR_TOKEN, token).apply()
+        prefs(context).edit().putString(KEY_CLOUD_OCR_TOKEN, SecurePrefs.seal(token)).apply()
 
     fun getCloudOcrType(context: Context): Int =
         prefs(context).getInt(KEY_CLOUD_OCR_TYPE, CLOUD_OCR_TYPE_LAYOUT)
@@ -778,7 +780,10 @@ object AppPreferences {
                 } else if (value is Float) {
                     editor.putFloat(key, value)
                 } else if (value != org.json.JSONObject.NULL) {
-                    editor.putString(key, value.toString())
+                    // 三个凭据 key 再封存一次：旧版备份里它们是明文，原样写盘等于把明文重新引回本机
+                    val text = value.toString()
+                    val sealed = key == KEY_API_KEY || key == KEY_EMB_KEY || key == KEY_CLOUD_OCR_TOKEN
+                    editor.putString(key, if (sealed) SecurePrefs.seal(text) else text)
                 }
             }
             editor.apply()

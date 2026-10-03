@@ -109,10 +109,18 @@ object SyncPrefs {
     fun webdavUser(context: Context): String =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_WEBDAV_USER, "") ?: ""
 
-    fun webdavPass(context: Context): String =
-        decryptSecret(
-            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_WEBDAV_PASS, "") ?: ""
-        )
+    fun webdavPass(context: Context): String {
+        val p = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val stored = p.getString(KEY_WEBDAV_PASS, "") ?: ""
+        if (stored.isNotEmpty() && !stored.startsWith(ENC_PREFIX)) {
+            // 旧版明文首次读到即封存：只等"进设置页点保存"才迁移的话，
+            // 纯自动同步用户的密码会一直明文躺在 shared_prefs 里并随备份出机
+            try {
+                p.edit().putString(KEY_WEBDAV_PASS, encryptSecret(stored)).apply()
+            } catch (_: Exception) {}
+        }
+        return decryptSecret(stored)
+    }
 
     fun setWebdavAccount(context: Context, user: String, pass: String) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()

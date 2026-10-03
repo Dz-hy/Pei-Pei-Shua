@@ -347,13 +347,15 @@ object SyncData {
             put("emb_key", AppPreferences.getEmbKey(context))
             put("cloud_ocr_token", AppPreferences.getCloudOcrToken(context))
         }
+        val digest = sha256Hex(data.toString().toByteArray())
         val last = prefs.getString(KEY_LAST_APIKEYS, null)
-        val changed = last != data.toString()
+        // 只存摘要不存明文副本（旧版存的是整串明文，首次比对必然"有变化"，多推一次无害）
+        val changed = last != digest
         val storedAt = prefs.getLong("apikeys_updated_at", 0L)
         val updatedAt = if (changed) System.currentTimeMillis() else maxOf(storedAt, 1L)
         prefs.edit()
             .putLong("apikeys_updated_at", updatedAt)
-            .putString(KEY_LAST_APIKEYS, data.toString())
+            .putString(KEY_LAST_APIKEYS, digest)
             .apply()
         return listOf(row("api_keys", updatedAt, data, dav))
     }
@@ -574,14 +576,18 @@ object SyncData {
         for (r in rows) {
             if (r.deleted) continue   // api_keys 无删除语义
             val d = JSONObject(restoreBlobs(r.data.toString(), dav, cache))
-            AppPreferences.setApiKey(context, d.optString("api_key"))
-            AppPreferences.setApiBaseUrl(context, d.optString("api_base_url"))
-            AppPreferences.setApiModel(context, d.optString("api_model"))
-            AppPreferences.setEmbKey(context, d.optString("emb_key"))
-            // api_type 为桌面端字段，Android 无对应配置，忽略
+            // 逐字段以 has() 为界：对端（桌面端）行里没有的字段，不能拿 "" 覆盖本地已有配置
+            if (d.has("api_key")) AppPreferences.setApiKey(context, d.optString("api_key"))
+            if (d.has("api_base_url")) AppPreferences.setApiBaseUrl(context, d.optString("api_base_url"))
+            if (d.has("api_model")) AppPreferences.setApiModel(context, d.optString("api_model"))
+            if (d.has("emb_key")) AppPreferences.setEmbKey(context, d.optString("emb_key"))
+            if (d.has("cloud_ocr_token"))
+                AppPreferences.setCloudOcrToken(context, d.optString("cloud_ocr_token"))
+            // 指纹同样只存摘要：把整份 key JSON 原样落在 sync_prefs 里，
+            // 等于给本机明文凭据又开了一处副本，加密迁移做得再好也白搭
             prefs.edit()
                 .putLong("apikeys_updated_at", r.updatedAt)
-                .putString(KEY_LAST_APIKEYS, d.toString())
+                .putString(KEY_LAST_APIKEYS, sha256Hex(d.toString().toByteArray()))
                 .apply()
         }
     }
