@@ -48,6 +48,27 @@ object QuestionBankManager {
         }
     }
 
+    /**
+     * 打不开的旧库改名留档（question_bank_v2_damaged_<时间戳>.db），用户数据仍可人工恢复；
+     * 连带清掉 -wal/-shm，否则残留日志会和新库同名文件冲突。
+     * @return false 表示连原件都没能移走（调用方必须放弃重建，不能直接删）
+     */
+    private fun preserveDamagedDatabase(appCtx: Context, dbFile: java.io.File): Boolean {
+        return try {
+            val kept = java.io.File(
+                dbFile.parent, "question_bank_v2_damaged_${System.currentTimeMillis()}.db"
+            )
+            if (!dbFile.renameTo(kept)) return false
+            appCtx.deleteDatabase("question_bank_v2.db-wal")
+            appCtx.deleteDatabase("question_bank_v2.db-shm")
+            Log.e(TAG, "已保留无法打开的题库文件：${kept.name}")
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "保留损坏题库失败: ${e.message}")
+            false
+        }
+    }
+
     fun init(context: Context, force: Boolean = false) {
         if (force) {
             ready = false
@@ -59,20 +80,36 @@ object QuestionBankManager {
             try {
                 val t0 = System.currentTimeMillis()
 
-                // 删除旧库（如果版本不匹配）
+                // 未完成库的处理：只有确认库里没有用户学习记录时才删文件重建。
+                // completed_questions / question_annotations / practice_sessions / sync_tombstones
+                // 与题库同在 question_bank_v2.db 里，无条件删库会把用户的全部学习记录一起抹掉
+                var skipAutoImport = false
                 val oldDb = appCtx.getDatabasePath("question_bank_v2.db")
                 if (oldDb.exists()) {
                     try {
                         val testDb = QuestionBankDb(appCtx)
-                        if (!testDb.isImported()) {
-                            testDb.close()
-                            appCtx.deleteDatabase("question_bank_v2.db")
-                            Log.d(TAG, "删除未完成的旧数据库")
-                        } else {
+                        try {
+                            if (!testDb.isImported()) {
+                                if (testDb.hasUserData()) {
+                                    Log.e(TAG, "题库未完成但已有学习记录，保留该库、跳过自动重导")
+                                    skipAutoImport = true
+                                } else {
+                                    appCtx.deleteDatabase("question_bank_v2.db")
+                                    Log.d(TAG, "删除未完成的旧数据库")
+                                }
+                            }
+                        } finally {
                             testDb.close()
                         }
-                    } catch (_: Exception) {
-                        appCtx.deleteDatabase("question_bank_v2.db")
+                    } catch (e: Exception) {
+                        // 打不开旧库（迁移语句异常/文件损坏）：改名保留原件再建全新库。
+                        // 直接 deleteDatabase 等于每次冷启动销毁用户数据；改名后仍可人工恢复
+                        Log.e(TAG, "打开旧题库失败：${e.message}", e)
+                        if (!preserveDamagedDatabase(appCtx, oldDb)) {
+                            // 原件既打不开也移不走：宁可让题库停在未就绪（页面提示初始化失败），
+                            // 也不能删——删了就是不可逆的数据丢失
+                            throw IllegalStateException("题库文件无法打开且无法保留，已跳过重建以保护数据", e)
+                        }
                     }
                 }
 
@@ -80,7 +117,7 @@ object QuestionBankManager {
                 db = dbHelper
 
                 // 完整性自愈检查：第一次安装数据库不存在时导入初始 Assets
-                val needReimport = !dbHelper.isImported()
+                val needReimport = !skipAutoImport && !dbHelper.isImported()
 
                 if (needReimport) {
                     importing = true
@@ -89,6 +126,9 @@ object QuestionBankManager {
                         Log.i(TAG, msg)
                     }
                     importing = false
+                    if (!dbHelper.isImported()) {
+                        Log.e(TAG, "题库导入未达到可标记完成的状态（assets/bank 为空或存在解析失败的文件）")
+                    }
                 }
 
                 ready = true
@@ -215,7 +255,12 @@ object QuestionBankManager {
 
     fun markQuestionCompleted(questionId: String) {
         executor.execute {
-            db?.markQuestionCompleted(questionId)
+            // 捕 Throwable：异常/OOM 从这里裸抛会击穿队列线程、直接崩掉进程
+            try {
+                db?.markQuestionCompleted(questionId)
+            } catch (e: Throwable) {
+                Log.e(TAG, "标记完成失败: $questionId", e)
+            }
         }
     }
 
@@ -231,7 +276,12 @@ object QuestionBankManager {
     /** 保存题目手写批注笔画 JSON（异步写入） */
     fun saveAnnotation(questionId: String, strokesJson: String) {
         executor.execute {
-            db?.saveAnnotation(questionId, strokesJson)
+            // 捕 Throwable：异常/OOM 从这里裸抛会击穿队列线程、直接崩掉进程
+            try {
+                db?.saveAnnotation(questionId, strokesJson)
+            } catch (e: Throwable) {
+                Log.e(TAG, "保存批注失败: $questionId", e)
+            }
         }
     }
 

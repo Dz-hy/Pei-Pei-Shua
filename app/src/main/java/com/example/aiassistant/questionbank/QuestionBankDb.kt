@@ -345,6 +345,28 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
         }
     }
 
+    /**
+     * 库里是否已有用户产生的数据（完成记录/手写批注/做题历史/同步墓碑）。
+     * 这些表与题库表同在一个 .db 文件里，"未完成就删整库"会连带把它们一起抹掉，
+     * 所以任何删库/重建决策前都必须先问这一句。表不存在（首装半成品）按无用户数据处理。
+     */
+    fun hasUserData(): Boolean {
+        val tables = arrayOf(
+            "completed_questions", "question_annotations", "practice_sessions", SyncData.T_TOMBSTONES
+        )
+        for (t in tables) {
+            val n = try {
+                readableDatabase.rawQuery("SELECT COUNT(*) FROM $t", null).use { c ->
+                    if (c.moveToFirst()) c.getInt(0) else 0
+                }
+            } catch (_: Exception) {
+                0
+            }
+            if (n > 0) return true
+        }
+        return false
+    }
+
     fun importFromAssets(context: Context, onProgress: ((String) -> Unit)? = null) {
         val t0 = System.currentTimeMillis()
         val db = writableDatabase
@@ -461,16 +483,24 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
                 }
             }
 
-            if (failedFiles == 0) {
+            // imported 必须"零失败且真的导入了题"才置位：assets/bank 缺失或全被 FILE_TO_MODULE
+            // 过滤掉时 total=0、failedFiles=0，一旦标记完成，Manager 的自愈重导就被永久挡住，
+            // 用户看到的是空题库且没有任何提示
+            val ok = failedFiles == 0 && total > 0
+            if (ok) {
                 val meta = ContentValues().apply {
                     put("key", "imported")
                     put("value", "true")
                 }
-                db.insert("meta", null, meta)
+                db.insertWithOnConflict("meta", null, meta, SQLiteDatabase.CONFLICT_REPLACE)
                 Log.d(TAG, "题库导入完成: $total 题, $materialCount 材料, 耗时 ${System.currentTimeMillis() - t0}ms")
             } else {
                 // 不标记 imported：下次启动走"删除重导"自愈，避免残缺题库被永久固化
-                Log.e(TAG, "题库导入有 $failedFiles 个文件失败（成功 $total 题），下次启动将重新导入")
+                if (bankFiles.isEmpty()) {
+                    Log.e(TAG, "assets/bank 下没有任何题库 JSON，本次未导入题目")
+                } else {
+                    Log.e(TAG, "题库导入有 $failedFiles 个文件失败（成功 $total 题），下次启动将重新导入")
+                }
             }
             // 事务必须无条件提交：WCDB 契约是未标记成功则 endTransaction 一律回滚，
             // 否则全新安装题库永远为空、每次启动删库全量重导。"有失败不标记 imported"
@@ -1038,8 +1068,9 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
         )
     }
 
-    /** 按需读 questions_json：小快照直读，大快照 substr 分块拼接（整读会撑爆游标窗口） */
-    private fun readSessionJson(id: Long, totalChars: Int): String {
+    /** 按需读 questions_json：小快照直读，大快照 substr 分块拼接（整读会撑爆游标窗口）。
+     *  云同步导出同样走这里，避免在 SyncData 里重复一份分块逻辑 */
+    fun readSessionJson(id: Long, totalChars: Int): String {
         if (totalChars <= 0) return "[]"
         if (totalChars <= SESSION_JSON_CHUNK) {
             readableDatabase.rawQuery(
@@ -1766,6 +1797,10 @@ class QuestionBankDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null
                         put("title_images", titleImages)
                     }, SQLiteDatabase.CONFLICT_REPLACE)
 
+                    // fts5 的 id 只是普通列、无唯一约束，CONFLICT_REPLACE 对它不生效：
+                    // 重导同一套大纲会每题多一行 FTS，检索结果被同一题占满且库持续膨胀
+                    // （与非流式路径 importQuestionsFromJson 的先删后插对齐）
+                    db.delete(T_FTS, "id = ?", arrayOf(keyName))
                     db.insertWithOnConflict(T_FTS, null, ContentValues().apply {
                         put("id", keyName)
                         put("stem", toBigrams(stemName))
