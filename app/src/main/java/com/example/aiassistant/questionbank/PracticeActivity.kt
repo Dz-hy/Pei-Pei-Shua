@@ -123,6 +123,15 @@ class PracticeActivity : AppCompatActivity() {
     private val handler = Handler(Looper.getMainLooper())
 
     companion object {
+        // 旋转/深色切换/分屏/进程重建后原样恢复整场训练用的 Bundle key
+        private const val KEY_PAPER_IDS = "practice_paper_ids"
+        private const val KEY_ANSWERS = "practice_answers"
+        private const val KEY_VERDICTS = "practice_verdicts"
+        private const val KEY_SUBMITTED = "practice_submitted"
+        private const val KEY_INDEX = "practice_index"
+        private const val KEY_START_TIME = "practice_start_time"
+        private const val KEY_COUNTS = "practice_counts"
+
         private val AI_ANALYSIS_PROMPT =
             "你是一名经验丰富的公务员考试辅导老师。用户会给你一道完整题目（题干、选项、正确答案、我的作答、官方解析）。" +
             "请用简洁清晰的中文讲解：1) 本题考点；2) 正确解题思路；3) 若我的作答有误，指出错因与易错点；" +
@@ -163,6 +172,24 @@ class PracticeActivity : AppCompatActivity() {
     private val readyListener: () -> Unit = { loadData() }
     private val reviewReadyListener: () -> Unit = { loadReviewSession() }
 
+    /** 重建前那一场的作答快照；非 null 表示本次 onCreate 要"恢复原卷"而不是重新抽题 */
+    private var restorePaper: PaperSnapshot? = null
+
+    /** 只存本页发出的图片请求：OkHttp 的 newBuilder 共享 Dispatcher，
+     *  退出本页时绝不能 dispatcher.cancelAll()（那会掐掉 AI 回答/云 OCR/云同步的在途请求） */
+    private val imageCalls = java.util.concurrent.CopyOnWriteArrayList<Call>()
+
+    private class PaperSnapshot(
+        val ids: List<String>,
+        val answers: IntArray,
+        val verdicts: ByteArray,
+        val submitted: Boolean,
+        val currentIndex: Int,
+        val startTime: Long,
+        val correctCount: Int,
+        val wrongCount: Int
+    )
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Companion.appCtx = applicationContext
@@ -180,9 +207,67 @@ class PracticeActivity : AppCompatActivity() {
         rateMax = intent.getIntExtra("rate_max", 100)
         wrongPracticeIds = intent.getStringArrayListExtra("wrong_practice_ids") ?: emptyList()
 
+        // 系统重建（旋转/深色切换/分屏/进程被杀后恢复）：按保存的题 id 与作答恢复原卷。
+        // 不这么做的话重建会重新随机抽题——转一下屏幕，答到一半的卷子就变成一组新题、作答清零
+        restorePaper = readPaperSnapshot(savedInstanceState)
+
+        // 未交卷就返回时二次确认：中途退出同样会静默清零整场作答
+        onBackPressedDispatcher.addCallback(this, object : androidx.activity.OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                confirmExit()
+            }
+        })
+
         initViews()
         loadData()
         setupListeners()
+    }
+
+    private fun readPaperSnapshot(state: Bundle?): PaperSnapshot? {
+        val ids = state?.getStringArrayList(KEY_PAPER_IDS) ?: return null
+        if (ids.isEmpty()) return null
+        val counts = state.getIntArray(KEY_COUNTS) ?: intArrayOf(0, 0)
+        return PaperSnapshot(
+            ids = ids.toList(),
+            answers = state.getIntArray(KEY_ANSWERS) ?: IntArray(ids.size) { -1 },
+            verdicts = state.getByteArray(KEY_VERDICTS) ?: ByteArray(ids.size),
+            submitted = state.getBoolean(KEY_SUBMITTED, false),
+            currentIndex = state.getInt(KEY_INDEX, 0),
+            startTime = state.getLong(KEY_START_TIME, 0L),
+            correctCount = counts.getOrElse(0) { 0 },
+            wrongCount = counts.getOrElse(1) { 0 }
+        )
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        // 回看模式的卷子由 intent 的 session id 决定，重建会自行加载，无需快照
+        if (reviewSessionId >= 0 || questions.isEmpty()) return
+        outState.putStringArrayList(KEY_PAPER_IDS, ArrayList(questions.map { it.id }))
+        outState.putIntArray(KEY_ANSWERS, selectedOptions)
+        outState.putByteArray(
+            KEY_VERDICTS,
+            ByteArray(results.size) { i -> when (results[i]) { true -> 1; false -> 2; null -> 0 } }
+        )
+        outState.putBoolean(KEY_SUBMITTED, submitted)
+        outState.putInt(KEY_INDEX, currentIndex)
+        outState.putLong(KEY_START_TIME, practiceStartTime)
+        outState.putIntArray(KEY_COUNTS, intArrayOf(correctCount, wrongCount))
+    }
+
+    /** 已作答且未交卷时确认后再退出，否则直接退出 */
+    private fun confirmExit() {
+        val answered = selectedOptions.count { it >= 0 }
+        if (submitted || questions.isEmpty() || answered == 0) {
+            finish()
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("退出练习")
+            .setMessage("还有 $answered 题作答未交卷，退出后本场作答不会保存。确定退出？")
+            .setPositiveButton("退出") { _, _ -> finish() }
+            .setNegativeButton("继续做题", null)
+            .show()
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -208,7 +293,7 @@ class PracticeActivity : AppCompatActivity() {
 
         tvTitle.text = moduleName
 
-        findViewById<ImageView>(R.id.iv_back).setOnClickListener { finish() }
+        findViewById<ImageView>(R.id.iv_back).setOnClickListener { confirmExit() }
 
         // 手写批注：批注绑题目 id，笔迹存 question_annotations 表
         hw = HandwritingController(
@@ -354,6 +439,12 @@ try {
     }
 
     private fun loadData() {
+        restorePaper?.let { saved ->
+            restorePaper = null
+            loadSavedPaper(saved)
+            return
+        }
+
         if (reviewSessionId >= 0) {
             // 回看模式：等题库就绪后从快照重建（会话表与题库同库）
             if (QuestionBankManager.isLoaded()) {
@@ -442,6 +533,55 @@ try {
 
         dataReady = true
         showQuestion(0)
+    }
+
+    /** 系统重建后按原题目顺序恢复整场训练：题面在后台线程取（题库直取，错题重练按快照重建） */
+    private fun loadSavedPaper(saved: PaperSnapshot) {
+        if (isWrongPractice && !QuestionBankManager.isLoaded()) {
+            QuestionBankManager.addOnReadyListener { loadSavedPaper(saved) }
+            return
+        }
+        Thread {
+            val pool: List<Question> = if (isWrongPractice) {
+                buildWrongPracticeQuestions()
+            } else {
+                saved.ids.mapNotNull { QuestionBankManager.getQuestionById(it) }
+            }
+            // 按保存顺序对齐，中途被删的题直接跳过（作答以题 id 为准，不按下标）
+            val paper = saved.ids.mapNotNull { id -> pool.firstOrNull { it.id == id } }
+            runOnUiThread {
+                if (destroyed || isFinishing) return@runOnUiThread
+                applyRestoredPaper(saved, paper)
+            }
+        }.start()
+    }
+
+    private fun applyRestoredPaper(saved: PaperSnapshot, paper: List<Question>) {
+        if (paper.isEmpty()) {
+            Toast.makeText(this, "原练习已不可继续（题目已不在题库），已重新抽题", Toast.LENGTH_SHORT).show()
+            loadData()   // restorePaper 已在 loadData 入口置空，这里走正常抽题
+            return
+        }
+        questions = paper
+        val indexById = HashMap<String, Int>(paper.size)
+        paper.forEachIndexed { i, q -> indexById[q.id] = i }
+        selectedOptions = IntArray(paper.size) { -1 }
+        results = arrayOfNulls(paper.size)
+        for (i in saved.ids.indices) {
+            val target = indexById[saved.ids[i]] ?: continue
+            saved.answers.getOrNull(i)?.let { if (it >= 0) selectedOptions[target] = it }
+            when (saved.verdicts.getOrNull(i)?.toInt() ?: 0) {
+                1 -> results[target] = true
+                2 -> results[target] = false
+            }
+        }
+        submitted = saved.submitted
+        correctCount = saved.correctCount
+        wrongCount = saved.wrongCount
+        practiceStartTime = saved.startTime
+        lastElapsedMs = if (saved.startTime > 0) System.currentTimeMillis() - saved.startTime else 0L
+        dataReady = true
+        showQuestion(saved.currentIndex.coerceIn(0, paper.size - 1))
     }
 
     /** 回看模式：从训练快照重建整场记录，进来即交卷后状态（与刚完成训练时一致）。
@@ -769,8 +909,11 @@ try {
             .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36")
             .header("Referer", "https://www.fenbike.cn/")
             .build()
-        imageClient.newCall(request).enqueue(object : Callback {
+        val imgCall = imageClient.newCall(request)
+        imageCalls.add(imgCall)
+        imgCall.enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
+                imageCalls.remove(call)
                 if (destroyed) return
                 if (retryCount < 2) {
                     handler.postDelayed({ loadImage(url, imageView, isStemImage, retryCount + 1) }, 1000L * (retryCount + 1))
@@ -788,6 +931,7 @@ try {
             }
 
             override fun onResponse(call: Call, response: Response) {
+                imageCalls.remove(call)
                 if (destroyed) { response.close(); return }
                 if (!response.isSuccessful) {
                     response.close()
@@ -1485,7 +1629,12 @@ try {
         try { answerCardDialog?.dismiss() } catch (_: Exception) {}
         try { aiDialog?.dismiss() } catch (_: Exception) {}
         handler.removeCallbacksAndMessages(null)
-        imageClient.dispatcher.cancelAll()
+        // 只取消本页自己的图片请求：imageClient 由 Http.client.newBuilder() 派生、共享同一个
+        // Dispatcher，dispatcher.cancelAll() 会把 AI 流式回答、云 OCR、云同步的在途请求一起掐掉
+        for (c in imageCalls) {
+            try { c.cancel() } catch (_: Exception) {}
+        }
+        imageCalls.clear()
         for (wv in activeOptionWebViews + optionWebViewPool) {
             (wv.parent as? ViewGroup)?.removeView(wv)
             wv.destroy()
