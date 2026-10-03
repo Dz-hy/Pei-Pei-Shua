@@ -37,8 +37,9 @@ object SyncEngine {
             onResult(null); return   // 已有一轮在跑
         }
         queue.execute {
-            val stats = try { runSync(app) } catch (e: Exception) {
-                SyncStats(0, System.currentTimeMillis(), false, e.message ?: "unknown")
+            // 捕 Throwable：全量导出在低内存机上可能抛 OOM，逃逸出线程就是整个进程崩
+            val stats = try { runSync(app) } catch (e: Throwable) {
+                SyncStats(0, System.currentTimeMillis(), false, e.message ?: e.javaClass.simpleName)
             } finally {
                 busy.set(false)
             }
@@ -78,17 +79,24 @@ object SyncEngine {
         )
 
         val stats = mutableListOf<DatasetStat>()
+        val errors = mutableListOf<String>()
 
         // 3. 每数据集：PROPFIND 列文件 -> GET 非自己 -> 导出（blob 边导出边上传）-> 合并 -> 应用 -> PUT
+        //    只有连接级失败（code=-1，后续每个数据集都会同样失败）才终止整轮；
+        //    单个数据集的异常一律记错后 continue——否则一行坏数据（超大快照、某台设备
+        //    的畸形文件）会让它之后的所有数据集从此再不同步
         for (ds in ALL_DATASETS) {
             if (ds == DS_API_KEYS && !SyncPrefs.syncApiKeys(context)) continue
             try {
                 // 数据集子目录必须先存在（真实 WebDAV 对 PUT 到不存在父目录回 409）
                 val mkds = dav.mkcolRecursive(REMOTE_DIR, "datasets", ds)
                 if (mkds.code == -1) return fail("WebDAV 连接失败：${mkds.message}")
-                if (mkds.code >= 400 && !mkds.isExists) return fail("建目录失败 $ds HTTP ${mkds.code}")
+                if (mkds.code >= 400 && !mkds.isExists) {
+                    errors.add("建目录失败 $ds HTTP ${mkds.code}"); continue
+                }
                 val listing = dav.list("$REMOTE_DIR/datasets/$ds/")
-                if (!listing.ok) return fail("拉取 $ds 列表失败：${davErr(listing)}")
+                if (listing.code == -1) return fail("WebDAV 连接失败：${listing.message}")
+                if (!listing.ok) { errors.add("拉取 $ds 列表失败：${davErr(listing)}"); continue }
                 val files = dav.parseNames(listing)
                 val remotes = mutableListOf<SyncRow>()
                 for (name in files) {
@@ -96,8 +104,10 @@ object SyncEngine {
                     if (fid == deviceId || fid.isBlank()) continue
                     val resp = dav.get(SyncWebDav.datasetPath(ds, fid))
                     if (resp.code == 404) continue   // 列表后文件已被对端删掉：按无远端处理
-                    if (!resp.ok) return fail("拉取 $ds 失败：${davErr(resp)}")
-                    val f = SyncFileCodec.decode(String(resp.body, Charsets.UTF_8)) ?: continue
+                    // 拉不到某台设备的文件只少合并它那一份：本轮各设备仍各写各自的文件，不会丢数据
+                    if (!resp.ok) { errors.add("拉取 $ds/$fid 失败：${davErr(resp)}"); continue }
+                    val f = SyncFileCodec.decode(String(resp.body, Charsets.UTF_8))
+                    if (f == null) { errors.add("$ds/$fid 文件格式不符，本轮跳过"); continue }
                     remotes.addAll(f.rows)
                 }
                 val exported = SyncData.export(context, ds, dav)
@@ -105,17 +115,22 @@ object SyncEngine {
                 SyncData.apply(context, ds, merged, dav)
                 val own = SyncFile(deviceId, SyncPrefs.deviceName(context), System.currentTimeMillis(), merged)
                 val pushed = dav.put(SyncWebDav.datasetPath(ds, deviceId), SyncFileCodec.encode(own).toByteArray(Charsets.UTF_8))
-                if (!pushed.ok) return fail("上传 $ds 失败：${davErr(pushed)}")
+                if (!pushed.ok) { errors.add("上传 $ds 失败：${davErr(pushed)}"); continue }
                 stats.add(DatasetStat(ds, merged.size, 0))
             } catch (e: Exception) {
-                return fail("${ds}: ${e.message ?: e.javaClass.simpleName}")
+                errors.add("$ds: ${e.message ?: e.javaClass.simpleName}")
             }
         }
 
         // 4. blob 缓存按上限裁剪，防 filesDir/sync_blobs 随历史同步无限增长
         SyncData.pruneBlobCache(context)
 
-        SyncPrefs.setLastSyncAt(context, System.currentTimeMillis())
-        return SyncStats(startedAt, System.currentTimeMillis(), true, null, stats)
+        // 有任何数据集失败都不刷新 lastSyncAt：设置页据此提示"上次同步未完成"，下次继续重推
+        val clean = errors.isEmpty()
+        if (clean) SyncPrefs.setLastSyncAt(context, System.currentTimeMillis())
+        return SyncStats(
+            startedAt, System.currentTimeMillis(), clean,
+            if (clean) null else errors.joinToString("；").take(300), stats
+        )
     }
 }

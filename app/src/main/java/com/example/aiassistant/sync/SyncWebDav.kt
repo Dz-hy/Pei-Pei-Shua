@@ -23,6 +23,8 @@ class SyncWebDav(baseUrl: String, user: String, pass: String) {
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .writeTimeout(120, TimeUnit.SECONDS)   // 数据集文件含图 blob 时可能较大
+        // 整调用上限：没有它，一个持续吐字节的坏连接会让这一轮同步永远卡在这条线程上
+        .callTimeout(300, TimeUnit.SECONDS)
         .build()
 
     /** 统一响应：ok = 2xx；isNotFound/isExists 供调用方按语义分流 */
@@ -100,7 +102,15 @@ class SyncWebDav(baseUrl: String, user: String, pass: String) {
 
         fun blobPath(sha256Hex: String): String = "${SyncProtocol.REMOTE_DIR}/blobs/$sha256Hex"
 
-        /** 解析 dataset 文件名里的 deviceId（"xxx.json" -> "xxx"） */
-        fun deviceIdFromFileName(name: String): String = name.removeSuffix(".json")
+        /**
+         * 解析 dataset 文件名里的 deviceId（"xxx.json" -> "xxx"）。
+         * 文件名来自服务端 PROPFIND，属外部输入：只放行 id 实际使用的字符集，
+         * 含 ".." "/" 等的名字一律返回空串（调用方按空白跳过），否则拼进 GET 路径
+         * 可以让恶意/误配的 WebDAV 逃出 peipei-sync/ 目录去读服务器上的其它文件。
+         */
+        fun deviceIdFromFileName(name: String): String {
+            val id = name.removeSuffix(".json")
+            return if (id.matches(Regex("[A-Za-z0-9_-]{1,64}"))) id else ""
+        }
     }
 }

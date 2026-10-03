@@ -37,7 +37,7 @@ object SyncData {
 
     // ── 墓碑（本地持久化；否则已删数据会被旧远端文件复活） ─────────────────
 
-    fun tombstones(db: SQLiteDatabase, dataset: String): Map<String, Long> {
+    fun tombstones(db: SQLiteDatabase, dataset: String): MutableMap<String, Long> {
         val out = mutableMapOf<String, Long>()
         db.rawQuery(
             "SELECT row_id, updated_at FROM $T_TOMBSTONES WHERE dataset = ?", arrayOf(dataset)
@@ -63,6 +63,29 @@ object SyncData {
 
     fun deleteTombstone(db: SQLiteDatabase, dataset: String, rowId: String) {
         db.delete(T_TOMBSTONES, "dataset = ? AND row_id = ?", arrayOf(dataset, rowId))
+    }
+
+    /**
+     * 导出时墓碑是否仍压制这条活行。
+     * 本地写路径（重做本题、删分类后重新导入并批注）可能在墓碑之后再写同一个 key：
+     * 此时活行必须胜出并清掉墓碑，否则该行永不导出，且对端（乃至本地 apply 回来的）
+     * 墓碑会把刚写的新数据反向删掉——删除语义只能覆盖"删除之后没人再写"的情形。
+     * 墓碑与行时间戳同为本机墙钟，先后可比。
+     */
+    private fun tombstoneSuppresses(
+        db: SQLiteDatabase,
+        tomb: MutableMap<String, Long>,
+        dataset: String,
+        key: String,
+        rowAt: Long
+    ): Boolean {
+        val tombAt = tomb[key] ?: return false
+        if (rowAt > tombAt) {
+            deleteTombstone(db, dataset, key)
+            tomb.remove(key)
+            return false
+        }
+        return true
     }
 
     // ── blob 剥理 / 还原（纯文本级，对任意嵌套 JSON 有效） ─────────────────
@@ -161,7 +184,8 @@ object SyncData {
 
     private fun exportWrong(context: Context, dav: SyncWebDav): List<SyncRow> {
         val helper = WrongQuestionDb(context)
-        val db = helper.readableDatabase
+        // 写库：发现「墓碑之后本地又写过同一行」时要清墓碑（见 tombstoneSuppresses）
+        val db = helper.writableDatabase
         try {
             val tomb = tombstones(db, DS_WRONG)
             val out = mutableListOf<SyncRow>()
@@ -172,6 +196,8 @@ object SyncData {
                 while (c.moveToNext()) {
                     val id = c.getString(0)
                     val updatedAt = if (c.getLong(11) > 0) c.getLong(11) else c.getLong(1)
+                    // 墓碑判定前置：被删除压制的行不必读截图文件、也不必上传它的 blob
+                    if (tombstoneSuppresses(db, tomb, DS_WRONG, id, updatedAt)) continue
                     val data = JSONObject().apply {
                         put("id", id)
                         put("timestamp", c.getLong(1))
@@ -197,7 +223,6 @@ object SyncData {
                             data.put("image_mime", if (imgPath.endsWith(".png")) "image/png" else "image/jpeg")
                         }
                     }
-                    if (tomb[id] != null) continue   // 本地已删且有墓碑：不再导出（墓碑单独随行输出）
                     out.add(row(id, updatedAt, data, dav))
                 }
             }
@@ -216,9 +241,10 @@ object SyncData {
             val deviceId = SyncPrefs.deviceId(context)
             val tomb = tombstones(db, DS_SESSIONS)
             val out = mutableListOf<SyncRow>()
-            // questions_json 不参与导出全文读取的风险：sessions 行较小（v2 极简），直接读
+            // questions_json 只取 length：错题重练存全量题面快照，单行可达数 MB，
+            // 整列读会超游标窗口抛 Row too big（正文按行分块读，见 readSessionJson）
             db.rawQuery(
-                "SELECT id, COALESCE(sync_key,''), finished_at, date_str, module_id, module_name, is_wrong_practice, question_count, correct_count, wrong_count, elapsed_ms, rate_min, rate_max, questions_json FROM practice_sessions",
+                "SELECT id, COALESCE(sync_key,''), finished_at, date_str, module_id, module_name, is_wrong_practice, question_count, correct_count, wrong_count, elapsed_ms, rate_min, rate_max, length(questions_json) FROM practice_sessions",
                 arrayOf()
             ).use { c ->
                 while (c.moveToNext()) {
@@ -229,10 +255,12 @@ object SyncData {
                         val v = ContentValues().apply { put("sync_key", syncKey) }
                         db.update("practice_sessions", v, "id = ? AND COALESCE(sync_key,'') = ''", arrayOf(localId.toString()))
                     }
+                    val finishedAt = c.getLong(2)
+                    if (tombstoneSuppresses(db, tomb, DS_SESSIONS, syncKey, finishedAt)) continue
                     val data = JSONObject().apply {
                         put("id", localId)
                         put("sync_key", syncKey)
-                        put("finished_at", c.getLong(2))
+                        put("finished_at", finishedAt)
                         put("date_str", c.getString(3) ?: "")
                         put("module_id", c.getString(4) ?: "")
                         put("module_name", c.getString(5) ?: "")
@@ -243,10 +271,9 @@ object SyncData {
                         put("elapsed_ms", c.getLong(10))
                         put("rate_min", c.getInt(11))
                         put("rate_max", c.getInt(12))
-                        put("questions_json", c.getString(13) ?: "[]")
+                        put("questions_json", helper.readSessionJson(localId, c.getInt(13)))
                     }
-                    if (tomb[syncKey] != null) continue
-                    out.add(row(syncKey, c.getLong(2), data, dav))
+                    out.add(row(syncKey, finishedAt, data, dav))
                 }
             }
             for ((k, at) in tomb) out.add(SyncRow(k, at, true, JSONObject()))
@@ -258,7 +285,8 @@ object SyncData {
 
     private fun exportCompleted(context: Context, dav: SyncWebDav): List<SyncRow> {
         val helper = QuestionBankDb(context)
-        val db = helper.readableDatabase
+        // 写库：发现「墓碑之后本地又写过同一行」时要清墓碑（见 tombstoneSuppresses）
+        val db = helper.writableDatabase
         try {
             val tomb = tombstones(db, DS_COMPLETED)
             val out = mutableListOf<SyncRow>()
@@ -266,7 +294,8 @@ object SyncData {
                 while (c.moveToNext()) {
                     val qid = c.getString(0)
                     val at = c.getLong(1)
-                    if (tomb[qid] != null) continue
+                    // 「清空本组进度」写了墓碑，用户随后重做该题：墓碑不能永久吞掉这条新完成记录
+                    if (tombstoneSuppresses(db, tomb, DS_COMPLETED, qid, at)) continue
                     out.add(row(qid, at, JSONObject().apply {
                         put("question_id", qid); put("completed_at", at)
                     }, dav))
@@ -281,7 +310,8 @@ object SyncData {
 
     private fun exportAnnotations(context: Context, dav: SyncWebDav): List<SyncRow> {
         val helper = QuestionBankDb(context)
-        val db = helper.readableDatabase
+        // 写库：发现「墓碑之后本地又写过同一行」时要清墓碑（见 tombstoneSuppresses）
+        val db = helper.writableDatabase
         try {
             val tomb = tombstones(db, DS_ANNOTATIONS)
             val out = mutableListOf<SyncRow>()
@@ -289,7 +319,8 @@ object SyncData {
                 while (c.moveToNext()) {
                     val qid = c.getString(0)
                     val at = c.getLong(2)
-                    if (tomb[qid] != null) continue
+                    // 删分类写了墓碑，重新导入该分类后用户再次批注：新笔迹不能被旧墓碑吞掉
+                    if (tombstoneSuppresses(db, tomb, DS_ANNOTATIONS, qid, at)) continue
                     out.add(row(qid, at, JSONObject().apply {
                         put("question_id", qid)
                         put("strokes", c.getString(1) ?: "")
@@ -332,7 +363,7 @@ object SyncData {
     fun apply(context: Context, dataset: String, rows: List<SyncRow>, dav: SyncWebDav?) {
         when (dataset) {
             DS_WRONG -> applyWrong(context, rows, dav)
-            DS_SESSIONS -> applySessions(context, rows)
+            DS_SESSIONS -> applySessions(context, rows, dav)
             DS_COMPLETED -> applyCompleted(context, rows)
             DS_ANNOTATIONS -> applyAnnotations(context, rows, dav)
             DS_API_KEYS -> applyApiKeys(context, rows, dav)
@@ -411,38 +442,48 @@ object SyncData {
         }
     }
 
-    private fun applySessions(context: Context, rows: List<SyncRow>) {
+    private fun applySessions(context: Context, rows: List<SyncRow>, dav: SyncWebDav?) {
         val helper = QuestionBankDb(context)
         val db = helper.writableDatabase
         try {
-            // 无网络调用，整个数据集一个事务：写行与删墓碑不会停在中间态（导出按墓碑跳行）
-            db.beginTransaction()
-            try {
-                for (r in rows) {
-                    if (r.deleted) {
+            val cache = blobCacheDir(context)
+            for (r in rows) {
+                // 同 applyWrong：fetchBlob 走网络必须在事务外，事务只包每行的写库段
+                if (r.deleted) {
+                    db.beginTransaction()
+                    try {
                         db.delete("practice_sessions", "COALESCE(sync_key,'') = ?", arrayOf(r.key))
                         addTombstone(db, DS_SESSIONS, r.key, r.updatedAt)
-                        continue
+                        db.setTransactionSuccessful()
+                    } finally {
+                        db.endTransaction()
                     }
-                    val d = r.data
-                    val existingId = db.rawQuery(
-                        "SELECT id FROM practice_sessions WHERE COALESCE(sync_key,'') = ?", arrayOf(r.key)
-                    ).use { c -> if (c.moveToFirst()) c.getLong(0) else null }
-                    val v = ContentValues().apply {
-                        put("finished_at", d.optLong("finished_at", r.updatedAt))
-                        put("date_str", d.optString("date_str"))
-                        put("module_id", d.optString("module_id"))
-                        put("module_name", d.optString("module_name"))
-                        put("is_wrong_practice", d.optInt("is_wrong_practice", 0))
-                        put("question_count", d.optInt("question_count", 0))
-                        put("correct_count", d.optInt("correct_count", 0))
-                        put("wrong_count", d.optInt("wrong_count", 0))
-                        put("elapsed_ms", d.optLong("elapsed_ms", 0))
-                        put("rate_min", d.optInt("rate_min", 0))
-                        put("rate_max", d.optInt("rate_max", 100))
-                        put("questions_json", d.optString("questions_json", "[]"))
-                        put("sync_key", r.key)
-                    }
+                    continue
+                }
+                // 导出侧把 questions_json 内的 data URL 剥成了 blob:<hex>，应用时必须还原回来：
+                // 否则本地库被就地写成 blob: 文本，回看该训练时题干/解析图全裂，
+                // 且 updated_at(=finished_at) 不变，坏值还能在 LWW 平局里胜出推给对端
+                val d = JSONObject(restoreBlobs(r.data.toString(), dav, cache))
+                val v = ContentValues().apply {
+                    put("finished_at", d.optLong("finished_at", r.updatedAt))
+                    put("date_str", d.optString("date_str"))
+                    put("module_id", d.optString("module_id"))
+                    put("module_name", d.optString("module_name"))
+                    put("is_wrong_practice", d.optInt("is_wrong_practice", 0))
+                    put("question_count", d.optInt("question_count", 0))
+                    put("correct_count", d.optInt("correct_count", 0))
+                    put("wrong_count", d.optInt("wrong_count", 0))
+                    put("elapsed_ms", d.optLong("elapsed_ms", 0))
+                    put("rate_min", d.optInt("rate_min", 0))
+                    put("rate_max", d.optInt("rate_max", 100))
+                    put("questions_json", d.optString("questions_json", "[]"))
+                    put("sync_key", r.key)
+                }
+                val existingId = db.rawQuery(
+                    "SELECT id FROM practice_sessions WHERE COALESCE(sync_key,'') = ?", arrayOf(r.key)
+                ).use { c -> if (c.moveToFirst()) c.getLong(0) else null }
+                db.beginTransaction()
+                try {
                     if (existingId != null) {
                         db.update("practice_sessions", v, "id = ?", arrayOf(existingId.toString()))
                     } else {
@@ -450,10 +491,10 @@ object SyncData {
                         db.insert("practice_sessions", null, v)
                     }
                     deleteTombstone(db, DS_SESSIONS, r.key)
+                    db.setTransactionSuccessful()
+                } finally {
+                    db.endTransaction()
                 }
-                db.setTransactionSuccessful()
-            } finally {
-                db.endTransaction()
             }
         } finally {
             helper.close()
