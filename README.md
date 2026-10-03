@@ -15,6 +15,12 @@
 每次 push 到 `master` 都会自动打包，APK 在 [Actions](https://github.com/Dz-hy/Pei-Pei-Shua/actions) 对应运行页面的 Artifacts 区（保留 30 天），适合尝鲜最新改动。
 
 > Release 版使用仓库内签名证书签名，可直接安装覆盖；版本号格式 `1.0.MMddHHmm`（构建时间，CI 为 UTC），可在系统设置中确认所装构建。
+>
+> 签名前提：`release.keystore` 随仓库公开，因此「谁能发布可覆盖安装的更新」完全取决于两个签名密码
+> （`RELEASE_STORE_PASSWORD` / `RELEASE_KEY_PASSWORD`）是否只有维护者掌握——它们只存在于 GitHub Secrets
+> 与本机 `~/.gradle/gradle.properties`，任何时候都不要写进仓库、日志或聊天工具。若这一前提被破坏，
+> 唯一补救是换一把新签名密钥，代价是所有已安装用户必须先卸载重装（本地题库进度、错题与批注会丢，
+> 除非已云同步），所以密钥不轻易更换。
 
 ---
 
