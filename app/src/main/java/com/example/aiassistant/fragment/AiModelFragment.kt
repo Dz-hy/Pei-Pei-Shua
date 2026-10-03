@@ -815,14 +815,15 @@ class AiModelFragment : Fragment() {
         return obj.toString()
     }
 
-    private fun saveWrongQuestionsJson(context: android.content.Context, jsonStr: String) {
+    private fun saveWrongQuestionsJson(context: android.content.Context, jsonStr: String): Int {
         try {
             val arr = org.json.JSONArray(jsonStr)
             val dir = java.io.File(context.filesDir, "wrong_questions")
             if (!dir.exists()) dir.mkdirs()
             
             for (i in 0 until arr.length()) {
-                val obj = arr.getJSONObject(i)
+                // 逐条容错：某一条不是对象（旧版/手改备份）只丢那一条，不要让整份备份走进 catch
+                val obj = arr.optJSONObject(i) ?: continue
                 // 消毒文件名来源的 id：导入数据不可信，防文件名/路径注入（对齐 TeacherManager 导入老师的做法）
                 val id = obj.optString("id", "").replace(Regex("[^a-zA-Z0-9_-]"), "_")
                 if (obj.has("imageBase64") && id.isNotEmpty()) {
@@ -855,18 +856,24 @@ class AiModelFragment : Fragment() {
                     }
                 }
             }
-            context.getSharedPreferences("wrong_questions_prefs", android.content.Context.MODE_PRIVATE)
-                .edit()
-                .putString("wrong_questions_list", arr.toString())
-                .apply()
-            // 错题本已迁至 WCDB：还原数据先进旧 SP，清迁移标记后下次读取幂等并入 DB
-            com.example.aiassistant.questionbank.WrongQuestionManager.invalidateMigration(context)
+            val written = (0 until arr.length()).count { arr.optJSONObject(it) != null }
+            if (written > 0) {
+                context.getSharedPreferences("wrong_questions_prefs", android.content.Context.MODE_PRIVATE)
+                    .edit()
+                    .putString("wrong_questions_list", arr.toString())
+                    .apply()
+                // 错题本已迁至 WCDB：还原数据先进旧 SP，清迁移标记后下次读取幂等并入 DB
+                com.example.aiassistant.questionbank.WrongQuestionManager.invalidateMigration(context)
+            } else {
+                android.util.Log.e("AiModelFragment", "错题备份中没有可用条目，未改动现有错题本")
+            }
+            return written
         } catch (e: Exception) {
-            e.printStackTrace()
-            context.getSharedPreferences("wrong_questions_prefs", android.content.Context.MODE_PRIVATE)
-                .edit()
-                .putString("wrong_questions_list", jsonStr)
-                .apply()
+            // 这里绝不能再把原始 jsonStr（含 base64 截图，可达几十 MB）整串写进 SharedPreferences：
+            // 下次首次读偏好会在主线程解析这坨巨串，直接 ANR/OOM，而外层照样弹"恢复成功"。
+            // 走到这里说明备份确实不可用——放弃恢复、保持现有数据不变
+            android.util.Log.e("AiModelFragment", "错题备份恢复失败，已放弃（不写回原始串）", e)
+            return 0
         }
     }
 
@@ -1029,13 +1036,19 @@ class AiModelFragment : Fragment() {
                     if (type == "ai_assistant_multi_backup") {
                         if (root.has("preferences")) {
                             val prefObj = root.getJSONObject("preferences")
-                            AppPreferences.importPreferencesJson(ctx, prefObj.toString())
-                            prefRestored = true
+                            // 导入结果必须验真：backup_type 不符 / JSON 损坏时过去也照样置
+                            // prefRestored，"恢复成功"弹窗里写着"系统配置已覆盖应用"，其实什么都没换
+                            prefRestored = AppPreferences.importPreferencesJson(ctx, prefObj.toString())
+                            if (prefRestored) {
+                                // SP 里的 ai_models 已被整体覆盖，但 ModelManager 有进程内缓存：
+                                // 不重载，下一次增删改就会拿旧列表把刚导入的模型（含密钥）写回去
+                                com.example.aiassistant.ModelManager.reload(ctx)
+                            }
                         }
                         if (root.has("wrong_questions")) {
                             val wqArr = root.getJSONArray("wrong_questions")
-                            saveWrongQuestionsJson(ctx, wqArr.toString())
-                            wqCount = wqArr.length()
+                            // 以真正写入的条数为准（不可用条目会在函数里被跳过）
+                            wqCount = saveWrongQuestionsJson(ctx, wqArr.toString())
                         }
                         if (root.has("knowledge_cards")) {
                             val cardsObj = root.getJSONObject("knowledge_cards")
@@ -1065,8 +1078,8 @@ class AiModelFragment : Fragment() {
                     } else {
                         when (type) {
                             "preferences" -> {
-                                AppPreferences.importPreferencesJson(ctx, jsonStr)
-                                prefRestored = true
+                                prefRestored = AppPreferences.importPreferencesJson(ctx, jsonStr)
+                                if (prefRestored) com.example.aiassistant.ModelManager.reload(ctx)
                             }
                             "knowledge_cards" -> {
                                 val db = com.example.aiassistant.knowledge.KnowledgeCardDb(ctx)

@@ -42,6 +42,10 @@ class ShizhengPracticeActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_shizheng_practice)
 
+        // 进程重建可直接回到本页（不经 MainActivity），必须先补齐 ShizhengManager 的
+        // lateinit db，否则下方查询抛 UninitializedPropertyAccessException 崩进程
+        ShizhengManager.init(this)
+
         tvProgress = findViewById(R.id.tv_progress)
         tvTypeBadge = findViewById(R.id.tv_type_badge)
         tvStem = findViewById(R.id.tv_stem)

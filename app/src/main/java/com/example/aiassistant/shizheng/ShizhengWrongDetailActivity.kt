@@ -38,6 +38,10 @@ class ShizhengWrongDetailActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_shizheng_wrong_detail)
 
+        // 进程重建可直接回到本页（不经 MainActivity），必须先补齐 ShizhengManager 的
+        // lateinit db，否则下方查询抛 UninitializedPropertyAccessException 崩进程
+        ShizhengManager.init(this)
+
         tvYourAnswer = findViewById(R.id.tv_your_answer)
         tvAnalysis = findViewById(R.id.tv_analysis)
         llOptions = findViewById(R.id.ll_options)

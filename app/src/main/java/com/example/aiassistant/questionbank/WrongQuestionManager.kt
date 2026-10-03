@@ -311,6 +311,10 @@ object WrongQuestionManager {
                 } catch (_: Exception) {}
             }
             getDb(context).delete(id)
+            // 删除也必须排同步：db.delete 只写了墓碑，其余 8 处增改都排了一次 schedule。
+            // 不排的话本地配图已即时删除，而墓碑迟迟不上云——其它设备仍留着旧题和
+            // 指向不存在文件的配图，且再也等不到这一次删除的传播
+            com.example.aiassistant.sync.SyncEngine.schedule(context)
         }
     }
 

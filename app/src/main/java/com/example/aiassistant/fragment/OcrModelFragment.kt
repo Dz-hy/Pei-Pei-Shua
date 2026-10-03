@@ -79,6 +79,12 @@ class OcrModelFragment : Fragment() {
         btnSave.setOnClickListener {
             val url = etCloudOcrUrl.text?.toString()?.trim() ?: ""
             val token = etCloudOcrToken.text?.toString()?.trim() ?: ""
+            // 缺 scheme 的地址（如 "xxx.com/ocr"）存进去后，请求构建会在截图线程抛异常，
+            // 用户只在按悬浮球时看到一句"云端 OCR 失败"。保存时就拒绝，把错误提前到看得懂的地方
+            if (url.isNotEmpty() && !(url.startsWith("http://") || url.startsWith("https://"))) {
+                Toast.makeText(ctx, "OCR 地址需以 http:// 或 https:// 开头", Toast.LENGTH_LONG).show()
+                return@setOnClickListener
+            }
             val cloudType = AppPreferences.getCloudOcrType(ctx)
             if (cloudType == AppPreferences.CLOUD_OCR_TYPE_TEXT)
                 AppPreferences.setCloudTextOcrUrl(ctx, url)

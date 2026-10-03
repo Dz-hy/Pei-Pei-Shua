@@ -48,6 +48,11 @@ class ShizhengActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_shizheng)
 
+        // 进程被系统回收后直接从最近任务回到本页时不会经过 MainActivity，
+        // 而 db 是 lateinit（只在 MainActivity.init 里赋值）→ 任何查询都抛
+        // UninitializedPropertyAccessException。init 自带 isInitialized 判断，重复调用无害
+        ShizhengManager.init(this)
+
         tvSyncStatus = findViewById(R.id.tv_sync_status)
         rvNews = findViewById(R.id.rv_news)
         layoutEmpty = findViewById(R.id.layout_empty)

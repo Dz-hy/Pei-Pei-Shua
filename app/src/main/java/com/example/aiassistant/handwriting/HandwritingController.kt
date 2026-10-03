@@ -56,8 +56,6 @@ class HandwritingController(
         val content = scrollView.getChildAt(0) ?: return
         // 注意不能用 parent is FrameLayout 判断已安装：ScrollView 本身就继承自 FrameLayout
         if (content.parent !== scrollView) return // 已包装过
-        // 注意不能用 parent is FrameLayout 判断已安装：ScrollView 本身就继承自 FrameLayout
-        if (content.parent !== scrollView) return // 已包装过
 
         scrollView.removeView(content)
         val frame = ContentHostFrameLayout(activity).apply {
@@ -180,11 +178,19 @@ class HandwritingController(
         // 放后台线程执行，避免切题/收起/完成时卡主线程（与 revealAnnotation 的异步加载对偶）
         val snapshot = overlay.strokesSnapshot()
         if (syncSave) {
-            // onPause：落库完成后才能返回，保证进程被杀也不丢笔迹（与异步化前的 onPause 行为一致）
-            writeSnapshot(id, snapshot)
+            // onPause：必须落库完成后才能返回（进程随时可能被杀），同时仍走同一串行队列——
+            // 直接在本线程写会插到已排队的异步写之前，随后的旧快照反而把新笔迹覆盖回去
+            val future = saveQueue.submit { writeSnapshot(id, snapshot) }
+            try {
+                future.get(5, java.util.concurrent.TimeUnit.SECONDS)
+            } catch (e: Exception) {
+                android.util.Log.w("HWDebug", "onPause 同步落库未完成 id=$id", e)
+            }
             return
         }
-        Thread { writeSnapshot(id, snapshot) }.start()
+        // 全局串行队列：同一题「完成保存 → 立刻重进编辑 → 收起保存」两次写按顺序落库，
+        // 过去每次 new 一个线程，慢的那次可能后到，把刚画的笔迹整体回滚成旧快照
+        saveQueue.execute { writeSnapshot(id, snapshot) }
     }
 
     private fun writeSnapshot(id: String, snapshot: List<Stroke>) {
@@ -192,8 +198,19 @@ class HandwritingController(
             val json = Stroke.listToJson(snapshot)
             android.util.Log.d("HWDebug", "saveNow id=$id jsonLen=${json.length}")
             saver(id, json)
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
+            // 捕 Throwable：数百 KB 笔迹的序列化/写库可能 OOM，逃逸出队列线程会击穿进程
             android.util.Log.w("HWDebug", "saveNow failed id=$id", e)
+        }
+    }
+
+    companion object {
+        /**
+         * 批注写盘串行队列（进程内唯一）：保证同一题的多次保存按请求顺序落库，
+         * 也不会因 Activity 重建而累积线程。守护线程避免阻塞进程退出。
+         */
+        private val saveQueue = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "HandwritingSave").apply { isDaemon = true }
         }
     }
 

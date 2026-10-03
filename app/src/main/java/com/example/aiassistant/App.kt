@@ -37,6 +37,22 @@ class App : Application() {
             android.util.Log.e("App", "Failed to set OpenMP env vars: ${e.message}")
         }
 
+        // 未捕获异常兜底：项目里大量一次性后台线程（查库/解析/落库/取图）没有各自的
+        // try/catch，WCDB 的 BUSY / 单行超大 / 畸形 JSON / OOM 从那种线程抛出就是整进程崩，
+        // 用户表现为"闪退"且正在写的记录丢失。后台线程一律记录后保活；
+        // 主线程仍走系统默认崩溃，避免把真正的 UI 缺陷吞成"界面静默失灵"。
+        val previousHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, ex ->
+            val isMain = thread === android.os.Looper.getMainLooper().thread
+            android.util.Log.e(
+                "App",
+                "${if (isMain) "主线程" else "后台线程 ${thread.name}"} 未捕获异常：" +
+                    "${ex.javaClass.simpleName} ${ex.message}",
+                ex
+            )
+            if (isMain) previousHandler?.uncaughtException(thread, ex)
+        }
+
         // 初始化 Skills 工具注册
         try {
             com.example.aiassistant.skills.BuiltInTools.registerAll()

@@ -2,8 +2,14 @@
    备份规则：SharedPreferences（ai_assistant_prefs）内含 AI/OCR API Key 等敏感配置，
    禁止随云备份上传；设置迁移请使用 App 内「设置导出/导入」JSON 功能。
    数据库（题库/错题本等）仍正常备份。
+
+   filesDir 下两处也必须排除：wrong_questions/ 是用户自己拍的题图与手写解题照片，
+   sync_blobs/ 是云同步落地的图片字节缓存。过去只排了 sharedpref，allowBackup=true
+   会把这两坨个人照片整包上传到 Google One 云端。
    详见 https://developer.android.com/guide/topics/data/autobackup
 -->
 <full-backup-content>
     <exclude domain="sharedpref" path="." />
+    <exclude domain="file" path="wrong_questions" />
+    <exclude domain="file" path="sync_blobs" />
 </full-backup-content>

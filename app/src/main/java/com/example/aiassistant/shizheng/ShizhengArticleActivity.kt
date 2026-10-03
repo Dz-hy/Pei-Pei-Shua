@@ -34,6 +34,10 @@ class ShizhengArticleActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_shizheng_article)
 
+        // 进程重建可直接回到本页（不经 MainActivity），必须先补齐 ShizhengManager 的
+        // lateinit db，否则下方查询抛 UninitializedPropertyAccessException 崩进程
+        ShizhengManager.init(this)
+
         val newsId = intent.getLongExtra(EXTRA_NEWS_ID, -1L)
 
         findViewById<ImageView>(R.id.btn_back).setOnClickListener { finish() }
@@ -112,6 +116,9 @@ class ShizhengArticleActivity : AppCompatActivity() {
         Toast.makeText(this, "AI 总结中，约需 1-2 分钟…", Toast.LENGTH_SHORT).show()
 
         ShizhengManager.summarizeArticleManuallyAsync(a.id) { result, refreshed ->
+            // 总结要 1-2 分钟，期间用户很可能已经返回上一页：回调里的 render() 会对已销毁
+            // 页面的 WebView 调 loadDataWithBaseURL + 动画，Toast 也挂在死窗口上
+            if (isFinishing || isDestroyed) return@summarizeArticleManuallyAsync
             article = refreshed
             summarizing = false
             Toast.makeText(this, result, Toast.LENGTH_LONG).show()

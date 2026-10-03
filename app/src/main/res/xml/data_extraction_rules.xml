@@ -1,11 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?><!--
    数据提取规则（API 31+）：与 backup_rules.xml 口径一致——
    SharedPreferences 内含明文 API Key，云备份与设备迁移均排除。
+
+   cloud-backup 额外排除 filesDir 下的错题截图（wrong_questions/）与云同步图片缓存
+   （sync_blobs/）：那是用户拍摄的题目照片，不该整包上传云端。
+   device-transfer 不排除——换机克隆是用户主动、本机到本机的迁移，错题配图应当跟着走。
    详见 https://developer.android.com/about/versions/12/backup-restore#xml-changes
 -->
 <data-extraction-rules>
     <cloud-backup>
         <exclude domain="sharedpref" path="." />
+        <exclude domain="file" path="wrong_questions" />
+        <exclude domain="file" path="sync_blobs" />
     </cloud-backup>
     <device-transfer>
         <exclude domain="sharedpref" path="." />

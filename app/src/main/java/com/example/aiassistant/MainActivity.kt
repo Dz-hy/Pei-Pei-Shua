@@ -150,11 +150,16 @@ class MainActivity : AppCompatActivity(), HomeFragment.ServiceControlListener {
     }
 
     private fun handleIntent(intent: Intent) {
-        if (intent.getBooleanExtra(ScreenCaptureService.EXTRA_NEED_RESTART, false) == true) {
+        // 每个标志位消费后立即摘除，并把处理过的 Intent 回存到 Activity：
+        // 否则旋转/深色切换/分屏重建时系统原样再交付同一个 Intent，权限流程会被反复重放
+        // （点过一次"录屏已暂停"通知后，每转一次屏就自动弹一次悬浮窗设置页 + 录屏授权）
+        if (intent.getBooleanExtra(ScreenCaptureService.EXTRA_NEED_RESTART, false)) {
+            intent.removeExtra(ScreenCaptureService.EXTRA_NEED_RESTART)
             startPermissionFlow()
         }
         // 处理从悬浮球跳转过来的重新授权请求（锁屏后 MediaProjection 失效）
         if (intent.getBooleanExtra("request_media_projection", false)) {
+            intent.removeExtra("request_media_projection")
             // 服务仍在运行（SPECIAL_USE 类型），只需重新获取 MediaProjection
             if (Settings.canDrawOverlays(this)) {
                 requestScreenCapturePermission()
@@ -164,6 +169,7 @@ class MainActivity : AppCompatActivity(), HomeFragment.ServiceControlListener {
         }
         // 处理快捷磁贴点击自动开启服务
         if (intent.getBooleanExtra("start_float_service_auto", false)) {
+            intent.removeExtra("start_float_service_auto")
             if (Settings.canDrawOverlays(this)) {
                 if (!isServiceRunning()) {
                     startPermissionFlow()
@@ -175,8 +181,10 @@ class MainActivity : AppCompatActivity(), HomeFragment.ServiceControlListener {
         // 遮罩「回到番茄钟」按钮 / AppBlocker 前台通知点击：直接落在番茄钟 tab。
         // 冷启动时 setupBottomNav 已先执行，设置 selectedItemId 会触发既有监听器完成切换
         if (intent.getBooleanExtra("open_pomodoro", false)) {
+            intent.removeExtra("open_pomodoro")
             findViewById<NavigationBarView>(R.id.bottom_nav).selectedItemId = R.id.nav_pomodoro
         }
+        setIntent(intent)
     }
 
     // ── 底部导航 ──────────────────────────────────────────────────────
@@ -333,7 +341,16 @@ class MainActivity : AppCompatActivity(), HomeFragment.ServiceControlListener {
             putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, resultCode)
             putExtra(ScreenCaptureService.EXTRA_DATA, data)
         }
-        startForegroundService(serviceIntent)
+        try {
+            startForegroundService(serviceIntent)
+        } catch (e: Exception) {
+            // Android 12+ 在后台启动前台服务会抛 ForegroundServiceStartNotAllowedException：
+            // 拦截遮罩可能已把本页 moveTaskToBack，此时授权结果刚好回来 → 未捕获就是每次
+            // 开球必崩。失败只提示，不把 floatEnabled 置真（否则 UI 显示开着而服务没起）
+            android.util.Log.e("MainActivity", "启动录屏服务失败（可能处于后台）", e)
+            Toast.makeText(this, "开启悬浮球失败，请回到应用内再试一次", Toast.LENGTH_LONG).show()
+            return
+        }
         AppPreferences.setFloatEnabled(this, true)
         Toast.makeText(this, "悬浮球已开启，切换到其他应用即可使用", Toast.LENGTH_LONG).show()
 

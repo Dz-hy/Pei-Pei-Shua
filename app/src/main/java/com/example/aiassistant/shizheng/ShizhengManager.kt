@@ -135,8 +135,14 @@ object ShizhengManager {
                 "求是网 ${issue.label} 目录共 ${candidates.size} 篇，新入库 $newCount 篇" +
                     if (failedCount > 0) "，失败 $failedCount 篇" else ""
             )
-            // 单篇失败不推进水位：否则该篇在本期内永远不会重试，下次同步补抓
-            if (failedCount == 0) db.setMeta(KEY_QIUSHI_ISSUE, issue.tocUrl)
+            // 单篇失败不推进水位：否则该篇在本期内永远不会重试，下次同步补抓。
+            // 目录解析出 0 篇同样不推进（站点改版/选择器失效）：一旦当成"本期已同步"，
+            // 整期内容会被永久跳过且没有任何提示
+            if (failedCount == 0 && candidates.isNotEmpty()) {
+                db.setMeta(KEY_QIUSHI_ISSUE, issue.tocUrl)
+            } else if (candidates.isEmpty()) {
+                notifySync("求是网 ${issue.label} 未解析到任何文章，页面结构可能已变更，本期不标记为已同步")
+            }
         }
 
         aiProcessPending(NewsSources.QIUSHI, QIUSHI_QUOTA)
@@ -184,8 +190,13 @@ object ShizhengManager {
                 "组织人事报 ${stage.releaseDate} 要闻版共 ${candidates.size} 篇，新入库 $newCount 篇" +
                     if (failedCount > 0) "，失败 $failedCount 篇" else ""
             )
-            // 同求是网：有失败不推进水位，下次同步补抓
-            if (failedCount == 0) db.setMeta(KEY_ORG_ISSUE, stage.releaseDate)
+            // 同求是网：有失败、或版面解析出 0 篇（版面改名/结构变更）都不推进水位，
+            // 否则整期要闻会被永久标记为已同步而静默丢失
+            if (failedCount == 0 && candidates.isNotEmpty()) {
+                db.setMeta(KEY_ORG_ISSUE, stage.releaseDate)
+            } else if (candidates.isEmpty()) {
+                notifySync("组织人事报 ${stage.releaseDate} 未解析到任何文章，版面可能已变更，本期不标记为已同步")
+            }
         }
 
         aiProcessPending(NewsSources.ORG, ORG_QUOTA)
@@ -323,6 +334,15 @@ object ShizhengManager {
 
             val draft = ShizhengAi.generateQuestion(appContext, article, type)
             if (draft == null) {
+                // 瞬时失败（断网/超时/被别的 AI 请求抢占）保持 PENDING，本次就此收手、下次同步补出；
+                // 只有确定性失败才判死。否则弱网环境一次同步就能把整期文章全部标成 DROPPED
+                if (ShizhengAi.lastFailure == ShizhengAi.ShizhengFailure.TRANSIENT) {
+                    notifySync(
+                        "出题暂时失败（${ShizhengAi.lastError ?: "网络/超时"}），" +
+                            "本来源剩余文章保留待下次同步重试"
+                    )
+                    break
+                }
                 notifySync("出题失败，跳过：${article.title.take(18)}…")
                 db.markQuestionDropped(article.id)
                 continue
