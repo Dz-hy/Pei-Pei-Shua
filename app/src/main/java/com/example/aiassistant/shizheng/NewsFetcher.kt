@@ -21,9 +21,35 @@ object NewsFetcher {
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(20, TimeUnit.SECONDS)
+        // 整调用上限：同步线程会连着抓十几个页面，单个页面持续吐字节时不该把整轮拖死
+        .callTimeout(60, TimeUnit.SECONDS)
         .build()
 
-    /** GET 请求，返回 UTF-8 文本。失败重试一次，仍失败抛 IOException */
+    /**
+     * 按声明编码解码响应体。
+     * HTTP 头没给 charset 时 OkHttp 一律按 UTF-8，而不少国内站点只在 HTML 里写
+     * `<meta charset="gbk">` → 整篇乱码入库，抓取水位还会照常推进（不可回溯）。
+     * 因此头里没明示非 UTF-8 时，再嗅探一次 head 里的 meta charset。
+     */
+    private fun decodeBody(bytes: ByteArray, contentType: okhttp3.MediaType?): String {
+        val declared = contentType?.charset()
+        if (declared != null && !declared.name().equals("UTF-8", ignoreCase = true)) {
+            return try { String(bytes, declared) } catch (_: Exception) { String(bytes, Charsets.UTF_8) }
+        }
+        val head = String(bytes, 0, minOf(bytes.size, 2048), Charsets.ISO_8859_1)
+        val sniffed = Regex("(?i)charset\\s*=\\s*[\"']?([A-Za-z0-9_-]+)")
+            .find(head)?.groupValues?.get(1)
+            ?.takeIf { !it.equals("utf-8", ignoreCase = true) }
+        return try {
+            if (sniffed != null) String(bytes, java.nio.charset.Charset.forName(sniffed))
+            else String(bytes, Charsets.UTF_8)
+        } catch (_: Exception) {
+            // 别名不认识（gb2312 的各种变体）就退回 UTF-8：解码错误不该让整篇抓失
+            String(bytes, Charsets.UTF_8)
+        }
+    }
+
+    /** GET 请求，按声明/嗅探编码返回文本。失败重试一次，仍失败抛 IOException */
     fun httpGet(url: String): String {
         var lastError: Exception? = null
         repeat(2) { attempt ->
@@ -36,7 +62,8 @@ object NewsFetcher {
                     .build()
                 client.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
-                    return response.body?.string() ?: ""
+                    val body = response.body ?: return ""
+                    return decodeBody(body.bytes(), body.contentType())
                 }
             } catch (e: Exception) {
                 lastError = e

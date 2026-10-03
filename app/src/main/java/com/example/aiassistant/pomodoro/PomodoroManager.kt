@@ -32,25 +32,19 @@ object PomodoroManager {
 
     fun completeSession(id: Long, durationMinutes: Int): Int {
         if (id < 0) return 0
-        val session = ensureDb().getSession(id) ?: return 0
-        return ensureDb().updateSession(
-            session.copy(
-                durationMinutes = durationMinutes,
-                isCompleted = true,
-                finishedAt = System.currentTimeMillis()
-            )
+        // 单条条件 UPDATE（只改仍开着的行）：不再先读整行再覆盖，
+        // 避免与孤立清理并发时把已完成的番茄回写成未完成
+        return ensureDb().finishSession(
+            id, durationMinutes, completed = true,
+            finishedAt = System.currentTimeMillis(), onlyIfOpen = true
         )
     }
 
     fun cancelSession(id: Long, durationMinutes: Int): Int {
         if (id < 0) return 0
-        val session = ensureDb().getSession(id) ?: return 0
-        return ensureDb().updateSession(
-            session.copy(
-                durationMinutes = durationMinutes,
-                isCompleted = false,
-                finishedAt = System.currentTimeMillis()
-            )
+        return ensureDb().finishSession(
+            id, durationMinutes, completed = false,
+            finishedAt = System.currentTimeMillis(), onlyIfOpen = true
         )
     }
 
@@ -88,7 +82,11 @@ object PomodoroManager {
                 if (elapsed > s.targetMinutes + 5) {
                     // 进程被杀后隔天才触发清理时，elapsed 是无意义的墙钟时长，封顶到目标时长
                     val duration = minOf(elapsed, s.targetMinutes)
-                    db.updateSession(s.copy(durationMinutes = duration, isCompleted = false, finishedAt = s.startedAt + duration * 60000L))
+                    // 条件 UPDATE：这一行若已在别处被收尾（例如刚完成的番茄落库），不再覆盖
+                    db.finishSession(
+                        s.id, duration, completed = false,
+                        finishedAt = s.startedAt + duration * 60000L, onlyIfOpen = true
+                    )
                 }
             }
         }

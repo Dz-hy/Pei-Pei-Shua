@@ -81,6 +81,30 @@ class PomodoroDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB
         return writableDatabase.delete(TABLE_SESSIONS, "$COL_ID=?", arrayOf(id.toString()))
     }
 
+    /**
+     * 收尾一条会话：单条条件 UPDATE。原先"先 getSession 再整行覆盖"的两步写
+     * 与孤立清理并发时，会把已完成的番茄改回未完成（统计随之少一个）。
+     * @param onlyIfOpen 仅当该行尚未收尾时才写：已完成的记录不会被反向改写
+     * @return 受影响行数（0 = 该行已被别的写者收尾）
+     */
+    fun finishSession(
+        id: Long,
+        durationMinutes: Int,
+        completed: Boolean,
+        finishedAt: Long,
+        onlyIfOpen: Boolean
+    ): Int {
+        val cv = ContentValues().apply {
+            put(COL_DURATION, durationMinutes)
+            put(COL_COMPLETED, if (completed) 1 else 0)
+            put(COL_FINISHED_AT, finishedAt)
+        }
+        val where = if (onlyIfOpen) {
+            "$COL_ID=? AND $COL_COMPLETED=0 AND $COL_FINISHED_AT=0"
+        } else "$COL_ID=?"
+        return writableDatabase.update(TABLE_SESSIONS, cv, where, arrayOf(id.toString()))
+    }
+
     // ── 查询 ──
 
     fun getSession(id: Long): FocusSession? {
