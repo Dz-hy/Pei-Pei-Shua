@@ -72,8 +72,25 @@ object AppPreferences {
         SecurePrefs.open(prefs(context).getString(KEY_API_KEY, DEFAULT_API_KEY))
             ?.takeIf { it.isNotBlank() } ?: DEFAULT_API_KEY
 
+    /**
+     * 凭据写入守卫：新值为空、而现存值是"此刻解不开的密文"时，保持原密文不动。
+     * KeyStore 暂时不可用会让 getter 降级成 ""，设置页据此把输入框预填成空白，用户只是
+     * 点了个保存就把仍可解密的旧凭据永久换成空——一次瞬时故障升级成凭据丢失。
+     * 现存值能解密（或本就是明文）时不拦，正常清空凭据的路径照旧可用。
+     */
+    private fun sealKeepingUnreadableOld(prefs: SharedPreferences, key: String, value: String): String {
+        val stored = prefs.getString(key, null)
+        if (value.isBlank() && stored != null && SecurePrefs.isEncrypted(stored) &&
+            SecurePrefs.decrypt(stored) == null
+        ) {
+            android.util.Log.w("AppPreferences", "$key 现值此刻无法解密，忽略空值覆盖以保留原密文")
+            return stored
+        }
+        return SecurePrefs.seal(value)
+    }
+
     fun setApiKey(context: Context, key: String) =
-        prefs(context).edit().putString(KEY_API_KEY, SecurePrefs.seal(key)).apply()
+        prefs(context).edit().putString(KEY_API_KEY, sealKeepingUnreadableOld(prefs(context), KEY_API_KEY, key)).apply()
 
     fun getApiModel(context: Context): String =
         prefs(context).getString(KEY_API_MODEL, DEFAULT_MODEL)?.takeIf { it.isNotBlank() } ?: DEFAULT_MODEL
@@ -100,7 +117,7 @@ object AppPreferences {
         SecurePrefs.open(prefs(context).getString(KEY_EMB_KEY, ""))?.takeIf { it.isNotBlank() } ?: ""
 
     fun setEmbKey(context: Context, key: String) =
-        prefs(context).edit().putString(KEY_EMB_KEY, SecurePrefs.seal(key)).apply()
+        prefs(context).edit().putString(KEY_EMB_KEY, sealKeepingUnreadableOld(prefs(context), KEY_EMB_KEY, key)).apply()
 
     fun getEmbModel(context: Context): String =
         prefs(context).getString(KEY_EMB_MODEL, DEFAULT_EMB_MODEL)?.takeIf { it.isNotBlank() }
@@ -246,7 +263,7 @@ object AppPreferences {
             ?.takeIf { it.isNotBlank() } ?: DEFAULT_CLOUD_OCR_TOKEN
 
     fun setCloudOcrToken(context: Context, token: String) =
-        prefs(context).edit().putString(KEY_CLOUD_OCR_TOKEN, SecurePrefs.seal(token)).apply()
+        prefs(context).edit().putString(KEY_CLOUD_OCR_TOKEN, sealKeepingUnreadableOld(prefs(context), KEY_CLOUD_OCR_TOKEN, token)).apply()
 
     fun getCloudOcrType(context: Context): Int =
         prefs(context).getInt(KEY_CLOUD_OCR_TYPE, CLOUD_OCR_TYPE_LAYOUT)

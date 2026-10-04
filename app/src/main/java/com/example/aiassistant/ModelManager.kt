@@ -46,8 +46,12 @@ object ModelManager {
                     var cfg = AiModelConfig.fromJson(obj)
                     val key = cfg.apiKey
                     if (SecurePrefs.isEncrypted(key)) {
-                        // 密文解不开（跨设备导入/KeyStore 被重置）：留空待用户重填，不把密文当 key 发出去
-                        cfg = cfg.copy(apiKey = SecurePrefs.decrypt(key) ?: "")
+                        // 密文解不开（跨设备导入/KeyStore 被重置/此刻不可用）：留空待用户重填，
+                        // 不把密文当 key 发出去；同时记住这份密文，save 时若仍是空就原样写回，
+                        // 否则一次 KeyStore 抖动 + 用户随手改个模型名，就会把 key 永久抹掉
+                        val plain = SecurePrefs.decrypt(key)
+                        if (plain == null) unreadableKeys[cfg.id] = key
+                        cfg = cfg.copy(apiKey = plain ?: "")
                     } else if (key.isNotBlank()) {
                         needMigrate = true // 旧版明文 apiKey：迁移为字段级密文
                     }
@@ -119,16 +123,31 @@ object ModelManager {
         }
     }
 
+    /**
+     * 加载时解不开、但磁盘上仍是密文的模型：id -> 原密文。
+     * init 的解析循环在锁外跑，故用并发容器。
+     */
+    private val unreadableKeys = java.util.concurrent.ConcurrentHashMap<String, String>()
+
     private fun save(context: Context) {
         val arr = JSONArray()
+        val stillUnreadable = HashMap<String, String>()
         for (m in models) {
             val obj = m.toJson()
             // 仅 apiKey 字段密文落盘（AndroidKeyStore AES/GCM）：其余字段非敏感，保持明文 JSON，
             // 偏好导出的脱敏（stripEmbeddedApiKeys）与跨设备导入才能正常解析（密钥跨设备不可解，
             // 恢复后留空重填）；加密不可用（极少数机型 KeyStore 异常）时该字段回退明文保证可用
-            obj.put("apiKey", if (m.apiKey.isBlank()) m.apiKey else SecurePrefs.encrypt(m.apiKey) ?: m.apiKey)
+            val preserved = if (m.apiKey.isBlank()) unreadableKeys[m.id] else null
+            if (preserved != null) stillUnreadable[m.id] = preserved
+            obj.put("apiKey", when {
+                m.apiKey.isNotBlank() -> SecurePrefs.encrypt(m.apiKey) ?: m.apiKey
+                preserved != null -> preserved      // 空值 + 有原密文：原样保留，不写空
+                else -> m.apiKey
+            })
             arr.put(obj)
         }
+        unreadableKeys.clear()
+        unreadableKeys.putAll(stillUnreadable)     // 已被用户重填或已删除的条目随之释放
         AppPreferences.setAiModels(context, arr.toString())
     }
 }
