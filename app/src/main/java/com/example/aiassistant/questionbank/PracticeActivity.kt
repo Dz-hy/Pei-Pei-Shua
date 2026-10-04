@@ -129,7 +129,7 @@ class PracticeActivity : AppCompatActivity() {
         private const val KEY_VERDICTS = "practice_verdicts"
         private const val KEY_SUBMITTED = "practice_submitted"
         private const val KEY_INDEX = "practice_index"
-        private const val KEY_START_TIME = "practice_start_time"
+        private const val KEY_ELAPSED = "practice_elapsed_ms"
         private const val KEY_COUNTS = "practice_counts"
 
         private val AI_ANALYSIS_PROMPT =
@@ -185,7 +185,9 @@ class PracticeActivity : AppCompatActivity() {
         val verdicts: ByteArray,
         val submitted: Boolean,
         val currentIndex: Int,
-        val startTime: Long,
+        /** 已作答用时：只存累计值，不存起始墙钟——重建可能发生在几小时后，
+         *  用"现在 - 起始"外推会把离开的时间全算进用时并写进训练记录 */
+        val elapsedMs: Long,
         val correctCount: Int,
         val wrongCount: Int
     )
@@ -233,7 +235,7 @@ class PracticeActivity : AppCompatActivity() {
             verdicts = state.getByteArray(KEY_VERDICTS) ?: ByteArray(ids.size),
             submitted = state.getBoolean(KEY_SUBMITTED, false),
             currentIndex = state.getInt(KEY_INDEX, 0),
-            startTime = state.getLong(KEY_START_TIME, 0L),
+            elapsedMs = state.getLong(KEY_ELAPSED, 0L),
             correctCount = counts.getOrElse(0) { 0 },
             wrongCount = counts.getOrElse(1) { 0 }
         )
@@ -251,7 +253,11 @@ class PracticeActivity : AppCompatActivity() {
         )
         outState.putBoolean(KEY_SUBMITTED, submitted)
         outState.putInt(KEY_INDEX, currentIndex)
-        outState.putLong(KEY_START_TIME, practiceStartTime)
+        outState.putLong(
+            KEY_ELAPSED,
+            if (!submitted && practiceStartTime > 0) System.currentTimeMillis() - practiceStartTime
+            else lastElapsedMs
+        )
         outState.putIntArray(KEY_COUNTS, intArrayOf(correctCount, wrongCount))
     }
 
@@ -535,12 +541,41 @@ try {
         showQuestion(0)
     }
 
+    /** 恢复原卷时等题库就绪的挂起快照与可移除监听器（匿名 lambda 注册后取不掉，等不到就永远白屏） */
+    private var pendingRestore: PaperSnapshot? = null
+
+    private val paperRestoreListener: () -> Unit = {
+        val saved = pendingRestore
+        if (saved != null && !destroyed && !isFinishing) {
+            pendingRestore = null
+            handler.removeCallbacks(paperRestoreTimeout)
+            loadSavedPaperNow(saved)
+        }
+    }
+
+    private val paperRestoreTimeout = Runnable {
+        val saved = pendingRestore ?: return@Runnable
+        pendingRestore = null
+        QuestionBankManager.removeOnReadyListener(paperRestoreListener)
+        if (destroyed || isFinishing) return@Runnable
+        Toast.makeText(this, "题库尚未就绪，暂时无法继续原练习，请稍后重新进入", Toast.LENGTH_LONG).show()
+        finish()
+    }
+
     /** 系统重建后按原题目顺序恢复整场训练：题面在后台线程取（题库直取，错题重练按快照重建） */
     private fun loadSavedPaper(saved: PaperSnapshot) {
-        if (isWrongPractice && !QuestionBankManager.isLoaded()) {
-            QuestionBankManager.addOnReadyListener { loadSavedPaper(saved) }
+        if (!QuestionBankManager.isLoaded()) {
+            // 进程被杀后直接恢复到本页时题库可能还在初始化。两类都要等：不等的结果是把
+            // "还没就绪"当成"题目已不在题库"，换一套新随机卷并给出误导提示
+            pendingRestore = saved
+            QuestionBankManager.addOnReadyListener(paperRestoreListener)
+            handler.postDelayed(paperRestoreTimeout, 20_000L)
             return
         }
+        loadSavedPaperNow(saved)
+    }
+
+    private fun loadSavedPaperNow(saved: PaperSnapshot) {
         Thread {
             val pool: List<Question> = if (isWrongPractice) {
                 buildWrongPracticeQuestions()
@@ -578,8 +613,10 @@ try {
         submitted = saved.submitted
         correctCount = saved.correctCount
         wrongCount = saved.wrongCount
-        practiceStartTime = saved.startTime
-        lastElapsedMs = if (saved.startTime > 0) System.currentTimeMillis() - saved.startTime else 0L
+        // 从累计用时接着走：把起始点回拨成"现在 - 已用时"，本次进程内照常计时，
+        // 但重建前离开 App 的那段时间不再被算进用时（旧写法用墙钟差值外推，几小时后回来会虚增）
+        lastElapsedMs = saved.elapsedMs
+        practiceStartTime = System.currentTimeMillis() - saved.elapsedMs
         dataReady = true
         showQuestion(saved.currentIndex.coerceIn(0, paper.size - 1))
     }
@@ -1650,5 +1687,8 @@ try {
         wvMaterial.destroy()
         QuestionBankManager.removeOnReadyListener(readyListener)
         QuestionBankManager.removeOnReadyListener(reviewReadyListener)
+        handler.removeCallbacks(paperRestoreTimeout)
+        QuestionBankManager.removeOnReadyListener(paperRestoreListener)
+        pendingRestore = null
     }
 }
