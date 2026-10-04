@@ -304,8 +304,8 @@ class KnowledgeCardDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, nul
                     put(COL_CREATED_AT, now)
                     put(COL_UPDATED_AT, now)
                 }
-                db.insert(T_CARDS, null, values)
-                count++
+                // 只有真插进去才计数：否则"成功导入 N 条"会虚报（FK/约束失败的行被静默丢弃）
+                if (db.insert(T_CARDS, null, values) >= 0L) count++
             }
             db.setTransactionSuccessful()
         } finally {

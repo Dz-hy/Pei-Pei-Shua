@@ -105,9 +105,16 @@ class KnowledgeCardEditActivity : AppCompatActivity() {
         saving = true
         val edit = isEdit
         Thread {
-            if (edit) KnowledgeCardManager.updateCard(card) else KnowledgeCardManager.addCard(card)
+            // 写库结果决定提示语：原先无条件弹"已添加/已更新"，插入失败时用户以为存下了
+            val ok = if (edit) KnowledgeCardManager.updateCard(card) > 0
+                     else KnowledgeCardManager.addCard(card) >= 0L
             runOnUiThread {
                 if (isDestroyed || isFinishing) return@runOnUiThread
+                saving = false
+                if (!ok) {
+                    Toast.makeText(this, if (edit) "更新失败，请重试" else "保存失败，请重试", Toast.LENGTH_LONG).show()
+                    return@runOnUiThread
+                }
                 Toast.makeText(this, if (edit) "已更新" else "已添加", Toast.LENGTH_SHORT).show()
                 finish()
             }

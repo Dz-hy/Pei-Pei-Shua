@@ -307,10 +307,11 @@ class KnowledgeCardListActivity : AppCompatActivity() {
             .setPositiveButton("删除") { _, _ ->
                 val ids = selectedIds.toList()
                 Thread {
-                    KnowledgeCardManager.deleteCards(ids)
+                    val deleted = KnowledgeCardManager.deleteCards(ids)
                     runOnUiThread {
                         if (isDestroyed || isFinishing) return@runOnUiThread
-                        Toast.makeText(this, "已删除 ${ids.size} 张卡片", Toast.LENGTH_SHORT).show()
+                        // 报实际删除行数：选中项可能已被别的入口删掉，报 ids.size 会虚报成功
+                        Toast.makeText(this, "已删除 $deleted 张卡片", Toast.LENGTH_SHORT).show()
                         exitSelectMode()
                         resetAndLoad()
                     }
