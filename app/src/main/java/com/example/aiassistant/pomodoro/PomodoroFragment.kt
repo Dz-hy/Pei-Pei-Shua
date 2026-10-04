@@ -68,6 +68,8 @@ class PomodoroFragment : Fragment(), PomodoroTimer.TimerListener {
     private var creatingAutoSession = false
     // 恢复保存的计时器期间为 true：restore 触发的 onStateChanged(FOCUS) 不应补建会话
     private var restoringTimer = false
+    // 运行期快照按 15s 分桶落盘，避免每秒 tick 都写 prefs
+    private var lastSnapshotBucket = Long.MIN_VALUE
 
     // 应用拦截：接收来自拦截服务的"结束专注"广播
     private val stopFocusReceiver = object : BroadcastReceiver() {
@@ -368,9 +370,26 @@ class PomodoroFragment : Fragment(), PomodoroTimer.TimerListener {
 
     // ── TimerListener ──
 
+    /**
+     * 运行期快照：原先只在 onDestroyView 落一次，进程被 force-stop/崩溃/系统回收时没有快照，
+     * 「到点补记」拿不到会话，那轮专注最终被孤立清理按未完成收尾——番茄照样丢。
+     * 因此运行中每 15s 分桶落一次，状态跃迁与会话挂上时立即落一次。
+     */
+    private fun persistSnapshot(force: Boolean = false) {
+        val t = timer ?: return
+        if (!isAdded) return
+        if (!force) {
+            val bucket = t.getRemainingMillis() / 15_000L
+            if (bucket == lastSnapshotBucket) return
+            lastSnapshotBucket = bucket
+        }
+        PomodoroTimerHolder.save(requireContext(), t, currentSessionId, currentTaskTitle, currentTag, currentPlanTaskId)
+    }
+
     override fun onTick(remainingMillis: Long, totalMillis: Long) {
         if (!isAdded) return
         updateTimerDisplay(remainingMillis, totalMillis)
+        persistSnapshot()
     }
 
     override fun onPhaseComplete(state: TimerState, isSkipped: Boolean) {
@@ -430,6 +449,9 @@ class PomodoroFragment : Fragment(), PomodoroTimer.TimerListener {
         if (newState == TimerState.FOCUS && !restoringTimer && currentSessionId <= 0) {
             startAutoFocusSession()
         }
+        // restore() 内会同步回调这里，而 currentSessionId 要等 restore 返回后才赋值：
+        // 此时落快照会把 session_id 冲成 -1，「到点补记」就找不到会话行了
+        if (!restoringTimer) persistSnapshot(force = true)
         updateUI()
     }
 
@@ -460,6 +482,8 @@ class PomodoroFragment : Fragment(), PomodoroTimer.TimerListener {
                 // 插入期间专注可能已被手动停止/暂停，此时不再挂会话
                 if (sessionId > 0 && t.state == TimerState.FOCUS && currentSessionId <= 0) {
                     currentSessionId = sessionId
+                    // 会话刚挂上：立即留快照，别等下一个 15s 分桶
+                    persistSnapshot(force = true)
                     // 保存当前任务名，供 AppBlockerService 读取对应白名单
                     AppPreferences.setAppBlockerCurrentTask(requireContext(), taskName)
                     startAppBlocker()

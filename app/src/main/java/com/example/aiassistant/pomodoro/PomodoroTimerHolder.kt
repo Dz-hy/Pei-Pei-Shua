@@ -49,10 +49,15 @@ object PomodoroTimerHolder {
     ) {
         if (!timer.isRunning() && timer.state != TimerState.PAUSED) return
 
+        // 专注阶段会话行可能还在异步 insert（startAutoFocusSession 有毫秒级窗口）：
+        // 这一瞬间的快照若把已存的 session_id 覆盖成 -1，「到点补记」就找不到行，番茄照旧丢
+        val sessionIdToKeep = if (sessionId < 0 && timer.state == TimerState.FOCUS)
+            prefs(context).getLong(KEY_SESSION_ID, -1L) else sessionId
+
         prefs(context).edit()
             .putBoolean(KEY_RUNNING, true)
             .putInt(KEY_STATE, timer.state.ordinal)
-            .putLong(KEY_SESSION_ID, sessionId)
+            .putLong(KEY_SESSION_ID, sessionIdToKeep)
             .putString(KEY_TASK_TITLE, taskTitle)
             .putString(KEY_TAG, tag)
             .putLong(KEY_PLAN_TASK_ID, planTaskId)
