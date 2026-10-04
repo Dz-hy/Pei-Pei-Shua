@@ -271,6 +271,11 @@ class PomodoroFragment : Fragment(), PomodoroTimer.TimerListener {
 
         updateUI()
         updateTimerDisplay(timer?.getRemainingMillis() ?: 0, timer?.getTotalMillis() ?: 0)
+
+        // 进程被系统回收后拦截服务随之自毁（无 intent 不复活，避免无会话也拦），
+        // 恢复出一个仍在进行的专注时必须把它补起来：否则界面显示专注中、
+        // 实际不再拦截，且没有任何提示
+        if (timer?.isRunning() == true) startAppBlocker()
     }
 
     // ── 计时器控制 ──
@@ -795,8 +800,14 @@ class PomodoroFragment : Fragment(), PomodoroTimer.TimerListener {
     // ── 应用拦截 ──
 
     private fun startAppBlocker() {
-        if (AppPreferences.isAppBlockerEnabled(requireContext())) {
-            AppBlockerService.start(requireContext())
+        val ctx = context ?: return
+        if (!AppPreferences.isAppBlockerEnabled(ctx)) return
+        // 启动失败必须让用户知道：UI 显示"专注中"而拦截其实没起来，是最坏的一种静默
+        if (!AppBlockerService.start(ctx)) {
+            android.widget.Toast.makeText(
+                ctx, "应用拦截本次未能开启（系统限制后台启动服务），回到本页面重试即可",
+                android.widget.Toast.LENGTH_LONG
+            ).show()
         }
     }
 

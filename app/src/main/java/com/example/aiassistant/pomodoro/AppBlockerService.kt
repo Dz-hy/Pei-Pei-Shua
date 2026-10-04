@@ -46,19 +46,22 @@ class AppBlockerService : Service() {
         @Volatile var isServiceRunning = false
             private set
 
-        fun start(context: Context) {
+        /** @return 是否成功交给系统启动（失败时拦截能力本次不生效，调用方需给出提示） */
+        fun start(context: Context): Boolean {
             val intent = Intent(context, AppBlockerService::class.java)
-            try {
+            return try {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     context.startForegroundService(intent)
                 } else {
                     context.startService(intent)
                 }
+                true
             } catch (e: Exception) {
                 // Android 12+ 在后台启动前台服务会抛 ForegroundServiceStartNotAllowedException
                 // （休息结束自动进入专注时应用常在后台）：这里不能让它击穿调用线程，
                 // 拦截能力降级为"本次不拦截"，专注计时照常进行
                 android.util.Log.e(TAG, "启动应用拦截服务失败（可能处于后台）：${e.message}")
+                false
             }
         }
 

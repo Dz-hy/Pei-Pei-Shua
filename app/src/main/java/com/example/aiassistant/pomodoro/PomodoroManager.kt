@@ -48,6 +48,17 @@ object PomodoroManager {
         )
     }
 
+    /**
+     * 进程不在期间到点的专注：按目标时长记为完成，结束时间取"当时到点"的时刻，
+     * 因此不会把 App 关掉的几个小时算进专注时长。
+     */
+    fun completeSessionAt(id: Long, durationMinutes: Int, finishedAt: Long): Int {
+        if (id < 0 || durationMinutes <= 0) return 0
+        return ensureDb().finishSession(
+            id, durationMinutes, completed = true, finishedAt = finishedAt, onlyIfOpen = true
+        )
+    }
+
     fun deleteSession(id: Long): Int = ensureDb().deleteSession(id)
 
     // ── 查询 ──

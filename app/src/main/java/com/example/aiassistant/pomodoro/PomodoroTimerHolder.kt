@@ -87,13 +87,24 @@ object PomodoroTimerHolder {
         // 不扣的话恢复后仍显示"还剩 24 分钟"，自然结束时又按目标时长落库 = 凭空多一个番茄
         if (state != TimerState.PAUSED) {
             val savedAt = p.getLong(KEY_START_TIME, 0L)
+            val remainingAtSave = remainingMs
             if (savedAt > 0) {
                 val elapsedWhileGone = System.currentTimeMillis() - savedAt
                 if (elapsedWhileGone > 0) remainingMs = (remainingMs - elapsedWhileGone).coerceAtLeast(0L)
             }
             if (remainingMs <= 0L) {
-                // 阶段在应用不在的时候就该结束了：不把"已结束"恢复成"专注中"，
-                // 也不补记番茄（没人见证它完成）；会话行留给孤儿清理按未完成处理
+                // 阶段在应用不在的时候就到点了：墙钟算得出它已完成，就按完成落库——时长取
+                // 目标时长、结束时间取到点时刻，因此不会把关掉 App 的几小时算成专注。
+                // 原先只置 IDLE 交给孤立清理按未完成收尾，番茄数与专注时长同时归零，
+                // 用户实打实专注了 25 分钟却在统计里凭空消失。休息阶段不计番茄，故只补 FOCUS。
+                if (state == TimerState.FOCUS && savedAt > 0) {
+                    val sessionId = p.getLong(KEY_SESSION_ID, -1L)
+                    val phaseMinutes = (totalMs / 60_000L).toInt()
+                        .takeIf { it > 0 } ?: p.getInt(KEY_TARGET_MINUTES, 0)
+                    PomodoroManager.completeSessionAt(
+                        sessionId, phaseMinutes, savedAt + remainingAtSave
+                    )
+                }
                 state = TimerState.IDLE
                 remainingMs = 0
             }
