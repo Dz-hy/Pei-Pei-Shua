@@ -202,10 +202,12 @@ class WrongQuestionDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, nul
         }
     }
 
-    /** 按题库原题 id 单行查询（判重用）：只反序列化命中行的快照，避免为匹配一个 id 全表解析 JSON */
+    /** 按题库原题 id 单行查询（判重用）：只反序列化命中行的快照，避免为匹配一个 id 全表解析 JSON。
+     *  历史脏数据里同一原题可能有多行（本改动之前"重新匹配"不判重），ORDER BY 固定复用最早那张，
+     *  否则 wrong_count 会随机落在不同行上、统计分裂 */
     fun findByBankQuestionId(bankQuestionId: String): WrongQuestion? {
         readableDatabase.rawQuery(
-            "SELECT id, timestamp, image_path, ocr_text, snapshot, bank_question_id, summary, is_summarized, annotation_json, wrong_count, mastered FROM $T_WRONG WHERE bank_question_id = ? LIMIT 1",
+            "SELECT id, timestamp, image_path, ocr_text, snapshot, bank_question_id, summary, is_summarized, annotation_json, wrong_count, mastered FROM $T_WRONG WHERE bank_question_id = ? ORDER BY timestamp ASC LIMIT 1",
             arrayOf(bankQuestionId)
         ).use { c ->
             if (!c.moveToFirst()) return null

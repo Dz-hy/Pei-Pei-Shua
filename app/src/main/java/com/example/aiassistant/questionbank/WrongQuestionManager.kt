@@ -190,6 +190,8 @@ object WrongQuestionManager {
                 put("timestamp", System.currentTimeMillis())
                 put("wrong_count", existing.wrongCount + 1)
                 put("mastered", 0)
+                // 快照一并刷新：题库重新导入后题面/答案可能已订正，只更时间戳会让错题一直显示旧题面
+                put("snapshot", WrongSnapshotCodec.toJson(question))
                 // 原记录无截图而本次带截图时补上，详情页可见题面原图
                 if (bitmap != null && existing.imagePath.isEmpty()) {
                     put("image_path", saveBitmap(context, existing.id, bitmap))
