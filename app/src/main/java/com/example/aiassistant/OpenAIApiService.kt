@@ -679,6 +679,24 @@ object OpenAIApiService {
         registerCall(owner, call)
         synchronized(this) { currentCall = call }
 
+        // 首字超时：思考型网关可以连着几分钟只推 reasoning_content（本层不认作正文），
+        // 用户看到的就是"点了 AI 解析没反应"，实测最长挂死 12 分钟且没有任何终态。
+        // 到点主动取消并给一次失败回调，让界面明确报错而不是干等 callTimeout 的 600 秒。
+        val sawContent = java.util.concurrent.atomic.AtomicBoolean(false)
+        val firstTokenTimeoutMs = 60_000L
+        val firstTokenGuard = Runnable {
+            if (!sawContent.get() && !delivered.get()) {
+                try { call.cancel() } catch (_: Exception) {}
+                report(AiErrorKind.EMPTY,
+                        "AI 在 ${firstTokenTimeoutMs / 1000} 秒内没有返回正文（可能一直在输出思考过程），已停止等待")
+            }
+        }
+        retryHandler.postDelayed(firstTokenGuard, firstTokenTimeoutMs)
+        fun stopFirstTokenGuard() {
+            sawContent.set(true)
+            retryHandler.removeCallbacks(firstTokenGuard)
+        }
+
         call.enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
                 if (gen != ownerGen(owner)) { supersededOrCancel(); return }   // 同上：取代判定先于 isCanceled
@@ -768,6 +786,7 @@ object OpenAIApiService {
                                     piece = choice.optJSONObject("message")?.optString("content", "") ?: ""
                                 }
                                 if (piece.isNotEmpty()) {
+                                    stopFirstTokenGuard()
                                     accumulated.append(piece)
                                     postDelta(force = false)
                                 }
