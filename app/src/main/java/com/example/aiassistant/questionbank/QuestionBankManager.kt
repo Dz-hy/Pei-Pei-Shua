@@ -81,22 +81,19 @@ object QuestionBankManager {
                 val t0 = System.currentTimeMillis()
 
                 // 未完成库的处理：只有确认库里没有用户学习记录时才删文件重建。
-                // completed_questions / question_annotations / practice_sessions / sync_tombstones
-                // 与题库同在 question_bank_v2.db 里，无条件删库会把用户的全部学习记录一起抹掉
-                var skipAutoImport = false
+                // 有学习记录时**不能删库**（completed_questions / question_annotations /
+                // practice_sessions / sync_tombstones 与题库同在一个文件里），但**导入照常进行**：
+                // importFromAssets 只清 questions/materials/modules/fts 四张内容表，不碰上述
+                // 用户表。早先这里连导入一起跳过，会让"云同步先写入墓碑、本地题库尚未导完"
+                // 这类库永久停在空库状态，做题页每次进来都提示没有题目后退出，且无任何自愈入口。
                 val oldDb = appCtx.getDatabasePath("question_bank_v2.db")
                 if (oldDb.exists()) {
                     try {
                         val testDb = QuestionBankDb(appCtx)
                         try {
-                            if (!testDb.isImported()) {
-                                if (testDb.hasUserData()) {
-                                    Log.e(TAG, "题库未完成但已有学习记录，保留该库、跳过自动重导")
-                                    skipAutoImport = true
-                                } else {
-                                    appCtx.deleteDatabase("question_bank_v2.db")
-                                    Log.d(TAG, "删除未完成的旧数据库")
-                                }
+                            if (!testDb.isImported() && !testDb.hasUserData()) {
+                                appCtx.deleteDatabase("question_bank_v2.db")
+                                Log.d(TAG, "删除未完成的旧数据库")
                             }
                         } finally {
                             testDb.close()
@@ -117,7 +114,7 @@ object QuestionBankManager {
                 db = dbHelper
 
                 // 完整性自愈检查：第一次安装数据库不存在时导入初始 Assets
-                val needReimport = !skipAutoImport && !dbHelper.isImported()
+                val needReimport = !dbHelper.isImported()
 
                 if (needReimport) {
                     importing = true
