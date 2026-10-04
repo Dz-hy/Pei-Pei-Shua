@@ -13,13 +13,16 @@ import java.util.concurrent.TimeUnit
 /**
  * 错题截图 → 题库原题 三级匹配链：
  * ① 归一化字样快筛（FTS5+LCS，免费）→ ② 向量余弦召回 topK → ③ LLM 在候选中裁决。
- * 置信分层：auto = 直接按题库题收录；confirm = 有候选需人工确认（错题详情"重新匹配"）；none = 走 OCR 录入。
+ * 置信分层：auto = 直接按题库题收录；confirm = 有候选需人工确认（错题详情"重新匹配"）；
+ * none = 走 OCR 录入；error = **匹配没能跑完**（题库读取异常），与"确实没有原题"必须分开——
+ * 否则一次库异常就会对用户说"没找到相似题，请先去构建向量索引"，把程序故障报成用户数据问题。
  */
 object QuestionMatcher {
 
     const val CONF_AUTO = "auto"
     const val CONF_CONFIRM = "confirm"
     const val CONF_NONE = "none"
+    const val CONF_ERROR = "error"
 
     private const val VECTOR_TOP_K = 5
     private const val OCR_MAX_LEN = 1500
@@ -49,7 +52,7 @@ object QuestionMatcher {
             matchBlockingUnguarded(context, ocrText, materialText)
         } catch (e: Exception) {
             e.printStackTrace()
-            MatchResult(null, CONF_NONE)
+            MatchResult(null, CONF_ERROR)
         }
     }
 

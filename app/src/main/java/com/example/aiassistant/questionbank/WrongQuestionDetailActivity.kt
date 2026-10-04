@@ -198,6 +198,9 @@ class WrongQuestionDetailActivity : AppCompatActivity() {
                         applyRematch(result.question)
                     }
                     candidates.isNotEmpty() -> showRematchCandidateDialog(candidates)
+                    // 库异常 ≠ 没有原题：报"没找到相似题、请先构建索引"会把程序故障说成用户数据问题
+                    result.confidence == com.example.aiassistant.questionbank.QuestionMatcher.CONF_ERROR ->
+                        Toast.makeText(this, "题库匹配暂时不可用（读取异常），请稍后再试或重新导入题库", Toast.LENGTH_LONG).show()
                     else -> Toast.makeText(this, "未在题库中找到相似题目（可先在设置里构建/补全向量索引）", Toast.LENGTH_LONG).show()
                 }
             }

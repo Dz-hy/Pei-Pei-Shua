@@ -764,6 +764,9 @@ class ScreenCaptureService : Service() {
                     cancelCaptureTimeout()
                     val msg = when {
                         fromBank -> "📝 错题已录入（已匹配题库原题）"
+                        // 库异常导致匹配没跑完：不能说"材料未找到/未转换成功"，那是把程序故障报成用户数据问题
+                        result.confidence == com.example.aiassistant.questionbank.QuestionMatcher.CONF_ERROR ->
+                            "📝 错题已录入（OCR识别）\n⚠️ 题库匹配暂时不可用（读取异常），可在错题本详情「重新匹配」"
                         !materialText.isNullOrBlank() && !result.materialMatched ->
                             "📝 错题已录入（OCR识别）\n⚠️ 该材料在题库中未找到（可能未转换成功），已按题干匹配"
                         result.candidates.isNotEmpty() -> "📝 错题已录入（OCR识别）\n🔍 疑似题库原题，可在错题本详情「重新匹配」确认"
