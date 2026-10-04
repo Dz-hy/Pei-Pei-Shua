@@ -49,7 +49,6 @@ data class PomodoroConfig(
     val longBreakInterval: Int = 4,
     val autoStartBreak: Boolean = true,
     val autoStartFocus: Boolean = false,
-    val breakEndReminder: Boolean = true,
     val keepScreenOn: Boolean = false,
     val dailyTarget: Int = 8,
     val vibrationEnabled: Boolean = true,

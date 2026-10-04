@@ -38,25 +38,6 @@ data class QuestionOption(
 )
 
 /**
- * 材料题（一拖多）
- */
-data class QuestionMaterial(
-    val id: String,
-    val content: String,
-    val questions: List<Question>
-)
-
-/**
- * 做题进度
- */
-data class PracticeProgress(
-    val currentIndex: Int,
-    val totalCount: Int,
-    val correctCount: Int,
-    val wrongCount: Int
-)
-
-/**
  * 一次完整做题训练的会话快照（计划表-做题历史）。
  * questionsJson 两种格式：
  * - v1 全量（'[' 开头）：每题携带完整题面与作答判分，回看不依赖题库。错题重练专用

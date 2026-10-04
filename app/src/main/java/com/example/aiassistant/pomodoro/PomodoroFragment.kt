@@ -235,7 +235,6 @@ class PomodoroFragment : Fragment(), PomodoroTimer.TimerListener {
             longBreakInterval = AppPreferences.getPomodoroLongInterval(ctx),
             autoStartBreak = AppPreferences.isPomodoroAutoBreak(ctx),
             autoStartFocus = AppPreferences.isPomodoroAutoFocus(ctx),
-            breakEndReminder = AppPreferences.isPomodoroBreakRemind(ctx),
             keepScreenOn = AppPreferences.isPomodoroKeepScreen(ctx),
             dailyTarget = AppPreferences.getPomodoroDailyTarget(ctx),
             vibrationEnabled = AppPreferences.isPomodoroVibration(ctx),

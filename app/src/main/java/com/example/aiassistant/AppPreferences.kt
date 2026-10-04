@@ -415,7 +415,6 @@ object AppPreferences {
     private const val KEY_POMODORO_LONG_INTERVAL = "pomodoro_long_interval"
     private const val KEY_POMODORO_AUTO_BREAK = "pomodoro_auto_break"
     private const val KEY_POMODORO_AUTO_FOCUS = "pomodoro_auto_focus"
-    private const val KEY_POMODORO_BREAK_REMIND = "pomodoro_break_remind"
     private const val KEY_POMODORO_KEEP_SCREEN = "pomodoro_keep_screen"
     private const val KEY_POMODORO_DAILY_TARGET = "pomodoro_daily_target"
     private const val KEY_POMODORO_VIBRATION = "pomodoro_vibration"
@@ -451,11 +450,6 @@ object AppPreferences {
         prefs(context).getBoolean(KEY_POMODORO_AUTO_FOCUS, false)
     fun setPomodoroAutoFocus(context: Context, v: Boolean) =
         prefs(context).edit().putBoolean(KEY_POMODORO_AUTO_FOCUS, v).apply()
-
-    fun isPomodoroBreakRemind(context: Context): Boolean =
-        prefs(context).getBoolean(KEY_POMODORO_BREAK_REMIND, true)
-    fun setPomodoroBreakRemind(context: Context, v: Boolean) =
-        prefs(context).edit().putBoolean(KEY_POMODORO_BREAK_REMIND, v).apply()
 
     fun isPomodoroKeepScreen(context: Context): Boolean =
         prefs(context).getBoolean(KEY_POMODORO_KEEP_SCREEN, false)
