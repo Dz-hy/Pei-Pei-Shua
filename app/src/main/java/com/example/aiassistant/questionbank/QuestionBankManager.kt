@@ -179,11 +179,13 @@ object QuestionBankManager {
         val appCtx = context.applicationContext
         executor.execute {
             try {
-                // 丢弃旧连接，避免读到导入前的状态
-                try { db?.close() } catch (_: Exception) {}
-                db = null
+                // 先建新连接再换、后关旧：原先是 db=null → 建连接，中间那段读空会让调用方把
+                // "还没就绪"当成"这道题不在题库里"（做题页恢复原卷据此判原卷作废、换一套新题）。
+                // 换完后并发读手里那份旧连接会抛 IllegalStateException，由 readShared 重试新连接兜住
+                val previous = db
                 val helper = QuestionBankDb(appCtx)
                 db = helper
+                try { previous?.close() } catch (_: Exception) {}
                 ready = true
                 val modules = getModules()
                 val total = modules.sumOf { it.questionCount + it.children.sumOf { c -> c.questionCount } }
