@@ -26,6 +26,13 @@ import java.security.MessageDigest
  */
 object SyncData {
 
+    /**
+     * 本轮 blob 上传/取回的失败次数。由 SyncEngine 在每轮开始时清零、结束时判读：
+     * 这两类失败原先无人记录，行会带着云端根本不存在的 blob:&lt;hex&gt; 推给对端，
+     * 或把占位符就地写进本地库（表现为裂图），而用户看到的仍是"同步成功"。
+     */
+    @Volatile var roundBlobFailures = 0
+
     /** 墓碑表在两个业务库各建一张（WrongQuestionDb 管 wrong_questions，QuestionBankDb 管其余） */
     const val T_TOMBSTONES = "sync_tombstones"
     private const val BLOB_DIR = "sync_blobs"
@@ -81,7 +88,9 @@ object SyncData {
     ): Boolean {
         val tombAt = tomb[key] ?: return false
         if (rowAt > tombAt) {
-            deleteTombstone(db, dataset, key)
+            // 只在本轮内存里摘掉，不物理删墓碑：这里是 export 阶段，后面的 PUT 可能整个失败，
+            // 墓碑一旦被删就回不来，那次删除会被这行旧数据在云端和各设备复活。
+            // 真正的删除发生在 apply 侧——合并后的活行落库时才连带清墓碑，那一步是本地事务
             tomb.remove(key)
             return false
         }
@@ -132,7 +141,12 @@ object SyncData {
         if (cache.exists() && cache.length() > 0) return cache.readBytes()
         if (dav == null) return null
         val resp = dav.get(SyncWebDav.blobPath(hex))
-        if (!resp.ok || resp.body.isEmpty()) return null
+        if (!resp.ok || resp.body.isEmpty()) {
+            // 取不到就把 blob:<hex> 占位原样写进本地库，界面表现为裂图，而这一轮还报"同步成功"。
+            // 计入本轮失败让 lastSyncAt 不刷新，下一轮继续重试（缓存命中即自愈）
+            roundBlobFailures++
+            return null
+        }
         cacheDir.mkdirs()
         try { cache.writeBytes(resp.body) } catch (_: Exception) {}
         return resp.body
@@ -142,7 +156,8 @@ object SyncData {
      *  探重只取状态码不拉响应体，历史 blob 不再每轮整包下载一遍） */
     private fun uploadBlobIfNew(dav: SyncWebDav, hex: String, bytes: ByteArray) {
         if (dav.head(SyncWebDav.blobPath(hex)).ok) return
-        dav.put(SyncWebDav.blobPath(hex), bytes)
+        // PUT 结果必须判：丢掉返回值会让行带着"云端根本不存在"的 blob:<hex> 推给对端
+        if (!dav.put(SyncWebDav.blobPath(hex), bytes).ok) roundBlobFailures++
     }
 
     private fun blobCacheDir(context: Context): File = File(context.filesDir, BLOB_DIR)
@@ -339,14 +354,21 @@ object SyncData {
     private fun exportApiKeys(context: Context, dav: SyncWebDav): List<SyncRow> {
         if (!SyncPrefs.syncApiKeys(context)) return emptyList()
         val prefs = context.getSharedPreferences("sync_prefs", Context.MODE_PRIVATE)
+        // 只写"本机确实有值"的字段：空值一律不进 payload。
+        // 原先 6 个字段无条件 put，而取值 getter 在 KeyStore 解不开或未填时静默返回 ""，
+        // 对端 applyApiKeys 的 has() 又只挡"字段缺失"不挡"字段为空"——于是一台没配 key 的
+        // 新机（或 KeyStore 被重置的设备）会把空值推出去，且 changed 把 updatedAt 提为 now
+        // 必赢 LWW，一轮同步把所有设备的 AI key 洗成空且毫无提示。
         val data = JSONObject().apply {
-            put("api_key", AppPreferences.getApiKey(context))
-            put("api_base_url", AppPreferences.getApiBaseUrl(context))
-            put("api_model", AppPreferences.getApiModel(context))
-            put("api_type", "")
-            put("emb_key", AppPreferences.getEmbKey(context))
-            put("cloud_ocr_token", AppPreferences.getCloudOcrToken(context))
+            AppPreferences.getApiKey(context).takeIf { it.isNotBlank() }?.let { put("api_key", it) }
+            AppPreferences.getApiBaseUrl(context).takeIf { it.isNotBlank() }?.let { put("api_base_url", it) }
+            AppPreferences.getApiModel(context).takeIf { it.isNotBlank() }?.let { put("api_model", it) }
+            AppPreferences.getEmbKey(context).takeIf { it.isNotBlank() }?.let { put("emb_key", it) }
+            AppPreferences.getCloudOcrToken(context).takeIf { it.isNotBlank() }
+                ?.let { put("cloud_ocr_token", it) }
+            // api_type 为桌面端字段，Android 侧无对应配置，既不读也不推
         }
+        if (data.length() == 0) return emptyList()   // 本机没有任何凭据可贡献：不推、不占 LWW
         val digest = sha256Hex(data.toString().toByteArray())
         val last = prefs.getString(KEY_LAST_APIKEYS, null)
         // 只存摘要不存明文副本（旧版存的是整串明文，首次比对必然"有变化"，多推一次无害）
@@ -418,16 +440,17 @@ object SyncData {
                 }
                 val v = ContentValues().apply {
                     put("id", r.key)
-                    put("timestamp", d.optLong("timestamp", r.updatedAt))
                     put("image_path", imagePath)
-                    put("ocr_text", d.optString("ocr_text"))
-                    put("snapshot", d.optString("snapshot"))
-                    put("bank_question_id", d.optString("bank_question_id"))
-                    put("summary", d.optString("summary"))
-                    put("is_summarized", d.optInt("is_summarized", 0))
-                    put("annotation_json", d.optString("annotation_json"))
-                    put("wrong_count", d.optInt("wrong_count", 1))
-                    put("mastered", d.optInt("mastered", 0))
+                    // 与 applySessions 同规矩：远端缺字段就不覆盖本地已有内容（update 分支省略列即保留原值）
+                    if (d.has("timestamp")) put("timestamp", d.optLong("timestamp", r.updatedAt))
+                    if (d.has("ocr_text")) put("ocr_text", d.optString("ocr_text"))
+                    if (d.has("snapshot")) put("snapshot", d.optString("snapshot"))
+                    if (d.has("bank_question_id")) put("bank_question_id", d.optString("bank_question_id"))
+                    if (d.has("summary")) put("summary", d.optString("summary"))
+                    if (d.has("is_summarized")) put("is_summarized", d.optInt("is_summarized", 0))
+                    if (d.has("annotation_json")) put("annotation_json", d.optString("annotation_json"))
+                    if (d.has("wrong_count")) put("wrong_count", d.optInt("wrong_count", 1))
+                    if (d.has("mastered")) put("mastered", d.optInt("mastered", 0))
                     put("updated_at", r.updatedAt)
                 }
                 db.beginTransaction()
@@ -466,19 +489,22 @@ object SyncData {
                 // 否则本地库被就地写成 blob: 文本，回看该训练时题干/解析图全裂，
                 // 且 updated_at(=finished_at) 不变，坏值还能在 LWW 平局里胜出推给对端
                 val d = JSONObject(restoreBlobs(r.data.toString(), dav, cache))
+                // 只写远端行里确实存在的字段：对端（桌面端/旧版本）行缺字段时，optString/optLong
+                // 的默认值会把本地已有内容抹掉——questions_json 被抹成 "[]" 等于清空整场训练的
+                // 题面快照，且这条"更新"会随即被回推给全网（api_keys 已按此守卫，这里补齐）
                 val v = ContentValues().apply {
-                    put("finished_at", d.optLong("finished_at", r.updatedAt))
-                    put("date_str", d.optString("date_str"))
-                    put("module_id", d.optString("module_id"))
-                    put("module_name", d.optString("module_name"))
-                    put("is_wrong_practice", d.optInt("is_wrong_practice", 0))
-                    put("question_count", d.optInt("question_count", 0))
-                    put("correct_count", d.optInt("correct_count", 0))
-                    put("wrong_count", d.optInt("wrong_count", 0))
-                    put("elapsed_ms", d.optLong("elapsed_ms", 0))
-                    put("rate_min", d.optInt("rate_min", 0))
-                    put("rate_max", d.optInt("rate_max", 100))
-                    put("questions_json", d.optString("questions_json", "[]"))
+                    if (d.has("finished_at")) put("finished_at", d.optLong("finished_at", r.updatedAt))
+                    if (d.has("date_str")) put("date_str", d.optString("date_str"))
+                    if (d.has("module_id")) put("module_id", d.optString("module_id"))
+                    if (d.has("module_name")) put("module_name", d.optString("module_name"))
+                    if (d.has("is_wrong_practice")) put("is_wrong_practice", d.optInt("is_wrong_practice", 0))
+                    if (d.has("question_count")) put("question_count", d.optInt("question_count", 0))
+                    if (d.has("correct_count")) put("correct_count", d.optInt("correct_count", 0))
+                    if (d.has("wrong_count")) put("wrong_count", d.optInt("wrong_count", 0))
+                    if (d.has("elapsed_ms")) put("elapsed_ms", d.optLong("elapsed_ms", 0))
+                    if (d.has("rate_min")) put("rate_min", d.optInt("rate_min", 0))
+                    if (d.has("rate_max")) put("rate_max", d.optInt("rate_max", 100))
+                    if (d.has("questions_json")) put("questions_json", d.optString("questions_json", "[]"))
                     put("sync_key", r.key)
                 }
                 val existingId = db.rawQuery(

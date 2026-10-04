@@ -80,6 +80,7 @@ object SyncEngine {
 
         val stats = mutableListOf<DatasetStat>()
         val errors = mutableListOf<String>()
+        SyncData.roundBlobFailures = 0
 
         // 3. 每数据集：PROPFIND 列文件 -> GET 非自己 -> 导出（blob 边导出边上传）-> 合并 -> 应用 -> PUT
         //    只有连接级失败（code=-1，后续每个数据集都会同样失败）才终止整轮；
@@ -126,6 +127,10 @@ object SyncEngine {
         SyncData.pruneBlobCache(context)
 
         // 有任何数据集失败都不刷新 lastSyncAt：设置页据此提示"上次同步未完成"，下次继续重推
+        val blobFails = SyncData.roundBlobFailures
+        if (blobFails > 0) {
+            errors.add("$blobFails 个配图 blob 未能上传/取回，错题配图可能仍是裂图，下轮自动重试")
+        }
         val clean = errors.isEmpty()
         if (clean) SyncPrefs.setLastSyncAt(context, System.currentTimeMillis())
         return SyncStats(
