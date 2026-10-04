@@ -90,11 +90,14 @@ class AiFailoverExecutor private constructor(
         private val deliveryHandler = Handler(deliveryThread.looper)
 
         /**
-         * 该错误是否值得切换模型（客户端错误与构建失败不值得；被新请求取代也不值得——
-         * 取代是本地调度行为，换模型只会把同一份提示词再烧一遍 token）
+         * 该错误是否值得切换模型（客户端错误不值得；被新请求取代也不值得——
+         * 取代是本地调度行为，换模型只会把同一份提示词再烧一遍 token）。
+         * BUILD 要切换：它来自"用这个模型自己的 baseUrl/key 拼请求"就失败了
+         * （地址多个点、少个 scheme 等），是单个模型的配置问题，
+         * 判成不可切换会让一个写错的地址把整条备用链一起废掉，用户只看到"所有模型均失败"。
          */
         fun isSwitchable(kind: AiErrorKind): Boolean =
-            kind != AiErrorKind.CLIENT && kind != AiErrorKind.BUILD && kind != AiErrorKind.SUPERSEDED
+            kind != AiErrorKind.CLIENT && kind != AiErrorKind.SUPERSEDED
 
         /** 该错误是否先在同模型上重试再切换（429 已在服务层重试过，收到时直接切换） */
         fun isRetryableBeforeSwitch(kind: AiErrorKind): Boolean =
