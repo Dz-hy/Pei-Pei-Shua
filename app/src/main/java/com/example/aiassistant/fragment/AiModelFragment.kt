@@ -17,6 +17,8 @@ import com.example.aiassistant.ModelManager
 import com.example.aiassistant.R
 import com.example.aiassistant.TeacherManager
 import com.example.aiassistant.capDialogWidth
+import com.example.aiassistant.cleanConfigField
+import com.example.aiassistant.cleanConfigFieldChanged
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.switchmaterial.SwitchMaterial
 import com.google.android.material.textfield.TextInputEditText
@@ -236,11 +238,21 @@ class AiModelFragment : Fragment() {
         val dialog = AlertDialog.Builder(ctx, R.style.TransparentDialog)
             .setView(form)
             .setPositiveButton("保存") { _, _ ->
-                val name = etName.text?.toString()?.trim() ?: return@setPositiveButton
-                val url = etUrl.text?.toString()?.trim() ?: ""
-                val key = etKey.text?.toString()?.trim() ?: ""
-                val model = etModel.text?.toString()?.trim() ?: ""
+                val name = cleanConfigField(etName.text)
+                val url = cleanConfigField(etUrl.text)
+                val key = cleanConfigField(etKey.text)
+                val model = cleanConfigField(etModel.text)
                 if (name.isBlank()) return@setPositiveButton
+
+                // 地址缺 scheme 会让请求在建型阶段就抛异常，而错误只会以"所有模型均失败"呈现
+                if (url.isNotEmpty() && !url.startsWith("http://", true) && !url.startsWith("https://", true)) {
+                    Toast.makeText(ctx, "接口地址需以 http:// 或 https:// 开头，当前是「${url.take(12)}…」", Toast.LENGTH_LONG).show()
+                    return@setPositiveButton
+                }
+                if (cleanConfigFieldChanged(etName.text, name) || cleanConfigFieldChanged(etUrl.text, url) ||
+                        cleanConfigFieldChanged(etKey.text, key) || cleanConfigFieldChanged(etModel.text, model)) {
+                    Toast.makeText(ctx, "已去除输入中肉眼看不见的非法字符（控制符/零宽字符），请确认内容无误", Toast.LENGTH_LONG).show()
+                }
 
                 val apiType = when (spApiType.selectedItemPosition) {
                     1 -> "anthropic"

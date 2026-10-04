@@ -5,6 +5,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import com.example.aiassistant.R
+import com.example.aiassistant.cleanConfigField
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.switchmaterial.SwitchMaterial
 import com.google.android.material.textfield.TextInputEditText
@@ -89,8 +90,9 @@ class SyncSettingsActivity : AppCompatActivity() {
             return false
         }
         SyncPrefs.setWebdavUrl(this, url)
-        SyncPrefs.setWebdavAccount(this, etUser.text?.toString().orEmpty(), etPass.text?.toString().orEmpty())
-        SyncPrefs.setDeviceName(this, etDevice.text?.toString().orEmpty()
+        // 账号/应用密码同样要清不可见字符：多一个看不见的字符就是 401，且界面上完全看不出来
+        SyncPrefs.setWebdavAccount(this, cleanConfigField(etUser.text), cleanConfigField(etPass.text))
+        SyncPrefs.setDeviceName(this, cleanConfigField(etDevice.text)
             .ifBlank { SyncPrefs.deviceName(this) })
         SyncPrefs.setSyncApiKeys(this, switchApiKeys.isChecked)
         return true
