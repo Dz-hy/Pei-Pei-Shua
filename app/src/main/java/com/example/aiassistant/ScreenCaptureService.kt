@@ -117,10 +117,12 @@ class ScreenCaptureService : Service() {
 
     // 授权标记的兜底复位：授权页被 ROM 静默拦截、被用户划掉或自身崩溃时，既没有
     // onActivityResult 也没有 DENIED 广播，标记会永久为 true——此后悬浮球单击、
-    // 开始计时等所有入口都走 "已在等待授权" 的死分支，功能整体变砖且无自愈
+    // 开始计时等所有入口都走 "已在等待授权" 的死分支，功能整体变砖且无自愈。
+    // 预算要大于用户走完 Android 14+ 的两步授权（展开下拉→选"共享整个屏幕"→下一步），
+    // 实测 15s 会在弹窗还开着时就复位，导致第二次点击又叠一个授权页
     private val consentTimeoutRunnable = Runnable {
         if (isRequestingConsent) {
-            Log.w(TAG, "授权页 15s 无回声，复位授权标记（截图入口恢复可用）")
+            Log.w(TAG, "授权页长时间无回声，复位授权标记（截图入口恢复可用）")
             isRequestingConsent = false
         }
     }
@@ -497,7 +499,7 @@ class ScreenCaptureService : Service() {
                     Log.e(TAG, "启动授权页失败", e)
                     isRequestingConsent = false
                 }
-                mainHandler.postDelayed(consentTimeoutRunnable, 15_000L)
+                mainHandler.postDelayed(consentTimeoutRunnable, 60_000L)
                 return
             } else {
                 return  // 已经在等待授权，不重复弹窗
@@ -547,7 +549,10 @@ class ScreenCaptureService : Service() {
             reattachSmallBall()
         }
         CloudOcrClient.cancelCurrentRequest()
-        OpenAIApiService.cancelCurrentRequest()
+        // 只收自己这条链：cancel() 内部就是按 OWNER_CAPTURE 取消在途请求。
+        // 早先这里是全量 cancelCurrentRequest()，熄屏一次会把错题详情/做题页正在跑的
+        // 解析一起掐掉
+        aiFailover?.cancel()
     }
 
     private fun onScreenUnlocked() {
@@ -591,8 +596,19 @@ class ScreenCaptureService : Service() {
         }
     }
 
-    /** 屏幕尺寸变化（旋转/折叠屏/分屏）后重建镜像：改 VirtualDisplay 尺寸并换一块同尺寸的取帧表面 */
+    /**
+     * 屏幕尺寸变化（旋转/折叠屏/分屏）后重建镜像：改 VirtualDisplay 尺寸并换一块同尺寸的取帧表面。
+     * 必须排进 CaptureThread：grabFrame 抓完会把镜像重新绑回它**进入时**读到的那块 ImageReader，
+     * 两边不同线程的话，这里刚 close 的旧 reader 会被它重新绑上去，镜像就此指向一块死表面——
+     * 之后每次截图都失败，直到用户重新授权。
+     */
     private fun resizeCaptureDisplay(width: Int, height: Int, density: Int) {
+        val handler = captureHandler
+        if (handler == null) applyCaptureDisplayResize(width, height, density)
+        else handler.post { applyCaptureDisplayResize(width, height, density) }
+    }
+
+    private fun applyCaptureDisplayResize(width: Int, height: Int, density: Int) {
         val vd = virtualDisplay ?: return
         try {
             vd.resize(width, height, density)

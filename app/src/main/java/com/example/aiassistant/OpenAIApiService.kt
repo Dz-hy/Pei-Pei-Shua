@@ -546,13 +546,17 @@ object OpenAIApiService {
 
         call.enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
-                if (call.isCanceled()) {
-                    android.util.Log.d("AIAssistantAPI", "onFailure: Request was canceled.")
-                    return
-                }
+                // 代际判定必须在 isCanceled 之前：取代自己的 cancelOwner 既自增代际又取消 Call，
+                // OkHttp 回调必然带 isCanceled=true，先判 isCanceled 会让 SUPERSEDED 永远送不出去，
+                // 被取代的链路拿不到终态、调用方一直转圈。用户主动取消由 AiFailoverExecutor
+                // 自己的 cancelled 标记吞掉这条回调，不会误报。
                 if (gen != ownerGen(owner)) {
                     android.util.Log.d("AIAssistantAPI", "onFailure: superseded by a newer request")
                     supersededOrCancel()
+                    return
+                }
+                if (call.isCanceled()) {
+                    android.util.Log.d("AIAssistantAPI", "onFailure: Request was canceled.")
                     return
                 }
                 android.util.Log.e("AIAssistantAPI", "onFailure: Network request failed!", e)
@@ -677,8 +681,8 @@ object OpenAIApiService {
 
         call.enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
+                if (gen != ownerGen(owner)) { supersededOrCancel(); return }   // 同上：取代判定先于 isCanceled
                 if (call.isCanceled()) return
-                if (gen != ownerGen(owner)) { supersededOrCancel(); return }
                 android.util.Log.e("AIAssistantAPI", "executeStreamRequest: onFailure", e)
                 report(AiErrorKind.NETWORK, "网络请求失败：${e.message}")
             }
