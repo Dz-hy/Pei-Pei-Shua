@@ -176,7 +176,7 @@ object OpenAIApiService {
         onDelta: ((accumulated: String) -> Unit)? = null,
         owner: String = OWNER_DEFAULT
     ) {
-        analyzeText(ocrText, baseUrl, apiKey, model, systemPrompt, thinking, userMessage, apiType, thinkingBudget, onComplete, onError, onStructuredError, onDelta)
+        analyzeText(ocrText, baseUrl, apiKey, model, systemPrompt, thinking, userMessage, apiType, thinkingBudget, onComplete, onError, onStructuredError, onDelta, owner)
     }
 
     /** 统一视觉/多模态请求核心：完美路由至 OpenAI / Anthropic / Gemini */
