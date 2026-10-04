@@ -93,6 +93,9 @@ class ScreenCaptureService : Service() {
     @Volatile internal var isCapturing = false
     internal var captureTimeoutRunnable: Runnable? = null
 
+    /** 当前看门狗阶段：悬浮球计时据此决定要不要给手动截图让路（见 ScreenCaptureService+Timer.kt） */
+    @Volatile internal var captureStage: CaptureStage? = null
+
     // 悬浮球"引用还在"与"真的挂在窗口上"是两件事：detach 的 removeView 抛异常、或两条路径
     // 各自 reattach 一次，都会让 addView 撞上 IllegalStateException: already been added，
     // 之后球的状态就再也对不上。用显式标记把 add/remove 变成幂等操作。

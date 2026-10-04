@@ -237,7 +237,11 @@ object TimerEngine {
     }
 
     private fun detectTick(service: ScreenCaptureService) {
-        if (service.isCapturing) return   // 用户手动截图/搜题进行中，让路
+        // 用户手动截图/搜题"正在用镜像或蒙层"时让路。只让这三段：AI 分析/题库匹配阶段
+        // 镜像是空闲的，而那段预算是分钟级——照旧无条件让路会让计时停摆十几分钟，
+        // 多题合成一条记录、单题用时虚高且无任何标记
+        val stage = if (service.isCapturing) service.captureStage else null
+        if (stage == CaptureStage.GRAB || stage == CaptureStage.SELECT || stage == CaptureStage.CONFIRM) return
         val pm = service.getSystemService(Context.POWER_SERVICE) as? PowerManager
         if (pm?.isInteractive == false) return   // 熄屏：照常计时，只跳过截屏检测
 

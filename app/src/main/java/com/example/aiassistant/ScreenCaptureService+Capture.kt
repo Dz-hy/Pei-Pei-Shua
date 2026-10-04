@@ -242,11 +242,12 @@ internal fun ScreenCaptureService.downscaleForOcr(bitmap: Bitmap, maxSide: Int =
 
 // ── OCR 后处理：断行合并 ──────────────────────────────────────────────
 
-/** 行首是"新逻辑块"标记：选项（A. B、(A)）、序号（1. 2、（1）①）等，不与上一行合并 */
+/** 行首是"新逻辑块"标记：选项（A. B、(A)、全角Ａ．）、序号（1. 2、（1）①、全角１．）等，不与上一行合并。
+ *  全角必须一起认：OCR 出来的选项常是「Ａ．」「１．」，漏认会把它们当续行粘进上一句题干 */
 private val LINE_START_MARKER = Regex(
-    "^(?:[A-Za-z]{1,2}\\s*[.、．)）]" +
-        "|[0-9]{1,3}\\s*[.、．)）]" +
-        "|[（(][A-Za-z0-9]{1,3}[)）]" +
+    "^(?:[A-Za-zＡ-Ｚａ-ｚ]{1,2}\\s*[.、．)）]" +
+        "|[0-9０-９]{1,3}\\s*[.、．)）]" +
+        "|[（(][A-Za-z0-9Ａ-Ｚａ-ｚ０-９]{1,3}[)）]" +
         "|[①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳]" +
         ")"
 )
@@ -306,11 +307,13 @@ enum class CaptureStage(val budgetMs: Long) {
 
 internal fun ScreenCaptureService.scheduleCaptureWatchdog(stage: CaptureStage) {
     cancelCaptureTimeout()
+    captureStage = stage
     captureTimeoutRunnable = Runnable {
         if (!isCapturing) return@Runnable
         Log.w(ScreenCaptureService.TAG, "Capture watchdog expired in stage $stage (${stage.budgetMs}ms)")
         isCapturing = false
         isSilentCapture = false
+        captureStage = null
         cancelCaptureTimeout()
         ScreenCaptureService.isDictOcrMode = false
         // 只有人工阶段可能还挂着蒙层：撤下它等于替用户点了"取消"，其全屏截图一并回收
@@ -327,6 +330,7 @@ internal fun ScreenCaptureService.scheduleCaptureWatchdog(stage: CaptureStage) {
 internal fun ScreenCaptureService.cancelCaptureTimeout() {
     captureTimeoutRunnable?.let { mainHandler.removeCallbacks(it) }
     captureTimeoutRunnable = null
+    captureStage = null
 }
 
 /**
