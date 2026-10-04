@@ -45,6 +45,7 @@ internal fun ScreenCaptureService.showFloatBall() {
     floatBallView = LayoutInflater.from(this).inflate(R.layout.layout_float_ball, null)
     setupFloatBallTouch(floatBallView!!)
     windowManager.addView(floatBallView, floatBallParams)
+    isFloatBallAttached = true
 }
 
 /** 动态更新悬浮窗常亮状态 */
@@ -70,6 +71,7 @@ internal fun ScreenCaptureService.removeFloatBall() {
         try { windowManager.removeView(it) } catch (_: Exception) {}
         floatBallView = null
     }
+    isFloatBallAttached = false
 }
 
 /** 临时隐藏悬浮球（截图时避免球出现在画面中，保留引用以便重新挂载） */
@@ -77,13 +79,19 @@ internal fun ScreenCaptureService.detachFloatBall() {
     floatBallView?.let {
         try { windowManager.removeView(it) } catch (_: Exception) {}
     }
+    isFloatBallAttached = false
 }
 
 internal fun ScreenCaptureService.reattachFloatBall() {
-    floatBallView?.let { view ->
-        try { windowManager.addView(view, floatBallParams) } catch (e: Exception) {
-            Log.w(ScreenCaptureService.TAG, "reattachFloatBall failed", e)
-        }
+    val view = floatBallView ?: return
+    if (isFloatBallAttached) return
+    try {
+        windowManager.addView(view, floatBallParams)
+        isFloatBallAttached = true
+    } catch (e: Exception) {
+        // addView 抛"已挂载"说明确实还挂着，把标记纠正回来，后续 detach/reattach 才不会再错乱
+        isFloatBallAttached = view.parent != null
+        Log.w(ScreenCaptureService.TAG, "reattachFloatBall failed", e)
     }
 }
 
@@ -231,6 +239,7 @@ internal fun ScreenCaptureService.showSmallBall() {
     smallBallView = LayoutInflater.from(this).inflate(R.layout.layout_small_ball, null)
     setupSmallBallTouch(smallBallView!!)
     windowManager.addView(smallBallView, smallBallParams)
+    isSmallBallAttached = true
 }
 
 internal fun ScreenCaptureService.removeSmallBall() {
@@ -238,19 +247,25 @@ internal fun ScreenCaptureService.removeSmallBall() {
         try { windowManager.removeView(it) } catch (_: Exception) {}
         smallBallView = null
     }
+    isSmallBallAttached = false
 }
 
 internal fun ScreenCaptureService.detachSmallBall() {
     smallBallView?.let {
         try { windowManager.removeView(it) } catch (_: Exception) {}
     }
+    isSmallBallAttached = false
 }
 
 internal fun ScreenCaptureService.reattachSmallBall() {
-    smallBallView?.let { view ->
-        try { windowManager.addView(view, smallBallParams) } catch (e: Exception) {
-            Log.w(ScreenCaptureService.TAG, "reattachSmallBall failed", e)
-        }
+    val view = smallBallView ?: return
+    if (isSmallBallAttached) return
+    try {
+        windowManager.addView(view, smallBallParams)
+        isSmallBallAttached = true
+    } catch (e: Exception) {
+        isSmallBallAttached = view.parent != null
+        Log.w(ScreenCaptureService.TAG, "reattachSmallBall failed", e)
     }
 }
 
@@ -348,7 +363,7 @@ internal fun ScreenCaptureService.onSmallBallClicked() {
     retryCount.set(0)
     isSilentCapture = true
     isCapturing = true
-    scheduleCaptureTimeout()
+    scheduleCaptureWatchdog(CaptureStage.GRAB)
     detachSmallBall()
 
     val mode = AppPreferences.getCaptureMode(this)

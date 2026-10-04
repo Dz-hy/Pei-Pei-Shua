@@ -93,6 +93,12 @@ class ScreenCaptureService : Service() {
     @Volatile internal var isCapturing = false
     internal var captureTimeoutRunnable: Runnable? = null
 
+    // 悬浮球"引用还在"与"真的挂在窗口上"是两件事：detach 的 removeView 抛异常、或两条路径
+    // 各自 reattach 一次，都会让 addView 撞上 IllegalStateException: already been added，
+    // 之后球的状态就再也对不上。用显式标记把 add/remove 变成幂等操作。
+    @Volatile internal var isFloatBallAttached = false
+    @Volatile internal var isSmallBallAttached = false
+
     // ── 屏幕状态 ──────────────────────────────────────────────────────
     private var screenStateReceiver: BroadcastReceiver? = null
     private var orientationListener: BroadcastReceiver? = null
@@ -507,7 +513,7 @@ class ScreenCaptureService : Service() {
         isSilentCapture = false
         isCapturing = true
         removeSmallBall() // 避免小球出现在截图中
-        scheduleCaptureTimeout()
+        scheduleCaptureWatchdog(CaptureStage.GRAB)
 
         val mode = AppPreferences.getCaptureMode(this)
         when (mode) {
@@ -665,6 +671,12 @@ class ScreenCaptureService : Service() {
             ).apply { gravity = Gravity.CENTER }
             windowManager.addView(view, params)
             confirmOverlayView = view
+            // 等用户判断"题目还是材料"：这段是人工时间，空闲计时、每次触摸续期
+            scheduleCaptureWatchdog(CaptureStage.CONFIRM)
+            view.setOnTouchListener { _, _ ->
+                if (isCapturing) scheduleCaptureWatchdog(CaptureStage.CONFIRM)
+                false
+            }
 
             view.findViewById<View>(R.id.btn_kind_question).setOnClickListener {
                 val mat = pendingMaterialText
@@ -676,13 +688,29 @@ class ScreenCaptureService : Service() {
                 // 暂存材料，提示用户再框题目；本次截图用完即回收
                 pendingMaterialText = text
                 originalBitmap.recycle()
+                // 本次截图到此结束，等的是用户下一次框选：状态机必须就地收尾。
+                // 旧实现把它留给 30s 看门狗去兜底，于是每次"暂存材料"都会在半分钟后
+                // 弹一句「截图超时，请重试」，看起来就像错题录入失败了
+                isCapturing = false
+                isSilentCapture = false
+                cancelCaptureTimeout()
                 mainHandler.post {
+                    reattachFloatBall()
+                    reattachSmallBall()
                     Toast.makeText(this, "📄 材料已暂存，请框选这道题的题干部分", Toast.LENGTH_LONG).show()
                 }
             }
         } catch (e: Exception) {
             originalBitmap.recycle()
             Log.e(TAG, "showRecordConfirmOverlay failed", e)
+            // 浮层没弹出来就没有任何后续回调会收尾，本次截图必须就地判失败结束
+            isCapturing = false
+            isSilentCapture = false
+            cancelCaptureTimeout()
+            mainHandler.post {
+                reattachFloatBall()
+                reattachSmallBall()
+            }
         }
     }
 
@@ -695,6 +723,8 @@ class ScreenCaptureService : Service() {
 
     /** 确认"这是题目"后进入匹配链：带暂存材料（如有）匹配，流程结束清暂存 */
     private fun proceedWrongMatch(text: String, originalBitmap: Bitmap, materialText: String?) {
+        // 三级匹配里的 LLM 裁判最长等 90s×模型数，预算必须按这条链给，不能按截图给
+        scheduleCaptureWatchdog(CaptureStage.MATCH)
         captureHandler?.post {
             // 三级匹配链：①材料单独匹配→FTS/LCS 快筛 ②向量召回 ③LLM 裁决（材料对比）
             com.example.aiassistant.questionbank.QuestionMatcher.match(
@@ -739,13 +769,7 @@ class ScreenCaptureService : Service() {
         if (mediaProjection == null || imageReader == null || virtualDisplay == null) {
             bitmap.recycle()
             isDictOcrMode = false
-            updateResultCard("❌ 录屏已失效，请重新开启悬浮球")
-            if (isSilentCapture) {
-                isCapturing = false
-                isSilentCapture = false
-                cancelCaptureTimeout()
-                mainHandler.post { reattachSmallBall() }
-            }
+            endCaptureWithHint("❌ 录屏已失效，请重新开启悬浮球")
             return
         }
 
@@ -767,6 +791,9 @@ class ScreenCaptureService : Service() {
 
         val requestId = System.currentTimeMillis()
         currentRequestId = requestId
+        // 进入自动阶段（OCR→题库→AI 故障转移链）：预算给到整条链的最坏耗时，
+        // 中途任何终态回调都会 cancelCaptureTimeout
+        scheduleCaptureWatchdog(CaptureStage.AI)
 
         val t0 = System.currentTimeMillis()
         val questionType = AppPreferences.getCurrentQuestionType(this)
@@ -819,13 +846,10 @@ class ScreenCaptureService : Service() {
                     val activeModel = getActiveModelConfig()
                     if (activeModel != null && !activeModel.isVision) {
                         hideBallProgress()
-                        updateResultCard(
+                        endCaptureWithHint(
                             "⚠️ 当前模型「${activeModel.name}」不支持多模态识图。\n\n" +
-                            "💡 图形推理或截图模式需要识别图像，请点击顶部「👤 老师」或进入系统设置切换为支持识图的模型（如 gpt-4o 等），以展示图文解析。",
-                            isAiResponse = false
+                            "💡 图形推理或截图模式需要识别图像，请点击顶部「👤 老师」或进入系统设置切换为支持识图的模型（如 gpt-4o 等），以展示图文解析。"
                         )
-                        isCapturing = false
-                        cancelCaptureTimeout()
                         return@post
                     }
                     requestVisionAnalysis(jpegBase64, t0, requestId)
@@ -860,13 +884,13 @@ class ScreenCaptureService : Service() {
 
                         if (ocrUrl.isBlank()) {
                             recycleInput()
-                            updateResultCard("❌ 未配置云端 OCR 地址，请在设置-OCR模型中填写")
+                            endCaptureWithHint("❌ 未配置云端 OCR 地址，请在设置-OCR模型中填写")
                             return@post
                         }
 
                         if (ocrToken.isBlank()) {
                             recycleInput()
-                            updateResultCard("❌ 未配置云端 OCR Token，请在设置中填写")
+                            endCaptureWithHint("❌ 未配置云端 OCR Token，请在设置中填写")
                             return@post
                         }
 
@@ -877,7 +901,7 @@ class ScreenCaptureService : Service() {
                                     val cleanedText = mergeWrappedLines(
                                         rawText.lines().map { it.trim() }.filter { it.isNotEmpty() }.joinToString("\n")
                                     )
-                                    if (cleanedText.isBlank()) { recycleInput(); updateResultCard("❌ 云端 OCR 返回空文本"); return@parseText }
+                                    if (cleanedText.isBlank()) { recycleInput(); endCaptureWithHint("❌ 云端 OCR 返回空文本"); return@parseText }
                                     
                                     if (AppPreferences.getFloatClickAction(this@ScreenCaptureService) == AppPreferences.CLICK_ACTION_RECORD_WRONG) {
                                         if (scaled !== bitmap) bitmap.recycle()
@@ -891,13 +915,13 @@ class ScreenCaptureService : Service() {
                                     showLoading("✅ 识别到 ${cleanedText.length} 个字 (${ocrTime}ms)\n正在请求 AI...")
                                     requestAiAnalysis(cleanedText, t0, requestId)
                                 },
-                                onError = { if (currentRequestId == requestId) { recycleInput(); updateResultCard("❌ 云端 OCR 失败：$it") } })
+                                onError = { if (currentRequestId == requestId) { recycleInput(); endCaptureWithHint("❌ 云端 OCR 失败：$it") } })
                         } else {
                             CloudOcrClient.parseLayout(bitmap = scaled, url = ocrUrl, token = ocrToken,
                                 onSuccess = { markdownText ->
                                     if (currentRequestId != requestId) return@parseLayout
                                     val cleanedText = markdownText.lines().map { it.trim() }.filter { it.isNotEmpty() }.joinToString("\n")
-                                    if (cleanedText.isBlank()) { recycleInput(); updateResultCard("❌ 云端 OCR 返回空文本"); return@parseLayout }
+                                    if (cleanedText.isBlank()) { recycleInput(); endCaptureWithHint("❌ 云端 OCR 返回空文本"); return@parseLayout }
 
                                     if (AppPreferences.getFloatClickAction(this@ScreenCaptureService) == AppPreferences.CLICK_ACTION_RECORD_WRONG) {
                                         if (scaled !== bitmap) bitmap.recycle()
@@ -911,7 +935,7 @@ class ScreenCaptureService : Service() {
                                     showLoading("✅ 识别到 ${cleanedText.length} 个字 (${ocrTime}ms)\n正在请求 AI...")
                                     requestAiAnalysis(cleanedText, t0, requestId)
                                 },
-                                onError = { if (currentRequestId == requestId) { recycleInput(); updateResultCard("❌ 云端 OCR 失败：$it") } })
+                                onError = { if (currentRequestId == requestId) { recycleInput(); endCaptureWithHint("❌ 云端 OCR 失败：$it") } })
                         }
                     } else {
                         if (!ocrAvailable || ocrCrashRecovering) {
@@ -920,13 +944,7 @@ class ScreenCaptureService : Service() {
                                 "⚠️ 本地OCR上次崩溃，已自动禁用\n请在设置中配置云端OCR，或重启应用重试"
                             else
                                 "❌ 文字识别引擎未就绪，请重启应用"
-                            updateResultCard(msg)
-                            if (isSilentCapture) {
-                                isCapturing = false
-                                isSilentCapture = false
-                                cancelCaptureTimeout()
-                                mainHandler.post { reattachSmallBall() }
-                            }
+                            endCaptureWithHint(msg)
                             return@post
                         }
 
@@ -944,7 +962,7 @@ class ScreenCaptureService : Service() {
 
                         if (result == null) {
                             recycleInput()
-                            updateResultCard("❌ 文字识别失败")
+                            endCaptureWithHint("❌ 文字识别失败")
                             return@post
                         }
 
@@ -953,7 +971,7 @@ class ScreenCaptureService : Service() {
 
                         if (ocrText.isBlank()) {
                             recycleInput()
-                            updateResultCard("❌ 未识别到文字，请重新截图")
+                            endCaptureWithHint("❌ 未识别到文字，请重新截图")
                             return@post
                         }
 
@@ -1085,7 +1103,7 @@ class ScreenCaptureService : Service() {
 
         if (modelList.isEmpty()) {
             Log.e(TAG, "模型故障转移链已尝试完毕，全部失败")
-            updateResultCard("❌ 所有可用 AI 模型均请求失败，最后重试已终止。")
+            endCaptureWithHint("❌ 所有可用 AI 模型均请求失败，最后重试已终止。")
             hideBallProgress()
             return
         }
@@ -1108,7 +1126,7 @@ class ScreenCaptureService : Service() {
                 }
             } else {
                 Log.e(TAG, "AI请求失败: $lastError")
-                updateResultCard("❌ 所有模型均请求失败，最后错误：$lastError")
+                endCaptureWithHint("❌ 所有模型均请求失败，最后错误：$lastError")
             }
         }
 
@@ -1385,7 +1403,7 @@ class ScreenCaptureService : Service() {
 
         if (modelList.isEmpty()) {
             Log.e(TAG, "多模态容错链尝试完毕，均失败")
-            updateResultCard("❌ 所有可用视觉/备用大模型均调用失败。")
+            endCaptureWithHint("❌ 所有可用视觉/备用大模型均调用失败。")
             hideBallProgress()
             return
         }
@@ -1427,7 +1445,7 @@ class ScreenCaptureService : Service() {
                 }
             } else {
                 Log.e(TAG, "视觉大模型请求失败: $lastError")
-                updateResultCard("❌ 所有备用视觉模型均请求失败，最后错误：$lastError")
+                endCaptureWithHint("❌ 所有备用视觉模型均请求失败，最后错误：$lastError")
             }
         }
 

@@ -288,30 +288,66 @@ private fun canMergeWithNext(prevLine: String, nextLine: String): Boolean {
     return true
 }
 
-// ── 超时管理 ──────────────────────────────────────────────────────────
+// ── 看门狗（按阶段设预算） ────────────────────────────────────────────
 
-internal fun ScreenCaptureService.scheduleCaptureTimeout() {
+/**
+ * 截图看门狗的阶段。旧实现只有一个 30s 预算，从点击悬浮球起一路罩住"用户拖框 → OCR →
+ * 三级匹配（LLM 裁判最长 90s×3）/AI 故障转移链"，正常流程必然被判超时：蒙层在用户手里被
+ * 撤掉（选区消失、无法点确认），或在录错题中途弹「截图超时，请重试」。
+ * 现在每个阶段只对自己的耗时有发言权，人工阶段每次触摸重新计时。
+ */
+enum class CaptureStage(val budgetMs: Long) {
+    GRAB(15_000L),        // 取帧：拿不到帧就是真卡住了
+    SELECT(90_000L),      // 用户框选（空闲计时，触摸续期）
+    CONFIRM(90_000L),     // 用户确认"这是题目/这是材料"（空闲计时，触摸续期）
+    MATCH(300_000L),      // 题库三级匹配
+    AI(660_000L),         // AI 故障转移链（流式 callTimeout 600s + 退避余量）
+}
+
+internal fun ScreenCaptureService.scheduleCaptureWatchdog(stage: CaptureStage) {
     cancelCaptureTimeout()
     captureTimeoutRunnable = Runnable {
-        if (isCapturing) {
-            Log.w(ScreenCaptureService.TAG, "Capture timed out after 30s — resetting isCapturing")
-            isCapturing = false
-            cancelCaptureTimeout()
-            // 撤下仍在前台的框选蒙层并回收其全屏截图，与取消路径（onCancelled）对齐；
-            // 否则超时后用户仍可确认选区触发 sendToAI，与复位后的状态机不一致
-            removeAreaOverlay()
-            areaOverlayBitmap?.let { if (!it.isRecycled) it.recycle() }
-            areaOverlayBitmap = null
-            reattachFloatBall()
-            Toast.makeText(this, "截图超时，请重试", Toast.LENGTH_SHORT).show()
-        }
+        if (!isCapturing) return@Runnable
+        Log.w(ScreenCaptureService.TAG, "Capture watchdog expired in stage $stage (${stage.budgetMs}ms)")
+        isCapturing = false
+        isSilentCapture = false
+        cancelCaptureTimeout()
+        ScreenCaptureService.isDictOcrMode = false
+        // 只有人工阶段可能还挂着蒙层：撤下它等于替用户点了"取消"，其全屏截图一并回收
+        removeAreaOverlay()
+        areaOverlayBitmap?.let { if (!it.isRecycled) it.recycle() }
+        areaOverlayBitmap = null
+        reattachFloatBall()
+        reattachSmallBall()
+        Toast.makeText(this, "截图超时，请重试", Toast.LENGTH_SHORT).show()
     }
-    mainHandler.postDelayed(captureTimeoutRunnable!!, 30_000L)
+    mainHandler.postDelayed(captureTimeoutRunnable!!, stage.budgetMs)
 }
 
 internal fun ScreenCaptureService.cancelCaptureTimeout() {
     captureTimeoutRunnable?.let { mainHandler.removeCallbacks(it) }
     captureTimeoutRunnable = null
+}
+
+/**
+ * 本次截图以一条提示收尾。有结果卡时把提示写进卡片（由用户关闭，关闭时收尾状态机）；
+ * 没有卡片（「仅记录错题」模式不出卡）时必须就地收尾并 Toast——否则 isCapturing 一直为
+ * true，此后每次点悬浮球都只得到一句"正在处理中，请稍候..."，只能等看门狗超时自愈。
+ */
+internal fun ScreenCaptureService.endCaptureWithHint(text: String) {
+    if (resultCardView != null) {
+        updateResultCard(text)
+        return
+    }
+    isCapturing = false
+    isSilentCapture = false
+    cancelCaptureTimeout()
+    ScreenCaptureService.isDictOcrMode = false
+    mainHandler.post {
+        reattachFloatBall()
+        reattachSmallBall()
+        Toast.makeText(this, text, Toast.LENGTH_LONG).show()
+    }
 }
 
 // ── 区域选择覆盖层 ────────────────────────────────────────────────────
@@ -359,6 +395,10 @@ internal fun ScreenCaptureService.showAreaSelectionOverlay(fullBitmap: Bitmap, s
             ScreenCaptureService.isDictOcrMode = false
             fullBitmap.recycle()
             areaOverlayBitmap = null
+        },
+        // 用户还在拖框/挪选区就不算卡住：每次触摸把框选预算重新发满
+        onUserActivity = {
+            if (isCapturing) scheduleCaptureWatchdog(CaptureStage.SELECT)
         }
     )
 
@@ -375,6 +415,7 @@ internal fun ScreenCaptureService.showAreaSelectionOverlay(fullBitmap: Bitmap, s
 
     areaOverlayView = overlay
     windowManager.addView(overlay, params)
+    scheduleCaptureWatchdog(CaptureStage.SELECT)
 }
 
 internal fun ScreenCaptureService.removeAreaOverlay() {

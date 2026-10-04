@@ -15,7 +15,9 @@ import android.view.View
 class AreaSelectionOverlay(
     context: Context,
     private val onAreaSelected: (Rect) -> Unit,
-    private val onCancelled: () -> Unit
+    private val onCancelled: () -> Unit,
+    /** 每次触摸都回调一次：供调用方给"人工框选"阶段的看门狗续期，避免用户还在拖框就被撤掉蒙层 */
+    private val onUserActivity: () -> Unit = {}
 ) : View(context) {
 
     // 画笔：半透明蒙层
@@ -113,6 +115,7 @@ class AreaSelectionOverlay(
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        onUserActivity()
         val x = event.x
         val y = event.y
 
