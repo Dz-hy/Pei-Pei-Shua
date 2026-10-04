@@ -33,7 +33,9 @@ object NewsFetcher {
      */
     private fun decodeBody(bytes: ByteArray, contentType: okhttp3.MediaType?): String {
         val declared = contentType?.charset()
-        if (declared != null && !declared.name().equals("UTF-8", ignoreCase = true)) {
+        // 头里明示了编码（含 UTF-8）就以头为准：只有头什么都没写才去嗅探 meta。
+        // 否则一个残留的 <meta charset="gbk"> 会把正确的 UTF-8 页面解成乱码
+        if (declared != null) {
             return try { String(bytes, declared) } catch (_: Exception) { String(bytes, Charsets.UTF_8) }
         }
         val head = String(bytes, 0, minOf(bytes.size, 2048), Charsets.ISO_8859_1)

@@ -321,6 +321,10 @@ object ShizhengManager {
     private fun generateFor(source: String, articles: List<NewsArticle>, quota: Int) {
         val label = NewsSources.label(source)
         var generated = 0
+        // 连续瞬时失败计数：只凭"这次是瞬时失败"就 break 整批，会让队首一篇确定性却被判瞬时的
+        // 文章（持续空响应/5xx）把本来源其余文章永久挡在出题之外——每轮都在它身上收手。
+        // 连到 2 次才收手：断网时同样只多花一次尝试，毒题则不再卡住整批。
+        var transientStreak = 0
         for ((i, article) in articles.withIndex()) {
             if (generated >= quota) break
             // 跳过已经处理过的（防止断点续跑时重复出题）
@@ -334,19 +338,25 @@ object ShizhengManager {
 
             val draft = ShizhengAi.generateQuestion(appContext, article, type)
             if (draft == null) {
-                // 瞬时失败（断网/超时/被别的 AI 请求抢占）保持 PENDING，本次就此收手、下次同步补出；
+                // 瞬时失败（断网/超时/被别的 AI 请求抢占）保持 PENDING，下次同步补出；
                 // 只有确定性失败才判死。否则弱网环境一次同步就能把整期文章全部标成 DROPPED
                 if (ShizhengAi.lastFailure == ShizhengAi.ShizhengFailure.TRANSIENT) {
-                    notifySync(
-                        "出题暂时失败（${ShizhengAi.lastError ?: "网络/超时"}），" +
-                            "本来源剩余文章保留待下次同步重试"
-                    )
-                    break
+                    transientStreak++
+                    if (transientStreak >= 2) {
+                        notifySync(
+                            "出题连续暂时失败（${ShizhengAi.lastError ?: "网络/超时"}），" +
+                                "本来源剩余文章保留待下次同步重试"
+                        )
+                        break
+                    }
+                    notifySync("这篇暂时出题失败，先留着下次重试：${article.title.take(18)}…")
+                    continue
                 }
                 notifySync("出题失败，跳过：${article.title.take(18)}…")
                 db.markQuestionDropped(article.id)
                 continue
             }
+            transientStreak = 0
 
             notifySync("正在自检题目…")
             val review = ShizhengAi.reviewQuestion(appContext, article, draft)
