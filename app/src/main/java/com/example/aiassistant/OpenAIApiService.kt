@@ -679,22 +679,32 @@ object OpenAIApiService {
         registerCall(owner, call)
         synchronized(this) { currentCall = call }
 
-        // 首字超时：思考型网关可以连着几分钟只推 reasoning_content（本层不认作正文），
-        // 用户看到的就是"点了 AI 解析没反应"，实测最长挂死 12 分钟且没有任何终态。
-        // 到点主动取消并给一次失败回调，让界面明确报错而不是干等 callTimeout 的 600 秒。
+        // 两级守卫：60s 内连字节都没有 = 连接挂了；180s 内只有思考没有正文 = 网关只推 reasoning_content。
+        // 二者原本都没有终点：请求会一直挂着，直到 callTimeout 600 秒才动，界面上只是干转圈。
+        // 注：本文件曾把这里描述成"实测挂死 12 分钟无输出"，那是用 uiautomator 取文本做观测的误判——
+        // 解析结果实际渲染成功（该页内容不在无障碍树里）。守卫本身仍然成立，但结论以截图为准。
+        val sawAnyDelta = java.util.concurrent.atomic.AtomicBoolean(false)
         val sawContent = java.util.concurrent.atomic.AtomicBoolean(false)
-        val firstTokenTimeoutMs = 60_000L
-        val firstTokenGuard = Runnable {
-            if (!sawContent.get() && !delivered.get()) {
+        val firstDeltaTimeoutMs = 60_000L
+        val contentTimeoutMs = 180_000L
+        val firstDeltaGuard = Runnable {
+            if (!sawAnyDelta.get() && !delivered.get()) {
                 try { call.cancel() } catch (_: Exception) {}
-                report(AiErrorKind.EMPTY,
-                        "AI 在 ${firstTokenTimeoutMs / 1000} 秒内没有返回正文（可能一直在输出思考过程），已停止等待")
+                report(AiErrorKind.EMPTY, "AI ${firstDeltaTimeoutMs / 1000} 秒内没有任何响应，已停止等待")
             }
         }
-        retryHandler.postDelayed(firstTokenGuard, firstTokenTimeoutMs)
-        fun stopFirstTokenGuard() {
-            sawContent.set(true)
-            retryHandler.removeCallbacks(firstTokenGuard)
+        val contentGuard = Runnable {
+            if (!sawContent.get() && !delivered.get()) {
+                try { call.cancel() } catch (_: Exception) {}
+                report(AiErrorKind.EMPTY, "AI 只输出了思考过程、未生成正文，已停止等待（可重试或改用其他模型）")
+            }
+        }
+        retryHandler.postDelayed(firstDeltaGuard, firstDeltaTimeoutMs)
+        retryHandler.postDelayed(contentGuard, contentTimeoutMs)
+        fun markDelta(hasContent: Boolean) {
+            sawAnyDelta.set(true)
+            if (hasContent) sawContent.set(true)
+            retryHandler.removeCallbacks(firstDeltaGuard)
         }
 
         call.enqueue(object : Callback {
@@ -747,6 +757,16 @@ object OpenAIApiService {
                     }
 
                     val accumulated = StringBuilder()
+                    val thinking = StringBuilder()
+                    var lastThinkPost = 0L
+                    /** 思考过程的实时预览：只为让界面"在动"，不计入最终正文 */
+                    fun postThinking() {
+                        val now = android.os.SystemClock.elapsedRealtime()
+                        if (now - lastThinkPost < 300) return
+                        lastThinkPost = now
+                        val snapshot = "🤔 思考中…\n" + thinking.toString()
+                        retryHandler.post { if (gen == ownerGen(owner)) onDelta(snapshot) }
+                    }
                     var lastUiPost = 0L
                     fun postDelta(force: Boolean) {
                         val now = android.os.SystemClock.elapsedRealtime()
@@ -780,15 +800,25 @@ object OpenAIApiService {
                             try {
                                 val chunk = JSONObject(payload)
                                 val choice = chunk.optJSONArray("choices")?.optJSONObject(0) ?: continue
-                                var piece = choice.optJSONObject("delta")?.optString("content", "") ?: ""
+                                val delta = choice.optJSONObject("delta")
+                                var piece = delta?.optString("content", "") ?: ""
                                 if (piece.isEmpty()) {
                                     // 个别实现不分 delta、整段放在 message.content
                                     piece = choice.optJSONObject("message")?.optString("content", "") ?: ""
                                 }
                                 if (piece.isNotEmpty()) {
-                                    stopFirstTokenGuard()
+                                    markDelta(hasContent = true)
                                     accumulated.append(piece)
                                     postDelta(force = false)
+                                } else {
+                                    // 思考型实现的 reasoning_content：不当正文，但要让用户看到"在动"
+                                    val think = delta?.optString("reasoning_content", "")
+                                            ?.ifEmpty { delta.optString("reasoning", "") } ?: ""
+                                    if (think.isNotEmpty()) {
+                                        markDelta(hasContent = false)
+                                        thinking.append(think)
+                                        postThinking()
+                                    }
                                 }
                             } catch (_: Exception) {
                                 // 心跳/杂项行忽略
