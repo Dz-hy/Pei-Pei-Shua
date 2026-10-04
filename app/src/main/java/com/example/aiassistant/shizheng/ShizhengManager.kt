@@ -22,6 +22,10 @@ object ShizhengManager {
     private const val KEY_QIUSHI_ISSUE = "last_qiushi_issue_url"
     private const val KEY_ORG_ISSUE = "last_org_stage_date"
     private const val KEY_LAST_SYNC = "last_sync_at"
+    private const val KEY_LAST_AUTO_CHECK = "last_auto_check_at"
+
+    /** 前台补抓的最小间隔：源站按天/按周更新，抓得再勤也只是白耗流量 */
+    private const val AUTO_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000L
 
     /** 每轮同步的出题上限（求是每期约 10 题、组织人事报每期 5 题） */
     private const val QIUSHI_QUOTA = 10
@@ -71,6 +75,20 @@ object ShizhengManager {
 
     /** 上次完整同步时间（展示用） */
     fun lastSyncText(): String? = db.getMeta(KEY_LAST_SYNC)
+
+    /**
+     * 回到前台时补抓一次：原先只有冷启动才同步，而多数人从不真正冷启动（App 常驻后台），
+     * 时政就能连着几天不更新。按 AUTO_CHECK_INTERVAL 节流，跨过间隔才真的走网络。
+     */
+    fun maybeAutoSyncOnForeground() {
+        if (!::db.isInitialized) return
+        val now = System.currentTimeMillis()
+        val last = db.getMeta(KEY_LAST_AUTO_CHECK)?.toLongOrNull() ?: 0L
+        // last 在未来说明时钟被回拨，此时必须重抓，否则会被自己的节流永久卡住
+        if (last in 1 until now && now - last < AUTO_CHECK_INTERVAL_MS) return
+        db.setMeta(KEY_LAST_AUTO_CHECK, now.toString())
+        checkAndSync()
+    }
 
     /** 打开 App / 手动点「检查更新」时触发。同步中重复调用会被忽略 */
     fun checkAndSync() {

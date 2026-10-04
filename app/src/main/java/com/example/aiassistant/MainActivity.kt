@@ -123,11 +123,14 @@ class MainActivity : AppCompatActivity(), HomeFragment.ServiceControlListener {
         if (intent != null) handleIntent(intent)
         setupZenCalendar()
 
-        // 打开应用时静默检查时政更新（仅冷启动，旋转重建不触发）
-        if (savedInstanceState == null) {
-            ShizhengManager.checkAndSync()
-        }
+        // 时政更新改到 onResume 里按节流触发：只挂冷启动的话，App 常驻后台的用户
+        // 几天都不会真正冷启动，时政就一直不更新
         LaunchPerf.mark("MainActivity.onCreate end")
+    }
+
+    override fun onResume() {
+        super.onResume()
+        ShizhengManager.maybeAutoSyncOnForeground()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
