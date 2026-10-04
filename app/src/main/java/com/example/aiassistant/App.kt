@@ -50,7 +50,10 @@ class App : Application() {
                     "${ex.javaClass.simpleName} ${ex.message}",
                 ex
             )
-            if (isMain) previousHandler?.uncaughtException(thread, ex)
+            if (isMain || ex is Error) previousHandler?.uncaughtException(thread, ex)
+            // Error（OOM / StackOverflowError / 链接错误）不吞：吞掉换来的是一个"还在跑但已不可信"
+            // 的进程——线程池少一条线程、写库半途而废，比一次崩溃更难排查。
+            // 只兜 Exception 类（WCDB BUSY、单行超大、畸形 JSON 这类可恢复的运行时异常）
         }
 
         // 初始化 Skills 工具注册
