@@ -1033,6 +1033,23 @@ object OpenAIApiService {
             report(AiErrorKind.SUPERSEDED, "请求已被新的 AI 请求取代")
         }
         if (round >= maxRounds) {
+            if (tools != null) {
+                // 轮次用尽不等于失败：资料已经在 messages 里，撤掉工具、要求直接作答，
+                // 让用户拿到一段结论。原先这里直接判失败并切换模型，等于把 3 轮成果全部作废，
+                // 换到的模型又从第 0 轮重来——实测一次解析等 2 分钟以上仍拿不到答案。
+                messages.put(JSONObject().apply {
+                    put("role", "user")
+                    put("content", "已达到工具调用次数上限。请不要再调用任何工具，" +
+                            "立即基于上面已获得的信息直接给出最终解答。")
+                })
+                executeToolLoop(
+                    context, baseUrl, apiKey, model, apiType,
+                    thinking, thinkingBudget, messages, null,
+                    round + 1, maxRounds, onToolCall, onComplete, onError,
+                    onStructuredError, owner
+                )
+                return
+            }
             report(AiErrorKind.TOOL_LIMIT, "工具调用轮次超限（最多 $maxRounds 轮），已终止")
             return
         }
